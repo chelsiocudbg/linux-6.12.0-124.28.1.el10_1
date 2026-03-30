@@ -207,6 +207,7 @@ static int ocrdma_register_device(struct ocrdma_dev *dev)
 	if (ocrdma_get_asic_type(dev) == OCRDMA_ASIC_GEN_SKH_R)
 		ib_set_device_ops(&dev->ibdev, &ocrdma_dev_srq_ops);
 
+        dev->ibdev.groups[1] = &ocrdma_attr_group;
 	ret = ib_device_set_netdev(&dev->ibdev, dev->nic_info.netdev, 1);
 	if (ret)
 		return ret;

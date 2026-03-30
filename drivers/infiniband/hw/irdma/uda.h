@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2016 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2016 - 2023 Intel Corporation */
 #ifndef IRDMA_UDA_H
 #define IRDMA_UDA_H
 
@@ -11,6 +11,7 @@ struct irdma_sc_cqp;
 
 struct irdma_ah_info {
 	struct irdma_sc_vsi *vsi;
+	struct irdma_cqp_request *cqp_request;
 	u32 pd_idx;
 	u32 dst_arpindex;
 	u32 dest_ip_addr[4];

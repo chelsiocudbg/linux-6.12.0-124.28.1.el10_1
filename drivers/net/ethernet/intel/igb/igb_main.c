@@ -5573,6 +5573,13 @@ static void igb_watchdog_task(struct work_struct *work)
 	u32 connsw;
 	u16 phy_data, retry_count = 20;
 
+	// if the hardware is unresponsive (returns 0xFFs) we need to check back later
+	// otherwise we can take too long in igb_has_link and impacting other users of the work queue
+	rd32(E1000_CTRL);
+	if (!hw->hw_addr)
+		// the hardware is unresponsive, check again later
+        goto no_hw_addr;
+
 	link = igb_has_link(adapter);
 
 	if (adapter->flags & IGB_FLAG_NEED_LINK_UPDATE) {
@@ -5789,6 +5796,7 @@ no_wait:
 	    (adapter->hw.mac.type == e1000_i354))
 		igb_check_lvmmc(adapter);
 
+no_hw_addr:
 	/* Reset the timer */
 	if (!test_bit(__IGB_DOWN, &adapter->state)) {
 		if (adapter->flags & IGB_FLAG_NEED_LINK_UPDATE)

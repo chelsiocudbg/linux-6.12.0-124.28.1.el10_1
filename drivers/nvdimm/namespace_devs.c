@@ -2228,3 +2228,33 @@ int nd_region_register_namespaces(struct nd_region *nd_region, int *err)
 
 	return i;
 }
+
+#ifdef CONFIG_SPARSEMEM
+#define PFN_SECTION_ALIGN_DOWN(x) SECTION_ALIGN_DOWN(x)
+#define PFN_SECTION_ALIGN_UP(x) SECTION_ALIGN_UP(x)
+#else
+/*
+ * In this case ZONE_DEVICE=n and we will disable 'pfn' device support,
+ * but we still want pmem to compile.
+ */
+#define PFN_SECTION_ALIGN_DOWN(x) (x)
+#define PFN_SECTION_ALIGN_UP(x) (x)
+#endif
+
+int setup_pgmap_resource(struct nd_namespace_io *nsio, u32 start_pad, u32 end_trunc, struct dev_pagemap *pgmap)
+{
+        struct range *range = &pgmap->range;
+        u64 aligned_pfn = PFN_SECTION_ALIGN_UP(PAGE_ALIGN(nsio->res.start + start_pad) >> PAGE_SHIFT);
+        resource_size_t base = aligned_pfn << PAGE_SHIFT;
+
+        range->start = base;
+        range->end = nsio->res.end - end_trunc;
+        aligned_pfn = PFN_SECTION_ALIGN_DOWN((range->end + 1) >> PAGE_SHIFT);
+        range->end = (aligned_pfn << PAGE_SHIFT) -1;
+        pgmap->nr_range = 1;
+        printk(KERN_INFO "setup_pgmap_resource: nsio region: %pr, pgmap adjusted region %llx %llx\n", &nsio->res, range->start, range->end);
+        if (range->start >= nsio->res.end || range->start >= range->end)
+                return -EINVAL;
+        return 0;
+}
+EXPORT_SYMBOL(setup_pgmap_resource);

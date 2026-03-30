@@ -225,6 +225,13 @@ module_param(ips, charp, 0);
 #define DEBUG_VAR(i, s, v...)
 #endif
 
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+
 /*
  * Function prototypes
  */

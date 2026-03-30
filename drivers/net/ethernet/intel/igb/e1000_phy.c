@@ -6,6 +6,9 @@
 #include <linux/if_ether.h>
 #include "e1000_mac.h"
 #include "e1000_phy.h"
+#include <linux/netdevice.h>
+#include <linux/pci.h>
+#include "igb.h"
 
 static s32  igb_phy_setup_autoneg(struct e1000_hw *hw);
 static void igb_phy_force_speed_duplex_setup(struct e1000_hw *hw,
@@ -113,6 +116,10 @@ out:
 s32 igb_read_phy_reg_mdic(struct e1000_hw *hw, u32 offset, u16 *data)
 {
 	struct e1000_phy_info *phy = &hw->phy;
+	struct net_device *netdev = igb_get_hw_dev(hw);
+	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct pci_dev *pdev = adapter->pdev;
+
 	u32 i, mdic = 0;
 	s32 ret_val = 0;
 
@@ -121,7 +128,13 @@ s32 igb_read_phy_reg_mdic(struct e1000_hw *hw, u32 offset, u16 *data)
 		ret_val = -E1000_ERR_PARAM;
 		goto out;
 	}
-
+	/* Nothing to do if the pci hw is down. */
+	if (pdev && pci_channel_offline(pdev)) {
+		hw_dbg("PCI channel is offline\n");
+		ret_val = -E1000_ERR_PHY;
+		goto out;
+	}
+ 
 	/* Set up Op-code, Phy Address, and register offset in the MDI
 	 * Control register.  The MAC will take care of interfacing with the
 	 * PHY to retrieve the desired data.
@@ -169,12 +182,22 @@ out:
 s32 igb_write_phy_reg_mdic(struct e1000_hw *hw, u32 offset, u16 data)
 {
 	struct e1000_phy_info *phy = &hw->phy;
+	struct net_device *netdev = igb_get_hw_dev(hw);
+	struct igb_adapter *adapter = netdev_priv(netdev);
+	struct pci_dev *pdev = adapter->pdev;
+	
 	u32 i, mdic = 0;
 	s32 ret_val = 0;
 
 	if (offset > MAX_PHY_REG_ADDRESS) {
 		hw_dbg("PHY Address %d is out of range\n", offset);
 		ret_val = -E1000_ERR_PARAM;
+		goto out;
+	}
+	/* Nothing to be done if the pci hw is down. */
+	if (pdev && pci_channel_offline(pdev)) {
+		hw_dbg("PCI channel is offline\n");
+		ret_val = -E1000_ERR_PHY;
 		goto out;
 	}
 

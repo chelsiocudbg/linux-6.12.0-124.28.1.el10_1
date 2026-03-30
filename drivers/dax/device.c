@@ -277,11 +277,19 @@ static unsigned long dev_dax_pagesize(struct vm_area_struct *vma)
 	return dev_dax->align;
 }
 
+static struct dev_pagemap *dev_dax_get_dev_pgmap(struct vm_area_struct *vma)
+{
+       struct file *filp = vma->vm_file;
+       struct dev_dax *dev_dax = filp->private_data;
+       return dev_dax->pgmap;
+}
+
 static const struct vm_operations_struct dax_vm_ops = {
 	.fault = dev_dax_fault,
 	.huge_fault = dev_dax_huge_fault,
 	.may_split = dev_dax_may_split,
 	.pagesize = dev_dax_pagesize,
+        .get_dev_pgmap = dev_dax_get_dev_pgmap,
 };
 
 static int dax_mmap(struct file *filp, struct vm_area_struct *vma)

@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2015 - 2023 Intel Corporation */
 #ifndef IRDMA_CM_H
 #define IRDMA_CM_H
 
@@ -288,10 +288,7 @@ struct irdma_cm_node {
 	struct rcu_head rcu_head;
 	struct irdma_mpa_priv_info pdata;
 	struct irdma_sc_ah *ah;
-	union {
-		struct ietf_mpa_v1 mpa_frame;
-		struct ietf_mpa_v2 mpa_v2_frame;
-	};
+	struct ietf_mpa_v2 mpa_v2_frame;
 	struct irdma_kmem_info mpa_hdr;
 	struct iw_cm_id *cm_id;
 	struct hlist_node list;
@@ -387,8 +384,9 @@ int irdma_schedule_cm_timer(struct irdma_cm_node *cm_node,
 
 static inline u8 irdma_tos2dscp(u8 tos)
 {
-#define IRDMA_DSCP_VAL GENMASK(7, 2)
-	return (u8)FIELD_GET(IRDMA_DSCP_VAL, tos);
+#define IRDMA_DSCP_S 2
+#define IRDMA_DSCP GENMASK(7, 2)
+	return FIELD_GET(IRDMA_DSCP, tos);
 }
 
 int irdma_accept(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
@@ -396,18 +394,14 @@ int irdma_reject(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len);
 int irdma_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
 int irdma_create_listen(struct iw_cm_id *cm_id, int backlog);
 int irdma_destroy_listen(struct iw_cm_id *cm_id);
-int irdma_add_arp(struct irdma_pci_f *rf, u32 *ip, bool ipv4, const u8 *mac);
-void irdma_cm_teardown_connections(struct irdma_device *iwdev, u32 *ipaddr,
-				   struct irdma_cm_info *nfo,
-				   bool disconnect_all);
+int irdma_add_arp(struct irdma_pci_f *rf, u32 *ip, const u8 *mac);
 int irdma_cm_start(struct irdma_device *dev);
 int irdma_cm_stop(struct irdma_device *dev);
 bool irdma_ipv4_is_lpb(u32 loc_addr, u32 rem_addr);
 bool irdma_ipv6_is_lpb(u32 *loc_addr, u32 *rem_addr);
-int irdma_arp_table(struct irdma_pci_f *rf, u32 *ip_addr, bool ipv4,
+int irdma_arp_table(struct irdma_pci_f *rf, u32 *ip_addr,
 		    const u8 *mac_addr, u32 action);
-void irdma_if_notify(struct irdma_device *iwdev, struct net_device *netdev,
-		     u32 *ipaddr, bool ipv4, bool ifup);
+void irdma_if_notify_worker(struct work_struct *work);
 bool irdma_port_in_use(struct irdma_cm_core *cm_core, u16 port);
 void irdma_send_ack(struct irdma_cm_node *cm_node);
 void irdma_lpb_nop(struct irdma_sc_qp *qp);

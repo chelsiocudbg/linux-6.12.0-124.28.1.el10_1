@@ -45,6 +45,28 @@
 
 #include "uverbs.h"
 
+#include <linux/memremap.h>
+struct pgmap_umem_entry {
+	struct dev_pagemap *pgmap;
+	unsigned long first_pfn;
+	unsigned long npages;
+	struct list_head node;
+};
+
+#define ib_umem_pgmap(umem) (!list_empty(&umem->pgmap_list))
+
+
+static void put_umem_pgmap_list(struct ib_umem *umem)
+{
+	struct list_head *node, *tmp;
+	list_for_each_safe(node, tmp, &umem->pgmap_list) {
+                struct pgmap_umem_entry *ent = list_entry(node, struct pgmap_umem_entry, node);
+		 put_dev_pagemap(ent->pgmap);
+		 list_del(node);
+		 kfree(ent);
+	}
+}
+
 static void __ib_umem_release(struct ib_device *dev, struct ib_umem *umem, int dirty)
 {
 	bool make_dirty = umem->writable && dirty;
@@ -55,10 +77,16 @@ static void __ib_umem_release(struct ib_device *dev, struct ib_umem *umem, int d
 		ib_dma_unmap_sgtable_attrs(dev, &umem->sgt_append.sgt,
 					   DMA_BIDIRECTIONAL, 0);
 
+	if (ib_umem_pgmap(umem)) {
+		put_umem_pgmap_list(umem);
+		goto free_table;
+	}
+
 	for_each_sgtable_sg(&umem->sgt_append.sgt, sg, i)
 		unpin_user_page_range_dirty_lock(sg_page(sg),
 			DIV_ROUND_UP(sg->length, PAGE_SIZE), make_dirty);
 
+free_table:
 	sg_free_append_table(&umem->sgt_append);
 }
 
@@ -147,6 +175,143 @@ unsigned long ib_umem_find_best_pgsz(struct ib_umem *umem,
 }
 EXPORT_SYMBOL(ib_umem_find_best_pgsz);
 
+
+static unsigned long get_region_single_pgmap(struct ib_umem *umem, unsigned long pg_off)
+{
+	unsigned long addr = ALIGN_DOWN(umem->address, PAGE_SIZE) + (pg_off << PAGE_SHIFT);
+	struct vm_area_struct *vma = find_vma(current->mm, addr);
+	struct dev_pagemap *pgmap, *res;
+	unsigned long first_pfn;
+	unsigned long last_pfn;
+	unsigned long region_first_pfn;
+	unsigned long region_last_pfn;
+	struct pgmap_umem_entry *entry;
+	unsigned long npages = ib_umem_num_pages(umem) - pg_off;
+	unsigned long vma_pages;
+
+	if (!vma)
+		return 0;
+	if (!(vma->vm_flags & VM_SHARED))
+		return 0;
+	if (!(vma->vm_flags & VM_MAYREAD))
+		return 0;
+	if (umem->writable && !(vma->vm_flags & VM_MAYWRITE))
+		return 0;
+	if (!vma->vm_ops->get_dev_pgmap)
+		return 0;
+	vma_pages = (vma->vm_end - addr) >> PAGE_SHIFT;
+	if (vma_pages < npages)
+		npages = vma_pages;
+
+	pgmap = vma->vm_ops->get_dev_pgmap(vma);
+	if (!pgmap)
+		return 0;
+
+	if (pgmap_altmap(pgmap))
+		first_pfn = pgmap->altmap.base_pfn + pgmap->altmap.reserve + pgmap->altmap.alloc + pgmap->altmap.align;
+	else
+		first_pfn = (PAGE_ALIGN(pgmap->range.start)) >> PAGE_SHIFT;
+	last_pfn =  (pgmap->range.end + 1) >> PAGE_SHIFT;
+
+
+	region_first_pfn = linear_page_index(vma, addr)  + first_pfn;
+	region_last_pfn = linear_page_index(vma, addr + (npages << PAGE_SHIFT))  + first_pfn;
+	if (region_first_pfn < first_pfn || region_first_pfn > last_pfn)
+		return 0;
+	if (region_last_pfn <= first_pfn || region_last_pfn > last_pfn)
+		return 0;
+
+	/* bound checking OK */
+	res = get_dev_pagemap(first_pfn, NULL);
+	if (res == pgmap) {
+		entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+		if (!entry)
+			return 0;
+		entry->pgmap = pgmap;
+		entry->npages = npages;
+		entry->first_pfn = region_first_pfn;
+		list_add_tail(&entry->node, &umem->pgmap_list);
+	} else {
+		put_dev_pagemap(res);
+		return 0;
+	}
+	return npages;
+}
+
+static int fast_populate_sglist_with_pgmap(struct ib_umem *umem,struct ib_device *device)
+{
+	size_t max_segment_pages;
+	unsigned long chunks = 0;
+	unsigned long npages, done_pages = 0, all_pages;
+	struct page *pg;
+	struct scatterlist *sg, *next_sg;
+	int ret;
+	struct list_head *node;
+
+	INIT_LIST_HEAD(&umem->pgmap_list);
+	all_pages = ib_umem_num_pages(umem);
+	if (all_pages == 0 || all_pages > UINT_MAX)
+		return -EINVAL;
+
+	mmap_read_lock(umem->owning_mm);
+	max_segment_pages = (dma_get_max_seg_size(device->dma_device)) >> PAGE_SHIFT;
+	while (done_pages < all_pages) {
+		npages = get_region_single_pgmap(umem, done_pages);
+		if (!npages) {
+			put_umem_pgmap_list(umem);
+			mmap_read_unlock(umem->owning_mm);
+			return 0;
+		}
+		chunks += ((npages + max_segment_pages - 1) / max_segment_pages);
+		done_pages += npages;
+	}
+	ret = sg_alloc_table(&umem->sgt_append.sgt, chunks, GFP_KERNEL);
+	if (ret) {
+		put_umem_pgmap_list(umem);
+                mmap_read_unlock(umem->owning_mm);
+		return ret;
+	}
+
+	/* OK, we have a shared RW mapping backed by pgmap, no copy on-write or
+	 * modified pages. The mapping as it stands now points only to pgmap pages,
+	 * regradless of whether page tables are established or not.
+	 * The pages cannot be freed as long as pgmap has reference, and we
+	 * have grabbed one. We do not care about swap or invalid page tables,
+	 * since pages are present and cannot be freed. Similarly, we do not care about
+	 * establising page tables or increasing PIN count. The application has already
+	 * faulted or will fault later, and this shall take care of the PIN count.
+	 * Also, we do not update the page counts, since we do not need additional
+	 * page count protection. All we care about is setting up the SG list. The application
+	 * may unmap or remap these addresses in the future, but the pages will be
+	 * referenced by PGMAP for the entire MR life cycle. The same may happen with normal
+	 * slow path of ib_umem_get() - the application may unmap after registration and pages
+	 * will be held by MR. The only thing we warrant is that this mapping does not change
+	 * during SG list population.
+	 */
+	sg = next_sg = umem->sgt_append.sgt.sgl;
+	list_for_each(node, &umem->pgmap_list) {
+		unsigned long i;
+		unsigned long ent_chunks;
+		struct pgmap_umem_entry *ent =  list_entry(node, struct pgmap_umem_entry, node);
+		sg = next_sg;
+		pg = pfn_to_page(ent->first_pfn);
+		ent_chunks = (ent->npages + max_segment_pages - 1) / max_segment_pages;
+		for (i = 0; i < ent_chunks-1; i++) {
+			sg_set_page(sg, pg, max_segment_pages << PAGE_SHIFT, 0);
+			sg = sg_next(sg);
+			pg += max_segment_pages;
+		}
+
+		i = ent->npages - (ent_chunks - 1) * max_segment_pages;
+		sg_set_page(sg, pg, i << PAGE_SHIFT, 0);
+		next_sg = sg_next(sg);
+	}
+	sg_mark_end(sg);
+	umem->sgt_append.total_nents = chunks;
+	mmap_read_unlock(umem->owning_mm);
+	return 0;
+}
+
 /**
  * ib_umem_get - Pin and DMA map userspace memory.
  *
@@ -159,7 +324,7 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 			    size_t size, int access)
 {
 	struct ib_umem *umem;
-	struct page **page_list;
+	struct page **page_list = NULL;
 	unsigned long lock_limit;
 	unsigned long new_pinned;
 	unsigned long cur_base;
@@ -198,6 +363,12 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 	umem->owning_mm = mm = current->mm;
 	mmgrab(mm);
 
+	ret = fast_populate_sglist_with_pgmap(umem,device);
+	if (ret)
+		goto umem_kfree;
+	if (ib_umem_pgmap(umem))
+		goto dma_map;
+
 	page_list = (struct page **) __get_free_page(GFP_KERNEL);
 	if (!page_list) {
 		ret = -ENOMEM;
@@ -225,7 +396,6 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 		gup_flags |= FOLL_WRITE;
 
 	while (npages) {
-		cond_resched();
 		pinned = pin_user_pages_fast(cur_base,
 					  min_t(unsigned long, npages,
 						PAGE_SIZE /
@@ -248,6 +418,7 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 		}
 	}
 
+dma_map:
 	if (access & IB_ACCESS_RELAXED_ORDERING)
 		dma_attr |= DMA_ATTR_WEAK_ORDERING;
 
@@ -259,9 +430,11 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 
 umem_release:
 	__ib_umem_release(device, umem, 0);
-	atomic64_sub(ib_umem_num_pages(umem), &mm->pinned_vm);
+        if (!ib_umem_pgmap(umem))
+		atomic64_sub(ib_umem_num_pages(umem), &mm->pinned_vm);
 out:
-	free_page((unsigned long) page_list);
+	if (page_list)
+		free_page((unsigned long) page_list);
 umem_kfree:
 	if (ret) {
 		mmdrop(umem->owning_mm);
@@ -286,7 +459,8 @@ void ib_umem_release(struct ib_umem *umem)
 
 	__ib_umem_release(umem->ibdev, umem, 1);
 
-	atomic64_sub(ib_umem_num_pages(umem), &umem->owning_mm->pinned_vm);
+	if (!ib_umem_pgmap(umem))
+		atomic64_sub(ib_umem_num_pages(umem), &umem->owning_mm->pinned_vm);
 	mmdrop(umem->owning_mm);
 	kfree(umem);
 }

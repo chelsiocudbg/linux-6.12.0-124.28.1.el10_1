@@ -76,6 +76,36 @@
 #define PBL_OFF(rdev_p, a) ((a) - (rdev_p)->lldi.vr->pbl.start)
 #define RQT_OFF(rdev_p, a) ((a) - (rdev_p)->lldi.vr->rq.start)
 
+/*
+ * SVC kmalloc/DMA alloc definitions for memory allocation
+ * Macros used by adapter drivers to allocate and deallocate
+ * the QP memory
+ */
+#define SVC_KMALLOC(x,y,z) (*svc_kmalloc)(x,y,z)
+#define SVC_KFREE(x,z) (*svc_kfree)(x,z)
+#define SVC_DMA_ZALLOC(a,b,c,d,e) (*svc_dma_zalloc)(a,b,c,d,e)
+#define SVC_DMA_FREE(a,b,c,d,e)   (*svc_dma_free)(a,b,c,d,e)
+
+extern void *(*svc_kmalloc)(size_t size,int flags, void* qp_ptr);
+extern void (*svc_kfree)(void *ptr,void* qp_ptr);
+extern void *(*svc_dma_zalloc)(struct device*, size_t, dma_addr_t*,int,void*);
+extern void (*svc_dma_free)(struct device*, size_t, void*, dma_addr_t,void*);
+/* Every object type with different sizes should be listed atleast once
+ * Currently define for CXGB4 driver
+ *
+ * define new macros for a new adapter driver
+ * if RQ, SQ entry size differ from that of CXGB4
+ */
+#define FLAG_CXGB_RQ    1
+#define FLAG_CXGB_SQ    2
+
+int setup_svc_mem_alloc_cxgb( void *(*svc_iser_kmalloc)(size_t,int,void*),
+                        void(*svc_iser_kfree)(void *,void*),
+                        void *(*svc_iser_dma_zalloc)(struct device*, size_t,dma_addr_t*,int,void*),
+                        void (*svc_iser_dma_free)(struct device*, size_t,void*,dma_addr_t,void*));
+
+/* SVC Allocation ends here */
+
 static inline void *cplhdr(struct sk_buff *skb)
 {
 	return skb->data;
@@ -325,6 +355,7 @@ struct c4iw_dev {
 	struct xarray stids;
 	struct list_head db_fc_list;
 	u32 avail_ird;
+	u32 ib_active;
 	wait_queue_head_t wait;
 };
 

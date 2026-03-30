@@ -483,6 +483,11 @@ static int pmem_attach_disk(struct device *dev,
 		rc = nvdimm_setup_pfn(nd_pfn, &pmem->pgmap);
 		if (rc)
 			return rc;
+        } else if (pmem_should_map_pages(dev)) {
+                rc =  setup_pgmap_resource(nsio, 0, 0,  &pmem->pgmap);
+                if (rc)
+                        return rc;
+
 	}
 
 	/* we're attaching a block device, disable raw namespace access */

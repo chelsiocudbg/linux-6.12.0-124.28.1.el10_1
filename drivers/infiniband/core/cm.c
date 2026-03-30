@@ -639,19 +639,22 @@ static struct cm_id_private *cm_insert_listen(struct cm_id_private *cm_id_priv,
 			link = &(*link)->rb_right;
 		else {
 			/*
-			 * Sharing an ib_cm_id with different handlers is not
+			 * Sharing an ib_cm_id with different handlers or specific and wildcard port is not
 			 * supported
 			 */
-			if (cur_cm_id_priv->id.cm_handler != shared_handler ||
+			if ((cm_id_priv->id.port_num != cur_cm_id_priv->id.port_num && (!cm_id_priv->id.port_num || !cur_cm_id_priv->id.port_num)) ||
+			    (cur_cm_id_priv->id.cm_handler != shared_handler ||
 			    cur_cm_id_priv->id.context ||
-			    WARN_ON(!cur_cm_id_priv->id.cm_handler)) {
+			    WARN_ON(!cur_cm_id_priv->id.cm_handler))) {
 				spin_unlock_irqrestore(&cm.lock, flags);
 				return NULL;
 			}
-			refcount_inc(&cur_cm_id_priv->refcount);
-			cur_cm_id_priv->listen_sharecount++;
-			spin_unlock_irqrestore(&cm.lock, flags);
-			return cur_cm_id_priv;
+			if (cm_id_priv->id.port_num  == cur_cm_id_priv->id.port_num) {
+				refcount_inc(&cur_cm_id_priv->refcount);
+				cur_cm_id_priv->listen_sharecount++;
+				spin_unlock_irqrestore(&cm.lock, flags);
+				return cur_cm_id_priv;
+			}
 		}
 	}
 	cm_id_priv->listen_sharecount++;
@@ -1247,6 +1250,7 @@ EXPORT_SYMBOL(ib_cm_listen);
  * Callers should call ib_destroy_cm_id when done with the listener ID.
  */
 struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
+				     u8 port_num,
 				     ib_cm_handler cm_handler,
 				     __be64 service_id)
 {
@@ -1265,6 +1269,7 @@ struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
 		return ERR_PTR(err);
 	}
 
+	cm_id_priv->id.port_num = port_num;
 	spin_lock_irq(&cm_id_priv->lock);
 	listen_id_priv = cm_insert_listen(cm_id_priv, cm_handler);
 	if (listen_id_priv != cm_id_priv) {
@@ -2027,7 +2032,7 @@ static struct cm_id_private *cm_match_req(struct cm_work *work,
 
 	/* Find matching listen request. */
 	listen_cm_id_priv = cm_find_listen(
-		cm_id_priv->id.device,
+		cm_id_priv->id.device, 
 		cpu_to_be64(IBA_GET(CM_REQ_SERVICE_ID, req_msg)));
 	if (!listen_cm_id_priv) {
 		cm_remove_remote(cm_id_priv);
@@ -2144,6 +2149,7 @@ static int cm_req_handler(struct cm_work *work)
 		goto destroy;
 	}
 
+        cm_id_priv->id.port_num = work->port->port_num;
 	memset(&work->path[0], 0, sizeof(work->path[0]));
 	if (cm_req_has_alt_path(req_msg))
 		memset(&work->path[1], 0, sizeof(work->path[1]));

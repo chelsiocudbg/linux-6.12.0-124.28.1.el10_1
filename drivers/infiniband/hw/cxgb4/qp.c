@@ -97,18 +97,21 @@ static void dealloc_oc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
 	c4iw_ocqp_pool_free(rdev, sq->dma_addr, sq->memsize);
 }
 
-static void dealloc_host_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
+static void dealloc_host_sq(struct c4iw_rdev *rdev, struct t4_sq *sq, struct ib_qp *qp_ptr)
 {
-	dma_free_coherent(&(rdev->lldi.pdev->dev), sq->memsize, sq->queue,
+/*	dma_free_coherent(&(rdev->lldi.pdev->dev), sq->memsize, sq->queue,
 			  dma_unmap_addr(sq, mapping));
+*/
+        SVC_DMA_FREE(&(rdev->lldi.pdev->dev), sq->memsize,
+                        sq->queue,dma_unmap_addr(sq, mapping), qp_ptr);
 }
 
-static void dealloc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
+static void dealloc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq, struct ib_qp *qp_ptr)
 {
 	if (t4_sq_onchip(sq))
 		dealloc_oc_sq(rdev, sq);
 	else
-		dealloc_host_sq(rdev, sq);
+		dealloc_host_sq(rdev, sq, qp_ptr);
 }
 
 static int alloc_oc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
@@ -126,10 +129,10 @@ static int alloc_oc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
 	return 0;
 }
 
-static int alloc_host_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
+static int alloc_host_sq(struct c4iw_rdev *rdev, struct t4_sq *sq, struct ib_qp *qp_ptr)
 {
-	sq->queue = dma_alloc_coherent(&(rdev->lldi.pdev->dev), sq->memsize,
-				       &(sq->dma_addr), GFP_KERNEL);
+    sq->queue = SVC_DMA_ZALLOC(&(rdev->lldi.pdev->dev), sq->memsize, 
+                               &(sq->dma_addr), GFP_KERNEL, qp_ptr);
 	if (!sq->queue)
 		return -ENOMEM;
 	sq->phys_addr = virt_to_phys(sq->queue);
@@ -137,33 +140,32 @@ static int alloc_host_sq(struct c4iw_rdev *rdev, struct t4_sq *sq)
 	return 0;
 }
 
-static int alloc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq, int user)
+static int alloc_sq(struct c4iw_rdev *rdev, struct t4_sq *sq, int user, struct ib_qp* qp_ptr)
 {
 	int ret = -ENOSYS;
 	if (user)
 		ret = alloc_oc_sq(rdev, sq);
 	if (ret)
-		ret = alloc_host_sq(rdev, sq);
+		ret = alloc_host_sq(rdev, sq, qp_ptr);
 	return ret;
 }
 
 static int destroy_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
-		      struct c4iw_dev_ucontext *uctx, int has_rq)
+		      struct c4iw_dev_ucontext *uctx, int has_rq, struct ib_qp *qp_ptr)
 {
 	/*
 	 * uP clears EQ contexts when the connection exits rdma mode,
 	 * so no need to post a RESET WR for these EQs.
 	 */
-	dealloc_sq(rdev, &wq->sq);
-	kfree(wq->sq.sw_sq);
+	dealloc_sq(rdev, &wq->sq, qp_ptr);	
+	SVC_KFREE(wq->sq.sw_sq, qp_ptr);
 	c4iw_put_qpid(rdev, wq->sq.qid, uctx);
 
 	if (has_rq) {
-		dma_free_coherent(&rdev->lldi.pdev->dev,
-				  wq->rq.memsize, wq->rq.queue,
-				  dma_unmap_addr(&wq->rq, mapping));
+		SVC_DMA_FREE(&(rdev->lldi.pdev->dev), wq->rq.memsize,
+                                wq->rq.queue,dma_unmap_addr(&wq->rq, mapping), qp_ptr);
 		c4iw_rqtpool_free(rdev, wq->rq.rqt_hwaddr, wq->rq.rqt_size);
-		kfree(wq->rq.sw_rq);
+	        SVC_KFREE(wq->rq.sw_rq, qp_ptr);
 		c4iw_put_qpid(rdev, wq->rq.qid, uctx);
 	}
 	return 0;
@@ -200,7 +202,8 @@ static int create_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
 		     struct t4_cq *rcq, struct t4_cq *scq,
 		     struct c4iw_dev_ucontext *uctx,
 		     struct c4iw_wr_wait *wr_waitp,
-		     int need_rq)
+		     int need_rq,
+		     struct ib_qp* qp_ptr)
 {
 	int user = (uctx != &rdev->uctx);
 	struct fw_ri_res_wr *res_wr;
@@ -223,17 +226,16 @@ static int create_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
 	}
 
 	if (!user) {
-		wq->sq.sw_sq = kcalloc(wq->sq.size, sizeof(*wq->sq.sw_sq),
-				       GFP_KERNEL);
-		if (!wq->sq.sw_sq) {
+ 	        wq->sq.sw_sq = SVC_KMALLOC(wq->sq.size * sizeof *wq->sq.sw_sq,
+        	         FLAG_CXGB_SQ, qp_ptr);
+        	if (!wq->sq.sw_sq) {
 			ret = -ENOMEM;
 			goto free_rq_qid;//FIXME
 		}
 
 		if (need_rq) {
-			wq->rq.sw_rq = kcalloc(wq->rq.size,
-					       sizeof(*wq->rq.sw_rq),
-					       GFP_KERNEL);
+		        wq->rq.sw_rq = SVC_KMALLOC(wq->rq.size * sizeof *wq->rq.sw_rq,
+                		 FLAG_CXGB_RQ, qp_ptr);
 			if (!wq->rq.sw_rq) {
 				ret = -ENOMEM;
 				goto free_sw_sq;
@@ -254,17 +256,15 @@ static int create_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
 		}
 	}
 
-	ret = alloc_sq(rdev, &wq->sq, user);
+	ret = alloc_sq(rdev, &wq->sq, user, qp_ptr);
 	if (ret)
 		goto free_hwaddr;
 	memset(wq->sq.queue, 0, wq->sq.memsize);
 	dma_unmap_addr_set(&wq->sq, mapping, wq->sq.dma_addr);
 
 	if (need_rq) {
-		wq->rq.queue = dma_alloc_coherent(&rdev->lldi.pdev->dev,
-						  wq->rq.memsize,
-						  &wq->rq.dma_addr,
-						  GFP_KERNEL);
+		wq->rq.queue = SVC_DMA_ZALLOC(&(rdev->lldi.pdev->dev),wq->rq.memsize,
+		                               &(wq->rq.dma_addr), GFP_KERNEL, qp_ptr);
 		if (!wq->rq.queue) {
 			ret = -ENOMEM;
 			goto free_sq;
@@ -390,19 +390,21 @@ static int create_qp(struct c4iw_rdev *rdev, struct t4_wq *wq,
 	return 0;
 free_dma:
 	if (need_rq)
-		dma_free_coherent(&rdev->lldi.pdev->dev,
+		/*dma_free_coherent(&rdev->lldi.pdev->dev,
 				  wq->rq.memsize, wq->rq.queue,
-				  dma_unmap_addr(&wq->rq, mapping));
+				  dma_unmap_addr(&wq->rq, mapping));*/
+		SVC_DMA_FREE(&(rdev->lldi.pdev->dev),wq->rq.memsize, wq->rq.queue,
+	                            dma_unmap_addr(&wq->rq, mapping), qp_ptr);
 free_sq:
-	dealloc_sq(rdev, &wq->sq);
+	dealloc_sq(rdev, &wq->sq, qp_ptr);
 free_hwaddr:
 	if (need_rq)
 		c4iw_rqtpool_free(rdev, wq->rq.rqt_hwaddr, wq->rq.rqt_size);
 free_sw_rq:
 	if (need_rq)
-		kfree(wq->rq.sw_rq);
+		SVC_KFREE(wq->rq.sw_rq, qp_ptr);
 free_sw_sq:
-	kfree(wq->sq.sw_sq);
+	SVC_KFREE(wq->sq.sw_sq, qp_ptr);
 free_rq_qid:
 	if (need_rq)
 		c4iw_put_qpid(rdev, wq->rq.qid, uctx);
@@ -2108,7 +2110,7 @@ int c4iw_destroy_qp(struct ib_qp *ib_qp, struct ib_udata *udata)
 	pr_debug("qhp %p ucontext %p\n", qhp, ucontext);
 
 	destroy_qp(&rhp->rdev, &qhp->wq,
-		   ucontext ? &ucontext->uctx : &rhp->rdev.uctx, !qhp->srq);
+		   ucontext ? &ucontext->uctx : &rhp->rdev.uctx, !qhp->srq, &qhp->ibqp);
 
 	c4iw_put_wr_wait(qhp->wr_waitp);
 	return 0;
@@ -2183,7 +2185,7 @@ int c4iw_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 
 	ret = create_qp(&rhp->rdev, &qhp->wq, &schp->cq, &rchp->cq,
 			ucontext ? &ucontext->uctx : &rhp->rdev.uctx,
-			qhp->wr_waitp, !attrs->srq);
+			qhp->wr_waitp, !attrs->srq, &qhp->ibqp);
 	if (ret)
 		goto err_free_wr_wait;
 
@@ -2374,7 +2376,7 @@ err_remove_handle:
 	xa_erase_irq(&rhp->qps, qhp->wq.sq.qid);
 err_destroy_qp:
 	destroy_qp(&rhp->rdev, &qhp->wq,
-		   ucontext ? &ucontext->uctx : &rhp->rdev.uctx, !attrs->srq);
+		   ucontext ? &ucontext->uctx : &rhp->rdev.uctx, !attrs->srq, &qhp->ibqp);
 err_free_wr_wait:
 	c4iw_put_wr_wait(qhp->wr_waitp);
 	return ret;
@@ -2447,7 +2449,10 @@ void c4iw_dispatch_srq_limit_reached_event(struct c4iw_srq *srq)
 	event.device = &srq->rhp->ibdev;
 	event.element.srq = &srq->ibsrq;
 	event.event = IB_EVENT_SRQ_LIMIT_REACHED;
+        if(srq->rhp && srq->rhp->ib_active)
+        {
 	ib_dispatch_event(&event);
+        }
 }
 
 int c4iw_modify_srq(struct ib_srq *ib_srq, struct ib_srq_attr *attr,

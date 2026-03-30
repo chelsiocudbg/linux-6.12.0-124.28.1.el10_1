@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2017 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2017 - 2023 Intel Corporation */
 #ifndef ICRDMA_HW_H
 #define ICRDMA_HW_H
 
@@ -41,11 +41,43 @@
 #define GLPE_CRITERR		0x00534000
 #define GLINT_RATE(_INT)	(0x0015A000 + ((_INT) * 4)) /* _i=0...2047 */ /* Reset Source: CORER */
 
+#define PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_0	0x001e3180
+#define PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_1	0x001e3184
+#define PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_2	0x001e3188
+#define PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_3	0x001e318c
+
+#define PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_0	0x001e31a0
+#define PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_1	0x001e31a4
+#define PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_2	0x001e31a8
+#define PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_3	0x001e31aC
+
+#define CNV_PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_0	0x001e2180
+#define CNV_PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_1	0x001e2184
+#define CNV_PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_2	0x001e2188
+#define CNV_PRTMAC_HSEC_CTL_RX_PAUSE_ENABLE_3	0x001e218c
+
+#define CNV_PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_0	0x001e21a0
+#define CNV_PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_1	0x001e21a4
+#define CNV_PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_2	0x001e21a8
+#define CVN_PRTMAC_HSEC_CTL_TX_PAUSE_ENABLE_3	0x001e21ac
+
+#define PRTMAC_HSEC_CTL_RX_ENABLE_GPP_0		0x001e34c0
+#define PRTMAC_HSEC_CTL_RX_ENABLE_GPP_1		0x001e34c4
+#define PRTMAC_HSEC_CTL_RX_ENABLE_GPP_2		0x001e34c8
+#define PRTMAC_HSEC_CTL_RX_ENABLE_GPP_3		0x001e34cC
+
+#define PRTMAC_HSEC_CTL_RX_ENABLE_PPP_0		0x001e35c0
+#define PRTMAC_HSEC_CTL_RX_ENABLE_PPP_1		0x001e35c4
+#define PRTMAC_HSEC_CTL_RX_ENABLE_PPP_2		0x001e35c8
+#define PRTMAC_HSEC_CTL_RX_ENABLE_PPP_3		0x001e35cC
+
+#define GLDCB_TC2PFC				0x001d2694
+#define PRTMAC_HSEC_CTL_RX_ENABLE_GCP		0x001e31c0
+
 #define ICRDMA_DB_ADDR_OFFSET		(8 * 1024 * 1024 - 64 * 1024)
 
 #define ICRDMA_VF_DB_ADDR_OFFSET	(64 * 1024)
 
-/* shifts/masks for FLD_[LS/RS]_64 macros used in device table */
 #define ICRDMA_CCQPSTATUS_CCQP_DONE_S 0
 #define ICRDMA_CCQPSTATUS_CCQP_DONE BIT_ULL(0)
 #define ICRDMA_CCQPSTATUS_CCQP_ERR_S 31
@@ -58,15 +90,28 @@
 #define ICRDMA_CQPSQ_CQ_CQID GENMASK_ULL(18, 0)
 #define ICRDMA_COMMIT_FPM_CQCNT_S 0
 #define ICRDMA_COMMIT_FPM_CQCNT GENMASK_ULL(19, 0)
+#define ICRDMA_CQPSQ_UPESD_HMCFNID_S 0
+#define ICRDMA_CQPSQ_UPESD_HMCFNID GENMASK_ULL(5, 0)
 
 enum icrdma_device_caps_const {
+	ICRDMA_MAX_WQ_FRAGMENT_COUNT		= 13,
+	ICRDMA_MAX_SGE_RD			= 13,
 	ICRDMA_MAX_STATS_COUNT = 128,
 
-	ICRDMA_MAX_IRD_SIZE			= 127,
-	ICRDMA_MAX_ORD_SIZE			= 255,
-	ICRDMA_MIN_WQ_SIZE                      = 8 /* WQEs */,
+	ICRDMA_MAX_IRD_SIZE			= 8,
+	ICRDMA_MAX_ORD_SIZE			= 8,
+	ICRDMA_MIN_WQ_SIZE			= 8 /* WQEs */,
+	ICRDMA_MAX_PUSH_PAGE_COUNT		= 256,
 
 };
 
 void icrdma_init_hw(struct irdma_sc_dev *dev);
+void irdma_init_config_check(struct irdma_config_check *cc,
+			     u8 traffic_class,
+			     u8 prio,
+			     u16 qs_handle);
+bool irdma_is_config_ok(struct irdma_config_check *cc, struct irdma_sc_vsi *vsi);
+void irdma_check_fc_for_tc_update(struct irdma_sc_vsi *vsi,
+				  struct irdma_l2params *l2params);
+void irdma_check_fc_for_qp(struct irdma_sc_vsi *vsi, struct irdma_sc_qp *sc_qp);
 #endif /* ICRDMA_HW_H*/

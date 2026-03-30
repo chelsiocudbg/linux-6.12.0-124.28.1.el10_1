@@ -1,10 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2021-2023, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice.h"
 #include "ice_base.h"
 #include "ice_lib.h"
-#include "ice_flow.h"
 #include "ice_vf_lib_private.h"
 
 #define to_fltr_conf_from_desc(p) \
@@ -21,6 +20,31 @@
 #define FDIR_INSET_FLAG_ESP_M BIT_ULL(FDIR_INSET_FLAG_ESP_S)
 #define FDIR_INSET_FLAG_ESP_UDP BIT_ULL(FDIR_INSET_FLAG_ESP_S)
 #define FDIR_INSET_FLAG_ESP_IPSEC (0ULL << FDIR_INSET_FLAG_ESP_S)
+
+#define FDIR_INSET_FLAG_ECPRI_S 1
+#define FDIR_INSET_FLAG_ECPRI_M BIT_ULL(FDIR_INSET_FLAG_ECPRI_S)
+#define FDIR_INSET_FLAG_ECPRI_UDP BIT_ULL(FDIR_INSET_FLAG_ECPRI_S)
+#define FDIR_INSET_FLAG_ECPRI_MAC (0ULL << FDIR_INSET_FLAG_ECPRI_S)
+
+/* These macros are used to set/check flow/tunnel type.
+ * @param input: a struct of ice_fdir_fltr
+ * @param conf: a struct of virtchnl_fdir_fltr_conf
+ * @param f_type: NONF_IPV4_GTPU/NONF_IPV4_GTPU_IPV4, etc
+ * @param tun_type: GTPU/ECPRI, etc
+ */
+#define FDIR_SET_FTYPE(f_type) \
+	((input)->flow_type = ICE_FLTR_PTYPE_NONF_ ## f_type)
+#define FDIR_CHK_FTYPE(f_type) \
+	((input)->flow_type == ICE_FLTR_PTYPE_NONF_ ## f_type)
+#define FDIR_SET_TTYPE(tun_type) \
+	((conf)->ttype = ICE_FDIR_TUNNEL_TYPE_ ## tun_type)
+#define FDIR_CHK_TTYPE(tun_type) \
+	((conf)->ttype == ICE_FDIR_TUNNEL_TYPE_ ## tun_type)
+#define FDIR_REPLACE_FTYPE(old_ftype, new_ftype) \
+do { \
+	if (FDIR_CHK_FTYPE(old_ftype)) \
+		FDIR_SET_FTYPE(new_ftype); \
+} while (0)
 
 enum ice_fdir_tunnel_type {
 	ICE_FDIR_TUNNEL_TYPE_NONE = 0,
@@ -57,32 +81,83 @@ struct virtchnl_fdir_inset_map {
 };
 
 static const struct virtchnl_fdir_inset_map fdir_inset_map[] = {
-	{VIRTCHNL_PROTO_HDR_ETH_ETHERTYPE, ICE_FLOW_FIELD_IDX_ETH_TYPE, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV4_SRC, ICE_FLOW_FIELD_IDX_IPV4_SA, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV4_DST, ICE_FLOW_FIELD_IDX_IPV4_DA, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV4_DSCP, ICE_FLOW_FIELD_IDX_IPV4_DSCP, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV4_TTL, ICE_FLOW_FIELD_IDX_IPV4_TTL, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV4_PROT, ICE_FLOW_FIELD_IDX_IPV4_PROT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV6_SRC, ICE_FLOW_FIELD_IDX_IPV6_SA, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV6_DST, ICE_FLOW_FIELD_IDX_IPV6_DA, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV6_TC, ICE_FLOW_FIELD_IDX_IPV6_DSCP, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV6_HOP_LIMIT, ICE_FLOW_FIELD_IDX_IPV6_TTL, 0, 0},
-	{VIRTCHNL_PROTO_HDR_IPV6_PROT, ICE_FLOW_FIELD_IDX_IPV6_PROT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_UDP_SRC_PORT, ICE_FLOW_FIELD_IDX_UDP_SRC_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_UDP_DST_PORT, ICE_FLOW_FIELD_IDX_UDP_DST_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_TCP_SRC_PORT, ICE_FLOW_FIELD_IDX_TCP_SRC_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_TCP_DST_PORT, ICE_FLOW_FIELD_IDX_TCP_DST_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_SCTP_SRC_PORT, ICE_FLOW_FIELD_IDX_SCTP_SRC_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_SCTP_DST_PORT, ICE_FLOW_FIELD_IDX_SCTP_DST_PORT, 0, 0},
-	{VIRTCHNL_PROTO_HDR_GTPU_IP_TEID, ICE_FLOW_FIELD_IDX_GTPU_IP_TEID, 0, 0},
-	{VIRTCHNL_PROTO_HDR_GTPU_EH_QFI, ICE_FLOW_FIELD_IDX_GTPU_EH_QFI, 0, 0},
+	{VIRTCHNL_PROTO_HDR_ETH_SRC, ICE_FLOW_FIELD_IDX_ETH_SA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_ETH_DST, ICE_FLOW_FIELD_IDX_ETH_DA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_ETH_ETHERTYPE, ICE_FLOW_FIELD_IDX_ETH_TYPE,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV4_SRC, ICE_FLOW_FIELD_IDX_IPV4_SA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV4_DST, ICE_FLOW_FIELD_IDX_IPV4_DA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV4_DSCP, ICE_FLOW_FIELD_IDX_IPV4_DSCP,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV4_TTL, ICE_FLOW_FIELD_IDX_IPV4_TTL,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV4_PROT, ICE_FLOW_FIELD_IDX_IPV4_PROT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_SRC, ICE_FLOW_FIELD_IDX_IPV6_SA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_DST, ICE_FLOW_FIELD_IDX_IPV6_DA,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_TC, ICE_FLOW_FIELD_IDX_IPV6_DSCP,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_HOP_LIMIT, ICE_FLOW_FIELD_IDX_IPV6_TTL,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_PROT, ICE_FLOW_FIELD_IDX_IPV6_PROT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_UDP_SRC_PORT, ICE_FLOW_FIELD_IDX_UDP_SRC_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_UDP_DST_PORT, ICE_FLOW_FIELD_IDX_UDP_DST_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_TCP_SRC_PORT, ICE_FLOW_FIELD_IDX_TCP_SRC_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_TCP_DST_PORT, ICE_FLOW_FIELD_IDX_TCP_DST_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_SCTP_SRC_PORT, ICE_FLOW_FIELD_IDX_SCTP_SRC_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_SCTP_DST_PORT, ICE_FLOW_FIELD_IDX_SCTP_DST_PORT,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_GTPU_IP_TEID, ICE_FLOW_FIELD_IDX_GTPU_IP_TEID,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_GTPU_EH_QFI, ICE_FLOW_FIELD_IDX_GTPU_EH_QFI,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_GTPU_UP_QFI, ICE_FLOW_FIELD_IDX_GTPU_UP_QFI,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_GTPU_DWN_QFI, ICE_FLOW_FIELD_IDX_GTPU_DWN_QFI,
+		0, 0},
 	{VIRTCHNL_PROTO_HDR_ESP_SPI, ICE_FLOW_FIELD_IDX_ESP_SPI,
 		FDIR_INSET_FLAG_ESP_IPSEC, FDIR_INSET_FLAG_ESP_M},
 	{VIRTCHNL_PROTO_HDR_ESP_SPI, ICE_FLOW_FIELD_IDX_NAT_T_ESP_SPI,
 		FDIR_INSET_FLAG_ESP_UDP, FDIR_INSET_FLAG_ESP_M},
-	{VIRTCHNL_PROTO_HDR_AH_SPI, ICE_FLOW_FIELD_IDX_AH_SPI, 0, 0},
-	{VIRTCHNL_PROTO_HDR_L2TPV3_SESS_ID, ICE_FLOW_FIELD_IDX_L2TPV3_SESS_ID, 0, 0},
-	{VIRTCHNL_PROTO_HDR_PFCP_S_FIELD, ICE_FLOW_FIELD_IDX_UDP_DST_PORT, 0, 0},
+	{VIRTCHNL_PROTO_HDR_AH_SPI, ICE_FLOW_FIELD_IDX_AH_SPI,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_L2TPV3_SESS_ID, ICE_FLOW_FIELD_IDX_L2TPV3_SESS_ID,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_PFCP_S_FIELD, ICE_FLOW_FIELD_IDX_UDP_DST_PORT,
+		0, 0},
+	{
+		VIRTCHNL_PROTO_HDR_ECPRI_PC_RTC_ID,
+		ICE_FLOW_FIELD_IDX_ECPRI_TP0_PC_ID,
+		FDIR_INSET_FLAG_ECPRI_MAC,
+		FDIR_INSET_FLAG_ECPRI_M
+	},
+	{
+		VIRTCHNL_PROTO_HDR_ECPRI_PC_RTC_ID,
+		ICE_FLOW_FIELD_IDX_UDP_ECPRI_TP0_PC_ID,
+		FDIR_INSET_FLAG_ECPRI_UDP,
+		FDIR_INSET_FLAG_ECPRI_M
+	},
+	{VIRTCHNL_PROTO_HDR_IPV4_FRAG_PKID, ICE_FLOW_FIELD_IDX_IPV4_ID,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG_PKID, ICE_FLOW_FIELD_IDX_IPV6_ID,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_L2TPV2_SESS_ID, ICE_FLOW_FIELD_IDX_L2TPV2_SESS_ID,
+		0, 0},
+	{VIRTCHNL_PROTO_HDR_L2TPV2_LEN_SESS_ID,
+		ICE_FLOW_FIELD_IDX_L2TPV2_LEN_SESS_ID,
+		0, 0},
 };
 
 /**
@@ -174,18 +249,16 @@ ice_vc_fdir_alloc_prof(struct ice_vf *vf, enum ice_fltr_ptype flow)
 	struct ice_vf_fdir *fdir = &vf->fdir;
 
 	if (!fdir->fdir_prof) {
-		fdir->fdir_prof = devm_kcalloc(ice_pf_to_dev(vf->pf),
-					       ICE_FLTR_PTYPE_MAX,
-					       sizeof(*fdir->fdir_prof),
-					       GFP_KERNEL);
+		fdir->fdir_prof = kcalloc(ICE_FLTR_PTYPE_MAX,
+					  sizeof(*fdir->fdir_prof),
+					  GFP_KERNEL);
 		if (!fdir->fdir_prof)
 			return -ENOMEM;
 	}
 
 	if (!fdir->fdir_prof[flow]) {
-		fdir->fdir_prof[flow] = devm_kzalloc(ice_pf_to_dev(vf->pf),
-						     sizeof(**fdir->fdir_prof),
-						     GFP_KERNEL);
+		fdir->fdir_prof[flow] = kzalloc(sizeof(**fdir->fdir_prof),
+						GFP_KERNEL);
 		if (!fdir->fdir_prof[flow])
 			return -ENOMEM;
 	}
@@ -209,7 +282,7 @@ ice_vc_fdir_free_prof(struct ice_vf *vf, enum ice_fltr_ptype flow)
 	if (!fdir->fdir_prof[flow])
 		return;
 
-	devm_kfree(ice_pf_to_dev(vf->pf), fdir->fdir_prof[flow]);
+	kfree(fdir->fdir_prof[flow]);
 	fdir->fdir_prof[flow] = NULL;
 }
 
@@ -217,7 +290,7 @@ ice_vc_fdir_free_prof(struct ice_vf *vf, enum ice_fltr_ptype flow)
  * ice_vc_fdir_free_prof_all - free all the profile for this VF
  * @vf: pointer to the VF structure
  */
-static void ice_vc_fdir_free_prof_all(struct ice_vf *vf)
+void ice_vc_fdir_free_prof_all(struct ice_vf *vf)
 {
 	struct ice_vf_fdir *fdir = &vf->fdir;
 	enum ice_fltr_ptype flow;
@@ -228,12 +301,13 @@ static void ice_vc_fdir_free_prof_all(struct ice_vf *vf)
 	for (flow = ICE_FLTR_PTYPE_NONF_NONE; flow < ICE_FLTR_PTYPE_MAX; flow++)
 		ice_vc_fdir_free_prof(vf, flow);
 
-	devm_kfree(ice_pf_to_dev(vf->pf), fdir->fdir_prof);
+	kfree(fdir->fdir_prof);
 	fdir->fdir_prof = NULL;
 }
 
 /**
  * ice_vc_fdir_parse_flow_fld
+ * @vf: pointer to the VF structure
  * @proto_hdr: virtual channel protocol filter header
  * @conf: FDIR configuration for each filter
  * @fld: field type array
@@ -244,9 +318,11 @@ static void ice_vc_fdir_free_prof_all(struct ice_vf *vf)
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_parse_flow_fld(struct virtchnl_proto_hdr *proto_hdr,
+ice_vc_fdir_parse_flow_fld(struct ice_vf *vf,
+			   struct virtchnl_proto_hdr *proto_hdr,
 			   struct virtchnl_fdir_fltr_conf *conf,
-			   enum ice_flow_field *fld, int *fld_cnt)
+			   enum ice_flow_field *fld,
+			   int *fld_cnt)
 {
 	struct virtchnl_proto_hdr hdr;
 	u32 i;
@@ -254,11 +330,11 @@ ice_vc_fdir_parse_flow_fld(struct virtchnl_proto_hdr *proto_hdr,
 	memcpy(&hdr, proto_hdr, sizeof(hdr));
 
 	for (i = 0; (i < ARRAY_SIZE(fdir_inset_map)) &&
-	     VIRTCHNL_GET_PROTO_HDR_FIELD(&hdr); i++)
+	     VIRTCHNL_GET_PROTO_HDR_FIELD(&hdr); i++) {
 		if (VIRTCHNL_TEST_PROTO_HDR(&hdr, fdir_inset_map[i].field)) {
 			if (fdir_inset_map[i].mask &&
-			    ((fdir_inset_map[i].mask & conf->inset_flag) !=
-			     fdir_inset_map[i].flag))
+			    ((fdir_inset_map[i].mask & conf->inset_flag)
+			    != fdir_inset_map[i].flag))
 				continue;
 
 			fld[*fld_cnt] = fdir_inset_map[i].fld;
@@ -268,6 +344,7 @@ ice_vc_fdir_parse_flow_fld(struct virtchnl_proto_hdr *proto_hdr,
 			VIRTCHNL_DEL_PROTO_HDR_FIELD(&hdr,
 						     fdir_inset_map[i].field);
 		}
+	}
 
 	return 0;
 }
@@ -277,7 +354,8 @@ ice_vc_fdir_parse_flow_fld(struct virtchnl_proto_hdr *proto_hdr,
  * @vf: pointer to the VF structure
  * @fltr: virtual channel add cmd buffer
  * @conf: FDIR configuration for each filter
- * @seg: array of one or more packet segments that describe the flow
+ * @segs: array of one or more packet segments that describe the flow
+ * @tun: 0 implies non-tunnel type filter, 1 implies tunnel type filter
  *
  * Parse the virtual channel add msg buffer's field vector and store them into
  * flow's packet segment field
@@ -285,14 +363,17 @@ ice_vc_fdir_parse_flow_fld(struct virtchnl_proto_hdr *proto_hdr,
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_set_flow_fld(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
+ice_vc_fdir_set_flow_fld(struct ice_vf *vf,
+			 struct virtchnl_fdir_add *fltr,
 			 struct virtchnl_fdir_fltr_conf *conf,
-			 struct ice_flow_seg_info *seg)
+			 struct ice_flow_seg_info *segs,
+			 int tun)
 {
 	struct virtchnl_fdir_rule *rule = &fltr->rule_cfg;
 	enum ice_flow_field fld[ICE_FLOW_FIELD_IDX_MAX];
 	struct device *dev = ice_pf_to_dev(vf->pf);
 	struct virtchnl_proto_hdrs *proto;
+	struct ice_flow_seg_info *seg;
 	int fld_cnt = 0;
 	int i;
 
@@ -301,7 +382,7 @@ ice_vc_fdir_set_flow_fld(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		struct virtchnl_proto_hdr *hdr = &proto->proto_hdr[i];
 		int ret;
 
-		ret = ice_vc_fdir_parse_flow_fld(hdr, conf, fld, &fld_cnt);
+		ret = ice_vc_fdir_parse_flow_fld(vf, hdr, conf, fld, &fld_cnt);
 		if (ret)
 			return ret;
 	}
@@ -311,11 +392,14 @@ ice_vc_fdir_set_flow_fld(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		return -EINVAL;
 	}
 
-	for (i = 0; i < fld_cnt; i++)
+	seg = (tun) ? &segs[tun] : segs;
+
+	for (i = 0; i < fld_cnt; i++) {
 		ice_flow_set_fld(seg, fld[i],
 				 ICE_FLOW_FLD_OFF_INVAL,
 				 ICE_FLOW_FLD_OFF_INVAL,
 				 ICE_FLOW_FLD_OFF_INVAL, false);
+	}
 
 	return 0;
 }
@@ -324,22 +408,135 @@ ice_vc_fdir_set_flow_fld(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
  * ice_vc_fdir_set_flow_hdr - config the flow's packet segment header
  * @vf: pointer to the VF structure
  * @conf: FDIR configuration for each filter
- * @seg: array of one or more packet segments that describe the flow
+ * @segs: array of one or more packet segments that describe the flow
+ * @tun: 0 implies non-tunnel type filter, 1 implies tunnel type filter
  *
  * Return: 0 on success, and other on error.
  */
 static int
 ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 			 struct virtchnl_fdir_fltr_conf *conf,
-			 struct ice_flow_seg_info *seg)
+			 struct ice_flow_seg_info *segs,
+			 int tun)
 {
 	enum ice_fltr_ptype flow = conf->input.flow_type;
 	enum ice_fdir_tunnel_type ttype = conf->ttype;
 	struct device *dev = ice_pf_to_dev(vf->pf);
+	struct ice_flow_seg_info *seg = NULL;
+
+	if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER ||
+	    ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER ||
+	    ttype == ICE_FDIR_TUNNEL_TYPE_GTPOGRE_INNER ||
+	    ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER ||
+	    ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+		seg = &segs[0];
+		switch (flow) {
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_TCP:
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER |
+					  ICE_FLOW_SEG_HDR_GRE);
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_TCP:
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER |
+					  ICE_FLOW_SEG_HDR_GRE);
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_TCP:
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_TCP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_TCP:
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+			break;
+		default:
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+			break;
+		}
+	}
+
+	seg = (tun) ? &segs[tun] : segs;
 
 	switch (flow) {
 	case ICE_FLTR_PTYPE_NON_IP_L2:
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_ETH_NON_IP);
+		break;
+	case ICE_FLTR_PTYPE_NONF_ECPRI_TP0:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_ECPRI_TP0);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_UDP_ECPRI_TP0:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_UDP_ECPRI_TP0 |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
 		break;
 	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV3:
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV3 |
@@ -375,6 +572,10 @@ ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV4 |
 				  ICE_FLOW_SEG_HDR_IPV_OTHER);
 		break;
+	case ICE_FLTR_PTYPE_FRAG_IPV4:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_FRAG);
+		break;
 	case ICE_FLTR_PTYPE_NONF_IPV4_TCP:
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_TCP |
 				  ICE_FLOW_SEG_HDR_IPV4 |
@@ -385,15 +586,89 @@ ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 				  ICE_FLOW_SEG_HDR_IPV4 |
 				  ICE_FLOW_SEG_HDR_IPV_OTHER);
 		break;
-	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_UDP:
-	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_TCP:
-	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_ICMP:
-	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_OTHER:
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU:
 		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU) {
 			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
 					  ICE_FLOW_SEG_HDR_IPV4 |
 					  ICE_FLOW_SEG_HDR_IPV_OTHER);
-		} else if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
 			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
 					  ICE_FLOW_SEG_HDR_GTPU_IP |
 					  ICE_FLOW_SEG_HDR_IPV4 |
@@ -403,6 +678,531 @@ ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 				flow, vf->vf_id);
 			return -EINVAL;
 		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU_IPV6_OTHER:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU_EH:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU_EH_IPV6_OTHER:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU_EH_DW:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GTPU_EH_UP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GTPU_EH) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+					  ICE_FLOW_SEG_HDR_GTPU_IP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV4_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV4_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV4 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_IPV6_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_IPV6_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_EH |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_DWN |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_UDP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_UDP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_TCP:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GTPU_UP |
+				  ICE_FLOW_SEG_HDR_GTPU_IP |
+				  ICE_FLOW_SEG_HDR_TCP |
+				  ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_OTHER);
 		break;
 	case ICE_FLTR_PTYPE_NONF_IPV4_SCTP:
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_SCTP |
@@ -443,6 +1243,10 @@ ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV6 |
 				  ICE_FLOW_SEG_HDR_IPV_OTHER);
 		break;
+	case ICE_FLTR_PTYPE_FRAG_IPV6:
+		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_IPV6 |
+				  ICE_FLOW_SEG_HDR_IPV_FRAG);
+		break;
 	case ICE_FLTR_PTYPE_NONF_IPV6_TCP:
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_TCP |
 				  ICE_FLOW_SEG_HDR_IPV6 |
@@ -457,6 +1261,216 @@ ice_vc_fdir_set_flow_hdr(struct ice_vf *vf,
 		ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_SCTP |
 				  ICE_FLOW_SEG_HDR_IPV6 |
 				  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_GRE_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_GRE_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_GRE_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_GRE |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL:
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_ETH);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_ETH);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_ETH);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_ETH);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV4 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_UDP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_UDP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_UDP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
+		break;
+	case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_TCP:
+	case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_TCP:
+		if (ttype == ICE_FDIR_TUNNEL_TYPE_L2TPV2_INNER) {
+			ICE_FLOW_SET_HDRS(seg, ICE_FLOW_SEG_HDR_L2TPV2 |
+					  ICE_FLOW_SEG_HDR_PPP |
+					  ICE_FLOW_SEG_HDR_TCP |
+					  ICE_FLOW_SEG_HDR_IPV6 |
+					  ICE_FLOW_SEG_HDR_IPV_OTHER);
+		} else {
+			dev_dbg(dev, "Invalid tunnel type 0x%x for VF %d\n",
+				flow, vf->vf_id);
+			return -EINVAL;
+		}
 		break;
 	default:
 		dev_dbg(dev, "Invalid flow type 0x%x for VF %d failed\n",
@@ -478,8 +1492,8 @@ ice_vc_fdir_rem_prof(struct ice_vf *vf, enum ice_fltr_ptype flow, int tun)
 {
 	struct ice_vf_fdir *fdir = &vf->fdir;
 	struct ice_fd_hw_prof *vf_prof;
+	const struct ice_vsi *vf_vsi;
 	struct ice_pf *pf = vf->pf;
-	struct ice_vsi *vf_vsi;
 	struct device *dev;
 	struct ice_hw *hw;
 	u64 prof_id;
@@ -502,7 +1516,7 @@ ice_vc_fdir_rem_prof(struct ice_vf *vf, enum ice_fltr_ptype flow, int tun)
 	if (!fdir->prof_entry_cnt[flow][tun])
 		return;
 
-	for (i = 0; i < fdir->prof_entry_cnt[flow][tun]; i++)
+	for (i = 0; i < fdir->prof_entry_cnt[flow][tun]; i++) {
 		if (vf_prof->entry_h[i][tun]) {
 			u16 vsi_num = ice_get_hw_vsi_num(hw, vf_prof->vsi_h[i]);
 
@@ -511,9 +1525,10 @@ ice_vc_fdir_rem_prof(struct ice_vf *vf, enum ice_fltr_ptype flow, int tun)
 					   vf_prof->entry_h[i][tun]);
 			vf_prof->entry_h[i][tun] = 0;
 		}
+	}
 
 	ice_flow_rem_prof(hw, ICE_BLK_FD, prof_id);
-	devm_kfree(dev, vf_prof->fdir_seg[tun]);
+	kfree(vf_prof->fdir_seg[tun]);
 	vf_prof->fdir_seg[tun] = NULL;
 
 	for (i = 0; i < vf_prof->cnt; i++)
@@ -526,7 +1541,7 @@ ice_vc_fdir_rem_prof(struct ice_vf *vf, enum ice_fltr_ptype flow, int tun)
  * ice_vc_fdir_rem_prof_all - remove profile for this VF
  * @vf: pointer to the VF structure
  */
-static void ice_vc_fdir_rem_prof_all(struct ice_vf *vf)
+void ice_vc_fdir_rem_prof_all(struct ice_vf *vf)
 {
 	enum ice_fltr_ptype flow;
 
@@ -543,20 +1558,131 @@ static void ice_vc_fdir_rem_prof_all(struct ice_vf *vf)
  */
 static void ice_vc_fdir_reset_cnt_all(struct ice_vf_fdir *fdir)
 {
-	enum ice_fltr_ptype flow;
+	enum ice_fltr_ptype flow = ICE_FLTR_PTYPE_NONF_NONE;
 
-	for (flow = ICE_FLTR_PTYPE_NONF_NONE;
-	     flow < ICE_FLTR_PTYPE_MAX; flow++) {
+	for (; flow < ICE_FLTR_PTYPE_MAX; flow++) {
 		fdir->fdir_fltr_cnt[flow][0] = 0;
 		fdir->fdir_fltr_cnt[flow][1] = 0;
 	}
+}
 
-	fdir->fdir_fltr_cnt_total = 0;
+/**
+ * ice_vc_fdir_write_flow_prof
+ * @vf: pointer to the VF structure
+ * @flow: filter flow type
+ * @seg: array of one or more packet segments that describe the flow
+ * @tun: 0 implies non-tunnel type filter, 1 implies tunnel type filter
+ *
+ * Write the flow's profile config and packet segment into the hardware
+ *
+ * Return: 0 on success, and other on error.
+ */
+static int
+ice_vc_fdir_write_flow_prof(struct ice_vf *vf,
+			    enum ice_fltr_ptype flow,
+			    struct ice_flow_seg_info *seg,
+			    int tun)
+{
+	const struct ice_flow_seg_info *old_seg;
+	struct ice_vf_fdir *fdir = &vf->fdir;
+	struct ice_vsi *vf_vsi, *ctrl_vsi;
+	struct ice_flow_prof *prof = NULL;
+	struct ice_fd_hw_prof *vf_prof;
+	struct device *dev;
+	struct ice_pf *pf;
+	struct ice_hw *hw;
+	u64 entry1_h = 0;
+	u64 entry2_h = 0;
+	int ret;
+
+	pf = vf->pf;
+	dev = ice_pf_to_dev(pf);
+	hw = &pf->hw;
+	vf_vsi = ice_get_vf_vsi(vf);
+	if (!vf_vsi)
+		return -EINVAL;
+
+	ctrl_vsi = pf->vsi[vf->ctrl_vsi_idx];
+	if (!ctrl_vsi)
+		return -EINVAL;
+
+	vf_prof = fdir->fdir_prof[flow];
+	old_seg = vf_prof->fdir_seg[tun];
+	if (old_seg) {
+		if (!memcmp(old_seg, seg, sizeof(*seg) * (tun + 1))) {
+			dev_dbg(dev, "Duplicated profile for VF %d!\n",
+				vf->vf_id);
+			return -EEXIST;
+		}
+
+		if (fdir->fdir_fltr_cnt[flow][tun]) {
+			ret = -EINVAL;
+			dev_dbg(dev, "Input set conflicts for VF %d\n",
+				vf->vf_id);
+			goto err_exit;
+		}
+
+		/* remove previously allocated profile */
+		ice_vc_fdir_rem_prof(vf, flow, tun);
+	}
+
+	ret = ice_flow_add_prof(hw, ICE_BLK_FD, ICE_FLOW_RX, seg,
+				tun + 1, NULL, 0, &prof);
+	if (ret) {
+		dev_dbg(dev, "Could not add VSI flow 0x%x for VF %d\n",
+			flow, vf->vf_id);
+		goto err_exit;
+	}
+
+	ret = ice_flow_add_entry(hw, ICE_BLK_FD, prof->id, vf_vsi->idx,
+				 vf_vsi->idx, ICE_FLOW_PRIO_NORMAL,
+				 seg, NULL, 0, &entry1_h);
+	if (ret) {
+		dev_dbg(dev, "Could not add flow 0x%x VSI entry for VF %d\n",
+			flow, vf->vf_id);
+		goto err_prof;
+	}
+
+	ret = ice_flow_add_entry(hw, ICE_BLK_FD, prof->id, vf_vsi->idx,
+				 ctrl_vsi->idx, ICE_FLOW_PRIO_NORMAL,
+				 seg, NULL, 0, &entry2_h);
+	if (ret) {
+		dev_dbg(dev,
+			"Could not add flow 0x%x Ctrl VSI entry for VF %d\n",
+			flow, vf->vf_id);
+		goto err_entry_1;
+	}
+
+	vf_prof->fdir_seg[tun] = seg;
+	vf_prof->cnt = 0;
+	fdir->prof_entry_cnt[flow][tun] = 0;
+
+	vf_prof->entry_h[vf_prof->cnt][tun] = entry1_h;
+	vf_prof->vsi_h[vf_prof->cnt] = vf_vsi->idx;
+	vf_prof->cnt++;
+	fdir->prof_entry_cnt[flow][tun]++;
+
+	vf_prof->entry_h[vf_prof->cnt][tun] = entry2_h;
+	vf_prof->vsi_h[vf_prof->cnt] = ctrl_vsi->idx;
+	vf_prof->cnt++;
+	fdir->prof_entry_cnt[flow][tun]++;
+
+	vf_prof->prof_id[tun] = prof->id;
+	return 0;
+
+err_entry_1:
+	ice_rem_prof_id_flow(hw, ICE_BLK_FD,
+			     ice_get_hw_vsi_num(hw, vf_vsi->idx), prof->id);
+	ice_flow_rem_entry(hw, ICE_BLK_FD, entry1_h);
+err_prof:
+	ice_flow_rem_prof(hw, ICE_BLK_FD, prof->id);
+err_exit:
+	return ret;
 }
 
 /**
  * ice_vc_fdir_has_prof_conflict
- * @vf: pointer to the VF structure
+ * @vf: pointer to the VF info
  * @conf: FDIR configuration for each filter
  *
  * Check if @conf has conflicting profile with existing profiles
@@ -570,21 +1696,20 @@ ice_vc_fdir_has_prof_conflict(struct ice_vf *vf,
 	struct ice_fdir_fltr *desc;
 
 	list_for_each_entry(desc, &vf->fdir.fdir_rule_list, fltr_node) {
-		struct virtchnl_fdir_fltr_conf *existing_conf;
-		enum ice_fltr_ptype flow_type_a, flow_type_b;
-		struct ice_fdir_fltr *a, *b;
+		struct virtchnl_fdir_fltr_conf *existing_conf =
+				to_fltr_conf_from_desc(desc);
+		struct ice_fdir_fltr *a = &existing_conf->input;
+		struct ice_fdir_fltr *b = &conf->input;
 
-		existing_conf = to_fltr_conf_from_desc(desc);
-		a = &existing_conf->input;
-		b = &conf->input;
-		flow_type_a = a->flow_type;
-		flow_type_b = b->flow_type;
+		enum ice_fltr_ptype flow_type_a = a->flow_type;
+		enum ice_fltr_ptype flow_type_b = b->flow_type;
 
-		/* No need to compare two rules with different tunnel types or
-		 * with the same protocol type.
-		 */
-		if (existing_conf->ttype != conf->ttype ||
-		    flow_type_a == flow_type_b)
+		/* No need to compare two rules with different tunnel type */
+		if (existing_conf->ttype != conf->ttype)
+			continue;
+
+		/* No need to compare two rules with same protocol */
+		if (flow_type_a == flow_type_b)
 			continue;
 
 		switch (flow_type_a) {
@@ -612,125 +1737,380 @@ ice_vc_fdir_has_prof_conflict(struct ice_vf *vf,
 			    flow_type_b == ICE_FLTR_PTYPE_NONF_IPV6_SCTP)
 				return true;
 			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4:
+			if (flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_TCP:
+			if (flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU ||
+			    flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_UDP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_UDP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_UDP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV4_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6:
+			if (flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6_TCP:
+			if (flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU ||
+			    flow_type_b == ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_UDP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_UDP:
+			if (flow_type_b ==
+			ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+			ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP ||
+			    flow_type_b ==
+			ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_DW_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_UDP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_IPV6_TCP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_GTPU_EH_UP_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV4_L2TPV2_PPP_IPV6)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV4)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_UDP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_TCP)
+				return true;
+			break;
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_UDP:
+		case ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6_TCP:
+			if (flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_CONTROL ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2 ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP ||
+			    flow_type_b ==
+				ICE_FLTR_PTYPE_NONF_IPV6_L2TPV2_PPP_IPV6)
+				return true;
+			break;
 		default:
 			break;
 		}
 	}
 
 	return false;
-}
-
-/**
- * ice_vc_fdir_write_flow_prof
- * @vf: pointer to the VF structure
- * @flow: filter flow type
- * @seg: array of one or more packet segments that describe the flow
- * @tun: 0 implies non-tunnel type filter, 1 implies tunnel type filter
- *
- * Write the flow's profile config and packet segment into the hardware
- *
- * Return: 0 on success, and other on error.
- */
-static int
-ice_vc_fdir_write_flow_prof(struct ice_vf *vf, enum ice_fltr_ptype flow,
-			    struct ice_flow_seg_info *seg, int tun)
-{
-	struct ice_vf_fdir *fdir = &vf->fdir;
-	struct ice_vsi *vf_vsi, *ctrl_vsi;
-	struct ice_flow_seg_info *old_seg;
-	struct ice_flow_prof *prof = NULL;
-	struct ice_fd_hw_prof *vf_prof;
-	struct device *dev;
-	struct ice_pf *pf;
-	struct ice_hw *hw;
-	u64 entry1_h = 0;
-	u64 entry2_h = 0;
-	int ret;
-
-	pf = vf->pf;
-	dev = ice_pf_to_dev(pf);
-	hw = &pf->hw;
-	vf_vsi = ice_get_vf_vsi(vf);
-	if (!vf_vsi)
-		return -EINVAL;
-
-	ctrl_vsi = pf->vsi[vf->ctrl_vsi_idx];
-	if (!ctrl_vsi)
-		return -EINVAL;
-
-	vf_prof = fdir->fdir_prof[flow];
-	old_seg = vf_prof->fdir_seg[tun];
-	if (old_seg) {
-		if (!memcmp(old_seg, seg, sizeof(*seg))) {
-			dev_dbg(dev, "Duplicated profile for VF %d!\n",
-				vf->vf_id);
-			return -EEXIST;
-		}
-
-		if (fdir->fdir_fltr_cnt[flow][tun]) {
-			ret = -EINVAL;
-			dev_dbg(dev, "Input set conflicts for VF %d\n",
-				vf->vf_id);
-			goto err_exit;
-		}
-
-		/* remove previously allocated profile */
-		ice_vc_fdir_rem_prof(vf, flow, tun);
-	}
-
-	ret = ice_flow_add_prof(hw, ICE_BLK_FD, ICE_FLOW_RX, seg,
-				tun + 1, false, &prof);
-	if (ret) {
-		dev_dbg(dev, "Could not add VSI flow 0x%x for VF %d\n",
-			flow, vf->vf_id);
-		goto err_exit;
-	}
-
-	ret = ice_flow_add_entry(hw, ICE_BLK_FD, prof->id, vf_vsi->idx,
-				 vf_vsi->idx, ICE_FLOW_PRIO_NORMAL,
-				 seg, &entry1_h);
-	if (ret) {
-		dev_dbg(dev, "Could not add flow 0x%x VSI entry for VF %d\n",
-			flow, vf->vf_id);
-		goto err_prof;
-	}
-
-	ret = ice_flow_add_entry(hw, ICE_BLK_FD, prof->id, vf_vsi->idx,
-				 ctrl_vsi->idx, ICE_FLOW_PRIO_NORMAL,
-				 seg, &entry2_h);
-	if (ret) {
-		dev_dbg(dev,
-			"Could not add flow 0x%x Ctrl VSI entry for VF %d\n",
-			flow, vf->vf_id);
-		goto err_entry_1;
-	}
-
-	vf_prof->fdir_seg[tun] = seg;
-	vf_prof->cnt = 0;
-	fdir->prof_entry_cnt[flow][tun] = 0;
-
-	vf_prof->entry_h[vf_prof->cnt][tun] = entry1_h;
-	vf_prof->vsi_h[vf_prof->cnt] = vf_vsi->idx;
-	vf_prof->cnt++;
-	fdir->prof_entry_cnt[flow][tun]++;
-
-	vf_prof->entry_h[vf_prof->cnt][tun] = entry2_h;
-	vf_prof->vsi_h[vf_prof->cnt] = ctrl_vsi->idx;
-	vf_prof->cnt++;
-	fdir->prof_entry_cnt[flow][tun]++;
-
-	vf_prof->prof_id[tun] = prof->id;
-
-	return 0;
-
-err_entry_1:
-	ice_rem_prof_id_flow(hw, ICE_BLK_FD,
-			     ice_get_hw_vsi_num(hw, vf_vsi->idx), prof->id);
-	ice_flow_rem_entry(hw, ICE_BLK_FD, entry1_h);
-err_prof:
-	ice_flow_rem_prof(hw, ICE_BLK_FD, prof->id);
-err_exit:
-	return ret;
 }
 
 /**
@@ -745,8 +2125,10 @@ err_exit:
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_config_input_set(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
-			     struct virtchnl_fdir_fltr_conf *conf, int tun)
+ice_vc_fdir_config_input_set(struct ice_vf *vf,
+			     struct virtchnl_fdir_add *fltr,
+			     struct virtchnl_fdir_fltr_conf *conf,
+			     int tun)
 {
 	struct ice_fdir_fltr *input = &conf->input;
 	struct device *dev = ice_pf_to_dev(vf->pf);
@@ -756,8 +2138,7 @@ ice_vc_fdir_config_input_set(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 
 	ret = ice_vc_fdir_has_prof_conflict(vf, conf);
 	if (ret) {
-		dev_dbg(dev, "Found flow profile conflict for VF %d\n",
-			vf->vf_id);
+		dev_dbg(dev, "Found flow prof conflict for VF %d\n", vf->vf_id);
 		return ret;
 	}
 
@@ -768,17 +2149,17 @@ ice_vc_fdir_config_input_set(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		return ret;
 	}
 
-	seg = devm_kzalloc(dev, sizeof(*seg), GFP_KERNEL);
+	seg = kcalloc((tun + 1), sizeof(*seg), GFP_KERNEL);
 	if (!seg)
 		return -ENOMEM;
 
-	ret = ice_vc_fdir_set_flow_fld(vf, fltr, conf, seg);
+	ret = ice_vc_fdir_set_flow_fld(vf, fltr, conf, seg, tun);
 	if (ret) {
 		dev_dbg(dev, "Set flow field for VF %d failed\n", vf->vf_id);
 		goto err_exit;
 	}
 
-	ret = ice_vc_fdir_set_flow_hdr(vf, conf, seg);
+	ret = ice_vc_fdir_set_flow_hdr(vf, conf, seg, tun);
 	if (ret) {
 		dev_dbg(dev, "Set flow hdr for VF %d failed\n", vf->vf_id);
 		goto err_exit;
@@ -786,7 +2167,7 @@ ice_vc_fdir_config_input_set(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 
 	ret = ice_vc_fdir_write_flow_prof(vf, flow, seg, tun);
 	if (ret == -EEXIST) {
-		devm_kfree(dev, seg);
+		kfree(seg);
 	} else if (ret) {
 		dev_dbg(dev, "Write flow profile for VF %d failed\n",
 			vf->vf_id);
@@ -796,20 +2177,21 @@ ice_vc_fdir_config_input_set(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 	return 0;
 
 err_exit:
-	devm_kfree(dev, seg);
+	kfree(seg);
 	return ret;
 }
 
 /**
- * ice_vc_fdir_is_raw_flow - check if FDIR flow is raw (binary)
+ * ice_vc_fdir_is_raw_flow
  * @proto: virtchnl protocol headers
  *
- * Check if the FDIR rule is raw flow (protocol agnostic flow) or not. Note
- * that common FDIR rule must have non-zero proto->count. Thus, we choose the
- * tunnel_level and count of proto as the indicators. If both tunnel_level and
- * count of proto are zero, this FDIR rule will be regarded as raw flow.
+ * Check if the FDIR rule is raw flow (protocol agnostic flow) or not.
+ * Note that common FDIR rule must have non-zero proto->count.
+ * Thus, we choose the tunnel_level and count of proto as the indicators.
+ * If both tunnel_level and count of proto are zeros, this FDIR rule will
+ * be regarded as raw flow.
  *
- * Returns: true if headers describe raw flow, false otherwise.
+ * Returns wheater headers describe raw flow or not.
  */
 static bool
 ice_vc_fdir_is_raw_flow(struct virtchnl_proto_hdrs *proto)
@@ -818,27 +2200,30 @@ ice_vc_fdir_is_raw_flow(struct virtchnl_proto_hdrs *proto)
 }
 
 /**
- * ice_vc_fdir_parse_raw - parse a virtchnl raw FDIR rule
+ * ice_vc_fdir_parse_raw
  * @vf: pointer to the VF info
  * @proto: virtchnl protocol headers
  * @conf: FDIR configuration for each filter
  *
- * Parse the virtual channel filter's raw flow and store it in @conf
+ * Parse the virtual channel filter's raw flow and store them into @conf
  *
- * Return: 0 on success or negative errno on failure.
+ * Return: 0 on success, and other on error.
  */
 static int
 ice_vc_fdir_parse_raw(struct ice_vf *vf,
 		      struct virtchnl_proto_hdrs *proto,
 		      struct virtchnl_fdir_fltr_conf *conf)
 {
-	u8 *pkt_buf, *msk_buf __free(kfree) = NULL;
 	struct ice_parser_result rslt;
 	struct ice_pf *pf = vf->pf;
 	u16 pkt_len, udp_port = 0;
 	struct ice_parser *psr;
-	int status = -ENOMEM;
+	u8 *pkt_buf, *msk_buf;
+	int err = -ENOMEM;
 	struct ice_hw *hw;
+
+	if (!proto->raw.pkt_len)
+		return -EINVAL;
 
 	pkt_len = proto->raw.pkt_len;
 
@@ -847,64 +2232,51 @@ ice_vc_fdir_parse_raw(struct ice_vf *vf,
 
 	pkt_buf = kzalloc(pkt_len, GFP_KERNEL);
 	msk_buf = kzalloc(pkt_len, GFP_KERNEL);
-
 	if (!pkt_buf || !msk_buf)
-		goto err_mem_alloc;
+		goto err_parser_prep;
 
 	memcpy(pkt_buf, proto->raw.spec, pkt_len);
 	memcpy(msk_buf, proto->raw.mask, pkt_len);
 
 	hw = &pf->hw;
-
 	/* Get raw profile info via Parser Lib */
-	psr = ice_parser_create(hw);
-	if (IS_ERR(psr)) {
-		status = PTR_ERR(psr);
-		goto err_mem_alloc;
-	}
+	if (ice_parser_create(hw, &psr))
+		goto err_parser_prep;
 
 	ice_parser_dvm_set(psr, ice_is_dvm_ena(hw));
-
-	if (ice_get_open_tunnel_port(hw, &udp_port, TNL_VXLAN))
+	if (ice_get_open_tunnel_port(hw, TNL_VXLAN, &udp_port))
 		ice_parser_vxlan_tunnel_set(psr, udp_port, true);
-
-	status = ice_parser_run(psr, pkt_buf, pkt_len, &rslt);
-	if (status)
-		goto err_parser_destroy;
-
-	if (hw->debug_mask & ICE_DBG_PARSER)
-		ice_parser_result_dump(hw, &rslt);
+	if (ice_parser_run(psr, pkt_buf, pkt_len, &rslt)) {
+		ice_parser_destroy(psr);
+		goto err_parser_prep;
+	}
+	ice_parser_destroy(psr);
 
 	conf->prof = kzalloc(sizeof(*conf->prof), GFP_KERNEL);
-	if (!conf->prof) {
-		status = -ENOMEM;
-		goto err_parser_destroy;
-	}
+	if (!conf->prof)
+		goto err_parser_prep;
 
-	status = ice_parser_profile_init(&rslt, pkt_buf, msk_buf,
-					 pkt_len, ICE_BLK_FD,
-					 conf->prof);
-	if (status)
+	err = ice_parser_profile_init(&rslt, pkt_buf, msk_buf,
+				      pkt_len, ICE_BLK_FD, true,
+				      conf->prof);
+	if (err)
 		goto err_parser_profile_init;
-
-	if (hw->debug_mask & ICE_DBG_PARSER)
-		ice_parser_profile_dump(hw, conf->prof);
 
 	/* Store raw flow info into @conf */
 	conf->pkt_len = pkt_len;
 	conf->pkt_buf = pkt_buf;
+	kfree(msk_buf);
+
 	conf->parser_ena = true;
 
-	ice_parser_destroy(psr);
 	return 0;
 
 err_parser_profile_init:
 	kfree(conf->prof);
-err_parser_destroy:
-	ice_parser_destroy(psr);
-err_mem_alloc:
+err_parser_prep:
+	kfree(msk_buf);
 	kfree(pkt_buf);
-	return status;
+	return err;
 }
 
 /**
@@ -913,12 +2285,13 @@ err_mem_alloc:
  * @fltr: virtual channel add cmd buffer
  * @conf: FDIR configuration for each filter
  *
- * Parse the virtual channel filter's pattern and store them into conf
+ * Parse the virtual channel filter's pattern and store them into @conf
  *
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
+ice_vc_fdir_parse_pattern(struct ice_vf *vf,
+			  struct virtchnl_fdir_add *fltr,
 			  struct virtchnl_fdir_fltr_conf *conf)
 {
 	struct virtchnl_proto_hdrs *proto = &fltr->rule_cfg.proto_hdrs;
@@ -934,12 +2307,13 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		return -EINVAL;
 	}
 
-	/* For raw FDIR filters created by the parser */
+	/* For Protocol Agnostic Flow Offloading case only */
 	if (ice_vc_fdir_is_raw_flow(proto))
 		return ice_vc_fdir_parse_raw(vf, proto, conf);
 
 	for (i = 0; i < proto->count; i++) {
 		struct virtchnl_proto_hdr *hdr = &proto->proto_hdr[i];
+		struct frag_hdr *ip6h_ef;
 		struct ip_esp_hdr *esph;
 		struct ip_auth_hdr *ah;
 		struct sctphdr *sctph;
@@ -948,33 +2322,161 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		struct tcphdr *tcph;
 		struct ethhdr *eth;
 		struct iphdr *iph;
+		u16 frag_offset;
+		u8 msg_type;
 		u8 s_field;
 		u8 *rawh;
+		u16 flags_version;
+		u16 pos;
 
 		switch (hdr->type) {
 		case VIRTCHNL_PROTO_HDR_ETH:
 			eth = (struct ethhdr *)hdr->buffer;
 			input->flow_type = ICE_FLTR_PTYPE_NON_IP_L2;
 
-			if (hdr->field_selector)
+			if (hdr->field_selector) {
+				ether_addr_copy(input->ext_data_outer.dst_mac,
+						eth->h_dest);
+				ether_addr_copy(input->ext_data_outer.src_mac,
+						eth->h_source);
 				input->ext_data.ether_type = eth->h_proto;
+			}
 			break;
 		case VIRTCHNL_PROTO_HDR_IPV4:
 			iph = (struct iphdr *)hdr->buffer;
 			l3 = VIRTCHNL_PROTO_HDR_IPV4;
-			input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_OTHER;
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV4);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV4);
+			else
+				FDIR_SET_FTYPE(IPV4_OTHER);
+
+			if (FDIR_CHK_TTYPE(GTPU))
+				FDIR_SET_TTYPE(GTPU_INNER);
+			else if (FDIR_CHK_TTYPE(GTPU_EH))
+				FDIR_SET_TTYPE(GTPU_EH_INNER);
+			else if (FDIR_CHK_TTYPE(GRE))
+				FDIR_SET_TTYPE(GRE_INNER);
+			else if (FDIR_CHK_TTYPE(L2TPV2))
+				FDIR_SET_TTYPE(L2TPV2_INNER);
+
+			if (FDIR_CHK_TTYPE(GTPOGRE))
+				FDIR_SET_TTYPE(GTPOGRE_INNER);
 
 			if (hdr->field_selector) {
 				input->ip.v4.src_ip = iph->saddr;
 				input->ip.v4.dst_ip = iph->daddr;
+				input->ip.v4.ttl = iph->ttl;
 				input->ip.v4.tos = iph->tos;
 				input->ip.v4.proto = iph->protocol;
+			}
+			break;
+		case VIRTCHNL_PROTO_HDR_IPV4_FRAG:
+			iph = (struct iphdr *)hdr->buffer;
+			l3 = VIRTCHNL_PROTO_HDR_IPV4;
+			frag_offset = be16_to_cpu(iph->frag_off);
+
+			if (frag_offset >> ICE_FDIR_IPV4_PKT_FLAG_MF_SHIFT &
+			    ICE_FDIR_IPV4_PKT_FLAG_MF) {
+				input->flow_type = ICE_FLTR_PTYPE_FRAG_IPV4;
+			} else {
+				dev_err(dev, "Invalid fragment fdir for VF %d\n",
+					vf->vf_id);
+				return -EINVAL;
+			}
+			if (hdr->field_selector) {
+				input->ip.v4.src_ip = iph->saddr;
+				input->ip.v4.dst_ip = iph->daddr;
+				input->ip.v4.ttl = iph->ttl;
+				input->ip.v4.tos = iph->tos;
+				input->ip.v4.proto = iph->protocol;
+				input->ip.v4.packet_id = iph->id;
 			}
 			break;
 		case VIRTCHNL_PROTO_HDR_IPV6:
 			ip6h = (struct ipv6hdr *)hdr->buffer;
 			l3 = VIRTCHNL_PROTO_HDR_IPV6;
-			input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_OTHER;
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV6);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV6);
+			else
+				FDIR_SET_FTYPE(IPV6_OTHER);
+
+			if (FDIR_CHK_TTYPE(GTPU))
+				FDIR_SET_TTYPE(GTPU_INNER);
+			else if (FDIR_CHK_TTYPE(GTPU_EH))
+				FDIR_SET_TTYPE(GTPU_EH_INNER);
+			else if (FDIR_CHK_TTYPE(GRE))
+				FDIR_SET_TTYPE(GRE_INNER);
+			else if (FDIR_CHK_TTYPE(L2TPV2))
+				FDIR_SET_TTYPE(L2TPV2_INNER);
+
+			if (FDIR_CHK_TTYPE(GTPOGRE))
+				FDIR_SET_TTYPE(GTPOGRE_INNER);
 
 			if (hdr->field_selector) {
 				memcpy(input->ip.v6.src_ip,
@@ -983,17 +2485,103 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 				memcpy(input->ip.v6.dst_ip,
 				       ip6h->daddr.in6_u.u6_addr8,
 				       sizeof(ip6h->daddr));
+				input->ip.v6.hlim = ip6h->hop_limit;
 				input->ip.v6.tc = ((u8)(ip6h->priority) << 4) |
 						  (ip6h->flow_lbl[0] >> 4);
 				input->ip.v6.proto = ip6h->nexthdr;
 			}
 			break;
+		case VIRTCHNL_PROTO_HDR_IPV6_EH_FRAG:
+			ip6h_ef = (struct frag_hdr *)hdr->buffer;
+			frag_offset = be16_to_cpu(ip6h_ef->frag_off);
+			if (FIELD_PREP(ICE_FDIR_IPV6_PKT_FLAG_MF, frag_offset)) {
+				input->flow_type = ICE_FLTR_PTYPE_FRAG_IPV6;
+			} else {
+				dev_err(dev, "Invalid fragment fdir for VF %d\n",
+					vf->vf_id);
+				return -EINVAL;
+			}
+
+			if (hdr->field_selector)
+				input->ip.v6.packet_id =
+						ip6h_ef->identification;
+
+			break;
 		case VIRTCHNL_PROTO_HDR_TCP:
 			tcph = (struct tcphdr *)hdr->buffer;
-			if (l3 == VIRTCHNL_PROTO_HDR_IPV4)
+			if (l3 == VIRTCHNL_PROTO_HDR_IPV4 && !conf->ttype)
 				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_TCP;
-			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6)
+			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6 && !conf->ttype)
 				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_TCP;
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV4_TCP);
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV6_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV6_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV6_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV6_TCP);
+
+			if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV6_TCP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV6_TCP);
+
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_IPV4,
+					   IPV4_GRE_IPV4_GTPU_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_IPV4,
+					   IPV6_GRE_IPV4_GTPU_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_IPV6,
+					   IPV4_GRE_IPV4_GTPU_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_IPV6,
+					   IPV6_GRE_IPV4_GTPU_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_TCP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_TCP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_TCP);
+
+			if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP_IPV4))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP_IPV6))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV6_TCP);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP_IPV4))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV4_TCP);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP_IPV6))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV6_TCP);
 
 			if (hdr->field_selector) {
 				if (l3 == VIRTCHNL_PROTO_HDR_IPV4) {
@@ -1007,10 +2595,80 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 			break;
 		case VIRTCHNL_PROTO_HDR_UDP:
 			udph = (struct udphdr *)hdr->buffer;
-			if (l3 == VIRTCHNL_PROTO_HDR_IPV4)
+			l4 = VIRTCHNL_PROTO_HDR_UDP;
+			if (l3 == VIRTCHNL_PROTO_HDR_IPV4 && !conf->ttype)
 				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_UDP;
-			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6)
+			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6 && !conf->ttype)
 				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_UDP;
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP_IPV4))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV4_UDP);
+
+			if (FDIR_CHK_FTYPE(IPV4_GTPU_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_IPV6_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_IPV6_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_DW_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW_IPV6_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GTPU_EH_UP_IPV6))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP_IPV6_UDP);
+
+			if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV6_UDP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV6_UDP);
+
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_IPV4,
+					   IPV4_GRE_IPV4_GTPU_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_IPV4,
+					   IPV6_GRE_IPV4_GTPU_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_IPV6,
+					   IPV4_GRE_IPV4_GTPU_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_IPV6,
+					   IPV6_GRE_IPV4_GTPU_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_DW_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_DW_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_DW_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_DW_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV4,
+					   IPV4_GRE_IPV4_GTPU_EH_UP_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV4,
+					   IPV6_GRE_IPV4_GTPU_EH_UP_IPV4_UDP);
+			FDIR_REPLACE_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP_IPV6,
+					   IPV4_GRE_IPV4_GTPU_EH_UP_IPV6_UDP);
+			FDIR_REPLACE_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP_IPV6,
+					   IPV6_GRE_IPV4_GTPU_EH_UP_IPV6_UDP);
+
+			if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP_IPV4))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV4_L2TPV2_PPP_IPV6))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP_IPV6_UDP);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP_IPV4))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV4_UDP);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2_PPP_IPV6))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP_IPV6_UDP);
 
 			if (hdr->field_selector) {
 				if (l3 == VIRTCHNL_PROTO_HDR_IPV4) {
@@ -1043,21 +2701,26 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 			break;
 		case VIRTCHNL_PROTO_HDR_L2TPV3:
 			if (l3 == VIRTCHNL_PROTO_HDR_IPV4)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_L2TPV3;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV4_L2TPV3;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_L2TPV3;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV6_L2TPV3;
 
 			if (hdr->field_selector)
-				input->l2tpv3_data.session_id = *((__be32 *)hdr->buffer);
+				input->l2tpv3_data.session_id =
+					*((__force __be32 *)hdr->buffer);
 			break;
 		case VIRTCHNL_PROTO_HDR_ESP:
 			esph = (struct ip_esp_hdr *)hdr->buffer;
 			if (l3 == VIRTCHNL_PROTO_HDR_IPV4 &&
 			    l4 == VIRTCHNL_PROTO_HDR_UDP)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_NAT_T_ESP;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV4_NAT_T_ESP;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6 &&
 				 l4 == VIRTCHNL_PROTO_HDR_UDP)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_NAT_T_ESP;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV6_NAT_T_ESP;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV4 &&
 				 l4 == VIRTCHNL_PROTO_HDR_NONE)
 				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_ESP;
@@ -1095,35 +2758,205 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 			rawh = (u8 *)hdr->buffer;
 			s_field = (rawh[0] >> PFCP_S_OFFSET) & PFCP_S_MASK;
 			if (l3 == VIRTCHNL_PROTO_HDR_IPV4 && s_field == 0)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_PFCP_NODE;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV4_PFCP_NODE;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV4 && s_field == 1)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_PFCP_SESSION;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV4_PFCP_SESSION;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6 && s_field == 0)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_PFCP_NODE;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV6_PFCP_NODE;
 			else if (l3 == VIRTCHNL_PROTO_HDR_IPV6 && s_field == 1)
-				input->flow_type = ICE_FLTR_PTYPE_NONF_IPV6_PFCP_SESSION;
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV6_PFCP_SESSION;
 
 			if (hdr->field_selector) {
 				if (l3 == VIRTCHNL_PROTO_HDR_IPV4)
-					input->ip.v4.dst_port = cpu_to_be16(PFCP_PORT_NR);
+					input->ip.v4.dst_port =
+						cpu_to_be16(PFCP_PORT_NR);
 				else if (l3 == VIRTCHNL_PROTO_HDR_IPV6)
-					input->ip.v6.dst_port = cpu_to_be16(PFCP_PORT_NR);
+					input->ip.v6.dst_port =
+						cpu_to_be16(PFCP_PORT_NR);
 			}
+			break;
+		case VIRTCHNL_PROTO_HDR_GRE:
+			if (FDIR_CHK_FTYPE(IPV4_OTHER))
+				FDIR_SET_FTYPE(IPV4_GRE);
+			if (FDIR_CHK_FTYPE(IPV6_OTHER))
+				FDIR_SET_FTYPE(IPV6_GRE);
+			FDIR_SET_TTYPE(GRE);
 			break;
 		case VIRTCHNL_PROTO_HDR_GTPU_IP:
 			rawh = (u8 *)hdr->buffer;
-			input->flow_type = ICE_FLTR_PTYPE_NONF_IPV4_GTPU_IPV4_OTHER;
+			if (FDIR_CHK_FTYPE(IPV4_UDP))
+				FDIR_SET_FTYPE(IPV4_GTPU);
+			else if (FDIR_CHK_FTYPE(IPV6_UDP))
+				FDIR_SET_FTYPE(IPV6_GTPU);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_UDP))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6_UDP))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_UDP))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6_UDP))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU);
 
 			if (hdr->field_selector)
-				input->gtpu_data.teid = *(__be32 *)(&rawh[GTPU_TEID_OFFSET]);
+				input->gtpu_data.teid =
+					*(__force __be32 *)(&rawh[GTPU_TEID_OFFSET]);
 			conf->ttype = ICE_FDIR_TUNNEL_TYPE_GTPU;
+			if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_TTYPE(GTPOGRE);
+			if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_TTYPE(GTPOGRE);
 			break;
 		case VIRTCHNL_PROTO_HDR_GTPU_EH:
 			rawh = (u8 *)hdr->buffer;
+			if (FDIR_CHK_FTYPE(IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH);
+			else if (FDIR_CHK_FTYPE(IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GTPU_EH);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH);
 
 			if (hdr->field_selector)
-				input->gtpu_data.qfi = rawh[GTPU_EH_QFI_OFFSET] & GTPU_EH_QFI_MASK;
-			conf->ttype = ICE_FDIR_TUNNEL_TYPE_GTPU_EH;
+				input->gtpu_data.qfi =
+					rawh[GTPU_EH_QFI_OFFSET] &
+					GTPU_EH_QFI_MASK;
+			if (conf->ttype != ICE_FDIR_TUNNEL_TYPE_GTPOGRE)
+				FDIR_SET_TTYPE(GTPU_EH);
+			break;
+		case VIRTCHNL_PROTO_HDR_GTPU_EH_PDU_DWN:
+			rawh = (u8 *)hdr->buffer;
+			if (FDIR_CHK_FTYPE(IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_DW);
+			else if (FDIR_CHK_FTYPE(IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GTPU_EH_DW);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_DW);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_DW);
+
+			if (hdr->field_selector)
+				input->gtpu_data.qfi =
+					rawh[GTPU_EH_QFI_OFFSET] &
+					GTPU_EH_QFI_MASK;
+			if (conf->ttype != ICE_FDIR_TUNNEL_TYPE_GTPOGRE)
+				FDIR_SET_TTYPE(GTPU_EH);
+			break;
+		case VIRTCHNL_PROTO_HDR_GTPU_EH_PDU_UP:
+			rawh = (u8 *)hdr->buffer;
+			if (FDIR_CHK_FTYPE(IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GTPU_EH_UP);
+			else if (FDIR_CHK_FTYPE(IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GTPU_EH_UP);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP);
+			else if (FDIR_CHK_FTYPE(IPV4_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV4_GRE_IPV4_GTPU_EH_UP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV4_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP);
+			else if (FDIR_CHK_FTYPE(IPV6_GRE_IPV6_GTPU))
+				FDIR_SET_FTYPE(IPV6_GRE_IPV4_GTPU_EH_UP);
+
+			if (hdr->field_selector)
+				input->gtpu_data.qfi =
+					rawh[GTPU_EH_QFI_OFFSET] &
+					GTPU_EH_QFI_MASK;
+			if (conf->ttype != ICE_FDIR_TUNNEL_TYPE_GTPOGRE)
+				FDIR_SET_TTYPE(GTPU_EH);
+			break;
+		case VIRTCHNL_PROTO_HDR_ECPRI:
+			rawh = (u8 *)hdr->buffer;
+			msg_type = rawh[1];
+			if (l3 == VIRTCHNL_PROTO_HDR_NONE &&
+			    l4 == VIRTCHNL_PROTO_HDR_NONE &&
+			    msg_type == 0) {
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_ECPRI_TP0;
+				conf->inset_flag |= FDIR_INSET_FLAG_ECPRI_MAC;
+			} else if ((l3 == VIRTCHNL_PROTO_HDR_IPV4) &&
+				   (l4 == VIRTCHNL_PROTO_HDR_UDP) &&
+				   (msg_type == 0)) {
+				input->flow_type =
+					ICE_FLTR_PTYPE_NONF_IPV4_UDP_ECPRI_TP0;
+				conf->inset_flag |= FDIR_INSET_FLAG_ECPRI_UDP;
+				conf->ttype = ICE_FDIR_TUNNEL_TYPE_ECPRI;
+			} else {
+				return -EINVAL;
+			}
+
+			if (hdr->field_selector)
+				input->ecpri_data.pc_id =
+					*(__force __be16 *)(&rawh[4]);
+			break;
+		case VIRTCHNL_PROTO_HDR_L2TPV2:
+			rawh = (u8 *)hdr->buffer;
+			if (FDIR_CHK_FTYPE(IPV4_UDP))
+				FDIR_SET_FTYPE(IPV4_L2TPV2);
+			else if (FDIR_CHK_FTYPE(IPV6_UDP))
+				FDIR_SET_FTYPE(IPV6_L2TPV2);
+
+			pos = 0;
+			input->l2tpv2_data.flags_version =
+				*(__force __be16 *)(&rawh[pos]);
+			pos += 2;
+
+			flags_version =
+				be16_to_cpu(input->l2tpv2_data.flags_version);
+			if (flags_version & ICE_L2TPV2_FLAGS_CTRL) {
+				if (FDIR_CHK_FTYPE(IPV4_L2TPV2))
+					FDIR_SET_FTYPE(IPV4_L2TPV2_CONTROL);
+				else if (FDIR_CHK_FTYPE(IPV6_L2TPV2))
+					FDIR_SET_FTYPE(IPV6_L2TPV2_CONTROL);
+			}
+
+			if (flags_version & ICE_L2TPV2_FLAGS_LEN) {
+				input->l2tpv2_data.length =
+					*(__force __be16 *)(&rawh[pos]);
+				pos += 2;
+			}
+
+			input->l2tpv2_data.tunnel_id =
+				*(__force __be16 *)(&rawh[pos]);
+			pos += 2;
+
+			input->l2tpv2_data.session_id =
+				*(__force __be16 *)(&rawh[pos]);
+			pos += 2;
+
+			if (flags_version & ICE_L2TPV2_FLAGS_SEQ) {
+				input->l2tpv2_data.ns =
+					*(__force __be16 *)(&rawh[pos]);
+				pos += 2;
+
+				input->l2tpv2_data.nr =
+					*(__force __be16 *)(&rawh[pos]);
+				pos += 2;
+			}
+			/* get l2tpv2 offset */
+			if (flags_version & ICE_L2TPV2_FLAGS_OFF) {
+				input->l2tpv2_data.offset_size =
+					*(__force __be16 *)(&rawh[pos]);
+			}
+
+			conf->ttype = ICE_FDIR_TUNNEL_TYPE_L2TPV2;
+			break;
+		case VIRTCHNL_PROTO_HDR_PPP:
+			if (FDIR_CHK_FTYPE(IPV4_L2TPV2))
+				FDIR_SET_FTYPE(IPV4_L2TPV2_PPP);
+			else if (FDIR_CHK_FTYPE(IPV6_L2TPV2))
+				FDIR_SET_FTYPE(IPV6_L2TPV2_PPP);
 			break;
 		default:
 			dev_dbg(dev, "Invalid header type 0x:%x for VF %d\n",
@@ -1141,17 +2974,19 @@ ice_vc_fdir_parse_pattern(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
  * @fltr: virtual channel add cmd buffer
  * @conf: FDIR configuration for each filter
  *
- * Parse the virtual channel filter's action and store them into conf
+ * Parse the virtual channel filter's action and store them into @conf
  *
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_parse_action(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
+ice_vc_fdir_parse_action(struct ice_vf *vf,
+			 struct virtchnl_fdir_add *fltr,
 			 struct virtchnl_fdir_fltr_conf *conf)
 {
 	struct virtchnl_filter_action_set *as = &fltr->rule_cfg.action_set;
 	struct device *dev = ice_pf_to_dev(vf->pf);
 	struct ice_fdir_fltr *input = &conf->input;
+	struct ice_vsi *vsi;
 	u32 dest_num = 0;
 	u32 mark_num = 0;
 	int i;
@@ -1162,26 +2997,46 @@ ice_vc_fdir_parse_action(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 		return -EINVAL;
 	}
 
+	vsi = ice_get_vf_vsi(vf);
+	if (!vsi)
+		return -EINVAL;
+
 	for (i = 0; i < as->count; i++) {
 		struct virtchnl_filter_action *action = &as->actions[i];
 
 		switch (action->type) {
 		case VIRTCHNL_ACTION_PASSTHRU:
 			dest_num++;
-			input->dest_ctl = ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_OTHER;
+			input->dest_ctl =
+				ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_OTHER;
 			break;
 		case VIRTCHNL_ACTION_DROP:
 			dest_num++;
-			input->dest_ctl = ICE_FLTR_PRGM_DESC_DEST_DROP_PKT;
+			input->dest_ctl =
+				ICE_FLTR_PRGM_DESC_DEST_DROP_PKT;
 			break;
 		case VIRTCHNL_ACTION_QUEUE:
 			dest_num++;
-			input->dest_ctl = ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_QINDEX;
+			input->dest_ctl =
+				ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_QINDEX;
+			if (action->act_conf.queue.index >= vsi->num_rxq) {
+				dev_dbg(dev, "Invalid queue index %d for VF %d\n",
+					action->act_conf.queue.index,
+					vf->vf_id);
+				return -EINVAL;
+			}
 			input->q_index = action->act_conf.queue.index;
 			break;
 		case VIRTCHNL_ACTION_Q_REGION:
 			dest_num++;
-			input->dest_ctl = ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_QGROUP;
+			input->dest_ctl =
+				ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_QGROUP;
+			if (action->act_conf.queue.index >= vsi->num_rxq) {
+				dev_dbg(dev, "Invalid queue index %d for VF %d\n",
+					action->act_conf.queue.index,
+					vf->vf_id);
+				return -EINVAL;
+			}
 			input->q_index = action->act_conf.queue.index;
 			input->q_region = action->act_conf.queue.region;
 			break;
@@ -1220,13 +3075,14 @@ ice_vc_fdir_parse_action(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_validate_fdir_fltr(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
+ice_vc_validate_fdir_fltr(struct ice_vf *vf,
+			  struct virtchnl_fdir_add *fltr,
 			  struct virtchnl_fdir_fltr_conf *conf)
 {
 	struct virtchnl_proto_hdrs *proto = &fltr->rule_cfg.proto_hdrs;
 	int ret;
 
-	/* For raw FDIR filters created by the parser */
+	/* For Protocol Agnostic Flow Offloading case only */
 	if (!ice_vc_fdir_is_raw_flow(proto))
 		if (!ice_vc_validate_pattern(vf, proto))
 			return -EINVAL;
@@ -1235,7 +3091,11 @@ ice_vc_validate_fdir_fltr(struct ice_vf *vf, struct virtchnl_fdir_add *fltr,
 	if (ret)
 		return ret;
 
-	return ice_vc_fdir_parse_action(vf, fltr, conf);
+	ret = ice_vc_fdir_parse_action(vf, fltr, conf);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 /**
@@ -1254,26 +3114,7 @@ ice_vc_fdir_comp_rules(struct virtchnl_fdir_fltr_conf *conf_a,
 
 	if (conf_a->ttype != conf_b->ttype)
 		return false;
-	if (a->flow_type != b->flow_type)
-		return false;
-	if (memcmp(&a->ip, &b->ip, sizeof(a->ip)))
-		return false;
-	if (memcmp(&a->mask, &b->mask, sizeof(a->mask)))
-		return false;
-	if (memcmp(&a->gtpu_data, &b->gtpu_data, sizeof(a->gtpu_data)))
-		return false;
-	if (memcmp(&a->gtpu_mask, &b->gtpu_mask, sizeof(a->gtpu_mask)))
-		return false;
-	if (memcmp(&a->l2tpv3_data, &b->l2tpv3_data, sizeof(a->l2tpv3_data)))
-		return false;
-	if (memcmp(&a->l2tpv3_mask, &b->l2tpv3_mask, sizeof(a->l2tpv3_mask)))
-		return false;
-	if (memcmp(&a->ext_data, &b->ext_data, sizeof(a->ext_data)))
-		return false;
-	if (memcmp(&a->ext_mask, &b->ext_mask, sizeof(a->ext_mask)))
-		return false;
-
-	return true;
+	return ice_fdir_comp_rules_extended(a, b);
 }
 
 /**
@@ -1281,22 +3122,21 @@ ice_vc_fdir_comp_rules(struct virtchnl_fdir_fltr_conf *conf_a,
  * @vf: pointer to the VF info
  * @conf: FDIR configuration for each filter
  *
- * Check if there is duplicated rule with same conf value
+ * Check if there is duplicated rule with same @conf value
  *
  * Return: 0 true success, and false on error.
  */
 static bool
-ice_vc_fdir_is_dup_fltr(struct ice_vf *vf, struct virtchnl_fdir_fltr_conf *conf)
+ice_vc_fdir_is_dup_fltr(struct ice_vf *vf,
+			struct virtchnl_fdir_fltr_conf *conf)
 {
 	struct ice_fdir_fltr *desc;
-	bool ret;
 
 	list_for_each_entry(desc, &vf->fdir.fdir_rule_list, fltr_node) {
 		struct virtchnl_fdir_fltr_conf *node =
 				to_fltr_conf_from_desc(desc);
 
-		ret = ice_vc_fdir_comp_rules(node, conf);
-		if (ret)
+		if (ice_vc_fdir_comp_rules(node, conf))
 			return true;
 	}
 
@@ -1315,7 +3155,8 @@ ice_vc_fdir_is_dup_fltr(struct ice_vf *vf, struct virtchnl_fdir_fltr_conf *conf)
  */
 static int
 ice_vc_fdir_insert_entry(struct ice_vf *vf,
-			 struct virtchnl_fdir_fltr_conf *conf, u32 *id)
+			 struct virtchnl_fdir_fltr_conf *conf,
+			 u32 *id)
 {
 	struct ice_fdir_fltr *input = &conf->input;
 	int i;
@@ -1339,7 +3180,8 @@ ice_vc_fdir_insert_entry(struct ice_vf *vf,
  */
 static void
 ice_vc_fdir_remove_entry(struct ice_vf *vf,
-			 struct virtchnl_fdir_fltr_conf *conf, u32 id)
+			 struct virtchnl_fdir_fltr_conf *conf,
+			 u32 id)
 {
 	struct ice_fdir_fltr *input = &conf->input;
 
@@ -1366,15 +3208,74 @@ ice_vc_fdir_lookup_entry(struct ice_vf *vf, u32 id)
  */
 static void ice_vc_fdir_flush_entry(struct ice_vf *vf)
 {
-	struct virtchnl_fdir_fltr_conf *conf;
 	struct ice_fdir_fltr *desc, *temp;
 
 	list_for_each_entry_safe(desc, temp,
 				 &vf->fdir.fdir_rule_list, fltr_node) {
-		conf = to_fltr_conf_from_desc(desc);
+		struct virtchnl_fdir_fltr_conf *conf =
+				to_fltr_conf_from_desc(desc);
+
 		list_del(&desc->fltr_node);
-		devm_kfree(ice_pf_to_dev(vf->pf), conf);
+		kfree(conf);
 	}
+}
+
+/**
+ * ice_vc_fdir_add_del_raw - write raw flow filter rule into hardware
+ * @vf: pointer to the VF info
+ * @conf: FDIR configuration for each filter
+ * @add: true implies add rule, false implies del rules
+ *
+ * Return: 0 on success, and other on error.
+ */
+static int ice_vc_fdir_add_del_raw(struct ice_vf *vf,
+				   struct virtchnl_fdir_fltr_conf *conf,
+				   bool add)
+{
+	struct ice_fdir_fltr *input = &conf->input;
+	struct ice_vsi *vsi, *ctrl_vsi;
+	struct ice_fltr_desc desc;
+	struct device *dev;
+	struct ice_pf *pf;
+	struct ice_hw *hw;
+	int ret;
+	u8 *pkt;
+
+	pf = vf->pf;
+	dev = ice_pf_to_dev(pf);
+	hw = &pf->hw;
+	vsi = ice_get_vf_vsi(vf);
+	if (!vsi) {
+		dev_dbg(dev, "Invalid vsi for VF %d\n", vf->vf_id);
+		return -EINVAL;
+	}
+
+	input->dest_vsi = vsi->idx;
+	input->comp_report = ICE_FXD_FLTR_QW0_COMP_REPORT_SW;
+
+	ctrl_vsi = pf->vsi[vf->ctrl_vsi_idx];
+	if (!ctrl_vsi) {
+		dev_dbg(dev, "Invalid ctrl_vsi for VF %d\n", vf->vf_id);
+		return -EINVAL;
+	}
+
+	pkt = devm_kzalloc(dev, ICE_FDIR_MAX_RAW_PKT_SIZE, GFP_KERNEL);
+	if (!pkt)
+		return -ENOMEM;
+
+	memcpy(pkt, conf->pkt_buf, conf->pkt_len);
+
+	ice_fdir_get_prgm_desc(hw, input, &desc, add);
+
+	ret = ice_prgm_fdir_fltr(ctrl_vsi, &desc, pkt);
+	if (ret)
+		goto err_free_pkt;
+
+	return 0;
+
+err_free_pkt:
+	devm_kfree(dev, pkt);
+	return ret;
 }
 
 /**
@@ -1388,7 +3289,8 @@ static void ice_vc_fdir_flush_entry(struct ice_vf *vf)
  */
 static int ice_vc_fdir_write_fltr(struct ice_vf *vf,
 				  struct virtchnl_fdir_fltr_conf *conf,
-				  bool add, bool is_tun)
+				  bool add,
+				  bool is_tun)
 {
 	struct ice_fdir_fltr *input = &conf->input;
 	struct ice_vsi *vsi, *ctrl_vsi;
@@ -1422,15 +3324,11 @@ static int ice_vc_fdir_write_fltr(struct ice_vf *vf,
 		return -ENOMEM;
 
 	ice_fdir_get_prgm_desc(hw, input, &desc, add);
-	if (conf->parser_ena) {
-		memcpy(pkt, conf->pkt_buf, conf->pkt_len);
-	} else {
-		ret = ice_fdir_get_gen_prgm_pkt(hw, input, pkt, false, is_tun);
-		if (ret) {
-			dev_dbg(dev, "Gen training pkt for VF %d ptype %d failed\n",
-				vf->vf_id, input->flow_type);
-			goto err_free_pkt;
-		}
+	ret = ice_fdir_get_gen_prgm_pkt(hw, input, pkt, false, is_tun);
+	if (ret) {
+		dev_dbg(dev, "Gen training pkt for VF %d ptype %d failed\n",
+			vf->vf_id, input->flow_type);
+		goto err_free_pkt;
 	}
 
 	ret = ice_prgm_fdir_fltr(ctrl_vsi, &desc, pkt);
@@ -1450,7 +3348,8 @@ err_free_pkt:
  */
 static void ice_vf_fdir_timer(struct timer_list *t)
 {
-	struct ice_vf_fdir_ctx *ctx_irq = from_timer(ctx_irq, t, rx_tmr);
+	struct ice_vf_fdir_ctx *ctx_irq = timer_container_of(ctx_irq, t,
+							     rx_tmr);
 	struct ice_vf_fdir_ctx *ctx_done;
 	struct ice_vf_fdir *fdir;
 	unsigned long flags;
@@ -1521,7 +3420,7 @@ ice_vc_fdir_irq_handler(struct ice_vsi *ctrl_vsi,
 	memcpy(&ctx_done->rx_desc, rx_desc, sizeof(*rx_desc));
 	spin_unlock_irqrestore(&fdir->ctx_lock, flags);
 
-	ret = del_timer(&ctx_irq->rx_tmr);
+	ret = timer_delete(&ctx_irq->rx_tmr);
 	if (!ret)
 		dev_err(dev, "VF %d: Unexpected inactive timer!\n", vf->vf_id);
 
@@ -1535,8 +3434,8 @@ ice_vc_fdir_irq_handler(struct ice_vsi *ctrl_vsi,
  */
 static void ice_vf_fdir_dump_info(struct ice_vf *vf)
 {
-	u32 fd_size, fd_cnt, fd_size_g, fd_cnt_g, fd_size_b, fd_cnt_b;
 	struct ice_vsi *vf_vsi;
+	u32 fd_size, fd_cnt;
 	struct device *dev;
 	struct ice_pf *pf;
 	struct ice_hw *hw;
@@ -1555,25 +3454,16 @@ static void ice_vf_fdir_dump_info(struct ice_vf *vf)
 
 	fd_size = rd32(hw, VSIQF_FD_SIZE(vsi_num));
 	fd_cnt = rd32(hw, VSIQF_FD_CNT(vsi_num));
-	switch (hw->mac_type) {
-	case ICE_MAC_E830:
-		fd_size_g = FIELD_GET(E830_VSIQF_FD_CNT_FD_GCNT_M, fd_size);
-		fd_size_b = FIELD_GET(E830_VSIQF_FD_CNT_FD_BCNT_M, fd_size);
-		fd_cnt_g = FIELD_GET(E830_VSIQF_FD_CNT_FD_GCNT_M, fd_cnt);
-		fd_cnt_b = FIELD_GET(E830_VSIQF_FD_CNT_FD_BCNT_M, fd_cnt);
-		break;
-	case ICE_MAC_E810:
-	default:
-		fd_size_g = FIELD_GET(E800_VSIQF_FD_CNT_FD_GCNT_M, fd_size);
-		fd_size_b = FIELD_GET(E800_VSIQF_FD_CNT_FD_BCNT_M, fd_size);
-		fd_cnt_g = FIELD_GET(E800_VSIQF_FD_CNT_FD_GCNT_M, fd_cnt);
-		fd_cnt_b = FIELD_GET(E800_VSIQF_FD_CNT_FD_BCNT_M, fd_cnt);
-	}
-
-	dev_dbg(dev, "VF %d: Size in the FD table: guaranteed:0x%x, best effort:0x%x\n",
-		vf->vf_id, fd_size_g, fd_size_b);
-	dev_dbg(dev, "VF %d: Filter counter in the FD table: guaranteed:0x%x, best effort:0x%x\n",
-		vf->vf_id, fd_cnt_g, fd_cnt_b);
+	dev_dbg(dev, "VF %d: space allocated: guar:0x%lx, be:0x%lx, space consumed: guar:0x%lx, be:0x%lx\n",
+		vf->vf_id,
+		(fd_size & VSIQF_FD_CNT_FD_GCNT_M_BY_MAC(hw)) >>
+		VSIQF_FD_CNT_FD_GCNT_S,
+		(fd_size & VSIQF_FD_CNT_FD_BCNT_M_BY_MAC(hw)) >>
+		VSIQF_FD_CNT_FD_BCNT_S,
+		(fd_cnt & VSIQF_FD_CNT_FD_GCNT_M_BY_MAC(hw)) >>
+		VSIQF_FD_CNT_FD_GCNT_S,
+		(fd_cnt & VSIQF_FD_CNT_FD_BCNT_M_BY_MAC(hw)) >>
+		VSIQF_FD_CNT_FD_BCNT_S);
 }
 
 /**
@@ -1585,7 +3475,8 @@ static void ice_vf_fdir_dump_info(struct ice_vf *vf)
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vf_verify_rx_desc(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
+ice_vf_verify_rx_desc(struct ice_vf *vf,
+		      struct ice_vf_fdir_ctx *ctx,
 		      enum virtchnl_fdir_prgm_status *status)
 {
 	struct device *dev = ice_pf_to_dev(vf->pf);
@@ -1676,7 +3567,8 @@ static int ice_fdir_is_tunnel(enum ice_fdir_tunnel_type ttype)
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_add_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
+ice_vc_add_fdir_fltr_post(struct ice_vf *vf,
+			  struct ice_vf_fdir_ctx *ctx,
 			  enum virtchnl_fdir_prgm_status status,
 			  bool success)
 {
@@ -1688,7 +3580,7 @@ ice_vc_add_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
 
 	v_ret = VIRTCHNL_STATUS_SUCCESS;
 	len = sizeof(*resp);
-	resp = kzalloc(len, GFP_KERNEL);
+	resp = kzalloc(sizeof(*resp), GFP_KERNEL);
 	if (!resp) {
 		len = 0;
 		v_ret = VIRTCHNL_STATUS_ERR_NO_MEMORY;
@@ -1699,11 +3591,10 @@ ice_vc_add_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
 	if (!success)
 		goto err_exit;
 
-	is_tun = 0;
+	is_tun = ice_fdir_is_tunnel(conf->ttype);
 	resp->status = status;
 	resp->flow_id = conf->flow_id;
 	vf->fdir.fdir_fltr_cnt[conf->input.flow_type][is_tun]++;
-	vf->fdir.fdir_fltr_cnt_total++;
 
 	ret = ice_vc_send_msg_to_vf(vf, ctx->v_opcode, v_ret,
 				    (u8 *)resp, len);
@@ -1719,7 +3610,7 @@ err_exit:
 	if (resp)
 		resp->status = status;
 	ice_vc_fdir_remove_entry(vf, conf, conf->flow_id);
-	devm_kfree(dev, conf);
+	kfree(conf);
 
 	ret = ice_vc_send_msg_to_vf(vf, ctx->v_opcode, v_ret,
 				    (u8 *)resp, len);
@@ -1741,7 +3632,8 @@ err_exit:
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_del_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
+ice_vc_del_fdir_fltr_post(struct ice_vf *vf,
+			  struct ice_vf_fdir_ctx *ctx,
 			  enum virtchnl_fdir_prgm_status status,
 			  bool success)
 {
@@ -1753,7 +3645,7 @@ ice_vc_del_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
 
 	v_ret = VIRTCHNL_STATUS_SUCCESS;
 	len = sizeof(*resp);
-	resp = kzalloc(len, GFP_KERNEL);
+	resp = kzalloc(sizeof(*resp), GFP_KERNEL);
 	if (!resp) {
 		len = 0;
 		v_ret = VIRTCHNL_STATUS_ERR_NO_MEMORY;
@@ -1764,11 +3656,10 @@ ice_vc_del_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
 	if (!success)
 		goto err_exit;
 
-	is_tun = 0;
+	is_tun = ice_fdir_is_tunnel(conf->ttype);
 	resp->status = status;
 	ice_vc_fdir_remove_entry(vf, conf, conf->flow_id);
 	vf->fdir.fdir_fltr_cnt[conf->input.flow_type][is_tun]--;
-	vf->fdir.fdir_fltr_cnt_total--;
 
 	ret = ice_vc_send_msg_to_vf(vf, ctx->v_opcode, v_ret,
 				    (u8 *)resp, len);
@@ -1778,14 +3669,14 @@ ice_vc_del_fdir_fltr_post(struct ice_vf *vf, struct ice_vf_fdir_ctx *ctx,
 		vf->vf_id, conf->flow_id,
 		(ctx->v_opcode == VIRTCHNL_OP_ADD_FDIR_FILTER) ?
 		"add" : "del");
-	devm_kfree(dev, conf);
+	kfree(conf);
 	return ret;
 
 err_exit:
 	if (resp)
 		resp->status = status;
 	if (success)
-		devm_kfree(dev, conf);
+		kfree(conf);
 
 	ret = ice_vc_send_msg_to_vf(vf, ctx->v_opcode, v_ret,
 				    (u8 *)resp, len);
@@ -1868,7 +3759,7 @@ err_exit:
 }
 
 /**
- * ice_vc_fdir_set_irq_ctx - set FDIR context info for later IRQ handler
+ * ice_vc_fdir_set_irq_ctx - set FDIR context info for later irq handler
  * @vf: pointer to the VF structure
  * @conf: FDIR configuration for each filter
  * @v_opcode: virtual channel operation code
@@ -1876,7 +3767,8 @@ err_exit:
  * Return: 0 on success, and other on error.
  */
 static int
-ice_vc_fdir_set_irq_ctx(struct ice_vf *vf, struct virtchnl_fdir_fltr_conf *conf,
+ice_vc_fdir_set_irq_ctx(struct ice_vf *vf,
+			struct virtchnl_fdir_fltr_conf *conf,
 			enum virtchnl_ops v_opcode)
 {
 	struct device *dev = ice_pf_to_dev(vf->pf);
@@ -1900,13 +3792,14 @@ ice_vc_fdir_set_irq_ctx(struct ice_vf *vf, struct virtchnl_fdir_fltr_conf *conf,
 	ctx->stat = ICE_FDIR_CTX_READY;
 	timer_setup(&ctx->rx_tmr, ice_vf_fdir_timer, 0);
 
-	mod_timer(&ctx->rx_tmr, round_jiffies(msecs_to_jiffies(10) + jiffies));
+	mod_timer(&ctx->rx_tmr,
+		  round_jiffies(msecs_to_jiffies(10) + jiffies));
 
 	return 0;
 }
 
 /**
- * ice_vc_fdir_clear_irq_ctx - clear FDIR context info for IRQ handler
+ * ice_vc_fdir_clear_irq_ctx - clear FDIR context info for irq handler
  * @vf: pointer to the VF structure
  *
  * Return: 0 on success, and other on error.
@@ -1916,21 +3809,21 @@ static void ice_vc_fdir_clear_irq_ctx(struct ice_vf *vf)
 	struct ice_vf_fdir_ctx *ctx = &vf->fdir.ctx_irq;
 	unsigned long flags;
 
-	del_timer(&ctx->rx_tmr);
+	timer_delete(&ctx->rx_tmr);
 	spin_lock_irqsave(&vf->fdir.ctx_lock, flags);
 	ctx->flags &= ~ICE_VF_FDIR_CTX_VALID;
 	spin_unlock_irqrestore(&vf->fdir.ctx_lock, flags);
 }
 
 /**
- * ice_vc_parser_fv_check_diff - check two parsed FDIR profile fv context
+ * ice_vc_parser_fv_check_diff -  check two parsed FDIR profile fv context
  * @fv_a: struct of parsed FDIR profile field vector
  * @fv_b: struct of parsed FDIR profile field vector
  *
  * Check if the two parsed FDIR profile field vector context are different,
  * including proto_id, offset and mask.
  *
- * Return: true on different, false on otherwise.
+ * Return: true on differnet, false on otherwise.
  */
 static bool ice_vc_parser_fv_check_diff(struct ice_parser_fv *fv_a,
 					struct ice_parser_fv *fv_b)
@@ -1941,14 +3834,12 @@ static bool ice_vc_parser_fv_check_diff(struct ice_parser_fv *fv_a,
 }
 
 /**
- * ice_vc_parser_fv_save - save parsed FDIR profile fv context
+ * ice_vc_parser_fv_save -  save parsed FDIR profile fv context
  * @fv: struct of parsed FDIR profile field vector
  * @fv_src: parsed FDIR profile field vector context to save
  *
  * Save the parsed FDIR profile field vector context, including proto_id,
  * offset and mask.
- *
- * Return: Void.
  */
 static void ice_vc_parser_fv_save(struct ice_parser_fv *fv,
 				  struct ice_parser_fv *fv_src)
@@ -1956,26 +3847,24 @@ static void ice_vc_parser_fv_save(struct ice_parser_fv *fv,
 	fv->proto_id	= fv_src->proto_id;
 	fv->offset	= fv_src->offset;
 	fv->msk		= fv_src->msk;
-	fv->spec	= 0;
 }
 
 /**
  * ice_vc_add_fdir_raw - add a raw FDIR filter for VF
  * @vf: pointer to the VF info
  * @conf: FDIR configuration for each filter
- * @v_ret: the final VIRTCHNL code
  * @stat: pointer to the VIRTCHNL_OP_ADD_FDIR_FILTER
  * @len: length of the stat
  *
- * Return: 0 on success or negative errno on failure.
+ * Return: 0 on success, and other on error.
  */
 static int
 ice_vc_add_fdir_raw(struct ice_vf *vf,
 		    struct virtchnl_fdir_fltr_conf *conf,
-		    enum virtchnl_status_code *v_ret,
 		    struct virtchnl_fdir_add *stat, int len)
 {
 	struct ice_vsi *vf_vsi, *ctrl_vsi;
+	enum virtchnl_status_code v_ret;
 	struct ice_fdir_prof_info *pi;
 	struct ice_pf *pf = vf->pf;
 	int ret, ptg, id, i;
@@ -1985,28 +3874,31 @@ ice_vc_add_fdir_raw(struct ice_vf *vf,
 
 	dev = ice_pf_to_dev(pf);
 	hw = &pf->hw;
-	*v_ret = VIRTCHNL_STATUS_ERR_PARAM;
-	stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 
 	id = find_first_bit(conf->prof->ptypes, ICE_FLOW_PTYPE_MAX);
 	ptg = hw->blk[ICE_BLK_FD].xlt1.t[id];
 
+	v_ret = VIRTCHNL_STATUS_SUCCESS;
 	vf_vsi = ice_get_vf_vsi(vf);
 	if (!vf_vsi) {
+		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 		dev_err(dev, "Can not get FDIR vf_vsi for VF %d\n", vf->vf_id);
-		return -ENODEV;
+		goto err_exit;
 	}
 
 	ctrl_vsi = pf->vsi[vf->ctrl_vsi_idx];
 	if (!ctrl_vsi) {
+		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 		dev_err(dev, "Can not get FDIR ctrl_vsi for VF %d\n",
 			vf->vf_id);
-		return -ENODEV;
+		goto err_exit;
 	}
 
 	fv_found = false;
 
-	/* Check if profile info already exists, then update the counter */
+	/* Check if profile info already existed, then update the counter */
 	pi = &vf->fdir_prof_info[ptg];
 	if (pi->fdir_active_cnt != 0) {
 		for (i = 0; i < ICE_MAX_FV_WORDS; i++)
@@ -2021,38 +3913,39 @@ ice_vc_add_fdir_raw(struct ice_vf *vf,
 
 	/* HW profile setting is only required for the first time */
 	if (!fv_found) {
-		ret = ice_flow_set_parser_prof(hw, vf_vsi->idx,
-					       ctrl_vsi->idx, conf->prof,
-					       ICE_BLK_FD);
+		ret = ice_flow_set_hw_prof(hw, vf_vsi->idx,
+					   ctrl_vsi->idx, conf->prof,
+					   ICE_BLK_FD);
 
-		if (ret) {
-			*v_ret = VIRTCHNL_STATUS_ERR_NO_MEMORY;
-			dev_dbg(dev, "VF %d: insert hw prof failed\n",
-				vf->vf_id);
-			return ret;
-		}
+		if (ret)
+			goto err_free_conf;
 	}
 
 	ret = ice_vc_fdir_insert_entry(vf, conf, &conf->flow_id);
 	if (ret) {
-		*v_ret = VIRTCHNL_STATUS_ERR_NO_MEMORY;
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 		dev_dbg(dev, "VF %d: insert FDIR list failed\n",
 			vf->vf_id);
-		return ret;
+		goto err_free_conf;
 	}
 
 	ret = ice_vc_fdir_set_irq_ctx(vf, conf,
 				      VIRTCHNL_OP_ADD_FDIR_FILTER);
 	if (ret) {
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 		dev_dbg(dev, "VF %d: set FDIR context failed\n",
 			vf->vf_id);
 		goto err_rem_entry;
 	}
 
-	ret = ice_vc_fdir_write_fltr(vf, conf, true, false);
+	ret = ice_vc_fdir_add_del_raw(vf, conf, true);
 	if (ret) {
-		dev_err(dev, "VF %d: adding FDIR raw flow rule failed, ret:%d\n",
-			vf->vf_id, ret);
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
+		ice_dev_err_errno(dev, ret, "VF %d: adding FDIR raw flow rule failed",
+				  vf->vf_id);
 		goto err_clr_irq;
 	}
 
@@ -2061,7 +3954,6 @@ ice_vc_add_fdir_raw(struct ice_vf *vf,
 		for (i = 0; i < conf->prof->fv_num; i++)
 			ice_vc_parser_fv_save(&pi->prof.fv[i],
 					      &conf->prof->fv[i]);
-		pi->prof.fv_num = conf->prof->fv_num;
 		pi->fdir_active_cnt = 1;
 	}
 
@@ -2071,6 +3963,16 @@ err_clr_irq:
 	ice_vc_fdir_clear_irq_ctx(vf);
 err_rem_entry:
 	ice_vc_fdir_remove_entry(vf, conf, conf->flow_id);
+err_free_conf:
+	if (conf->parser_ena)
+		conf->parser_ena = false;
+	kfree(conf->prof);
+	kfree(conf->pkt_buf);
+	kfree(conf);
+err_exit:
+	ret = ice_vc_send_msg_to_vf(vf, VIRTCHNL_OP_ADD_FDIR_FILTER, v_ret,
+				    (u8 *)stat, len);
+	kfree(stat);
 	return ret;
 }
 
@@ -2087,7 +3989,6 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	struct virtchnl_fdir_add *stat = NULL;
 	struct virtchnl_fdir_fltr_conf *conf;
 	enum virtchnl_status_code v_ret;
-	struct ice_vsi *vf_vsi;
 	struct device *dev;
 	struct ice_pf *pf;
 	int is_tun = 0;
@@ -2096,22 +3997,6 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 
 	pf = vf->pf;
 	dev = ice_pf_to_dev(pf);
-	vf_vsi = ice_get_vf_vsi(vf);
-	if (!vf_vsi) {
-		dev_err(dev, "Can not get FDIR vf_vsi for VF %u\n", vf->vf_id);
-		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
-		goto err_exit;
-	}
-
-#define ICE_VF_MAX_FDIR_FILTERS	128
-	if (!ice_fdir_num_avail_fltr(&pf->hw, vf_vsi) ||
-	    vf->fdir.fdir_fltr_cnt_total >= ICE_VF_MAX_FDIR_FILTERS) {
-		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
-		dev_err(dev, "Max number of FDIR filters for VF %d is reached\n",
-			vf->vf_id);
-		goto err_exit;
-	}
-
 	ret = ice_vc_fdir_param_check(vf, fltr->vsi_id);
 	if (ret) {
 		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
@@ -2122,8 +4007,8 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	ret = ice_vf_start_ctrl_vsi(vf);
 	if (ret && (ret != -EEXIST)) {
 		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
-		dev_err(dev, "Init FDIR for VF %d failed, ret:%d\n",
-			vf->vf_id, ret);
+		ice_dev_err_errno(dev, ret, "Init FDIR for VF %d failed",
+				  vf->vf_id);
 		goto err_exit;
 	}
 
@@ -2134,7 +4019,7 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 		goto err_exit;
 	}
 
-	conf = devm_kzalloc(dev, sizeof(*conf), GFP_KERNEL);
+	conf = kzalloc(sizeof(*conf), GFP_KERNEL);
 	if (!conf) {
 		v_ret = VIRTCHNL_STATUS_ERR_NO_MEMORY;
 		dev_dbg(dev, "Alloc conf for VF %d failed\n", vf->vf_id);
@@ -2144,7 +4029,7 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	len = sizeof(*stat);
 	ret = ice_vc_validate_fdir_fltr(vf, fltr, conf);
 	if (ret) {
-		v_ret = VIRTCHNL_STATUS_ERR_PARAM;
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
 		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_INVALID;
 		dev_dbg(dev, "Invalid FDIR filter from VF %d\n", vf->vf_id);
 		goto err_free_conf;
@@ -2153,27 +4038,26 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	if (fltr->validate_only) {
 		v_ret = VIRTCHNL_STATUS_SUCCESS;
 		stat->status = VIRTCHNL_FDIR_SUCCESS;
-		devm_kfree(dev, conf);
+		kfree(conf->prof);
+		kfree(conf->pkt_buf);
+		kfree(conf);
 		ret = ice_vc_send_msg_to_vf(vf, VIRTCHNL_OP_ADD_FDIR_FILTER,
 					    v_ret, (u8 *)stat, len);
 		goto exit;
 	}
 
-	/* For raw FDIR filters created by the parser */
-	if (conf->parser_ena) {
-		ret = ice_vc_add_fdir_raw(vf, conf, &v_ret, stat, len);
-		if (ret)
-			goto err_free_conf;
-		goto exit;
-	}
+	/* For Protocol Agnostic Flow Offloading case only */
+	if (conf->parser_ena)
+		return ice_vc_add_fdir_raw(vf, conf, stat, len);
 
 	is_tun = ice_fdir_is_tunnel(conf->ttype);
 	ret = ice_vc_fdir_config_input_set(vf, fltr, conf, is_tun);
 	if (ret) {
 		v_ret = VIRTCHNL_STATUS_SUCCESS;
 		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_CONFLICT;
-		dev_err(dev, "VF %d: FDIR input set configure failed, ret:%d\n",
-			vf->vf_id, ret);
+		ice_dev_err_errno(dev, ret,
+				  "VF %d: FDIR input set configure failed",
+				  vf->vf_id);
 		goto err_free_conf;
 	}
 
@@ -2206,8 +4090,8 @@ int ice_vc_add_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	if (ret) {
 		v_ret = VIRTCHNL_STATUS_SUCCESS;
 		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
-		dev_err(dev, "VF %d: writing FDIR rule failed, ret:%d\n",
-			vf->vf_id, ret);
+		ice_dev_err_errno(dev, ret, "VF %d: writing FDIR rule failed",
+				  vf->vf_id);
 		goto err_clr_irq;
 	}
 
@@ -2220,7 +4104,9 @@ err_clr_irq:
 err_rem_entry:
 	ice_vc_fdir_remove_entry(vf, conf, conf->flow_id);
 err_free_conf:
-	devm_kfree(dev, conf);
+	kfree(conf->prof);
+	kfree(conf->pkt_buf);
+	kfree(conf);
 err_exit:
 	ret = ice_vc_send_msg_to_vf(vf, VIRTCHNL_OP_ADD_FDIR_FILTER, v_ret,
 				    (u8 *)stat, len);
@@ -2232,55 +4118,58 @@ err_exit:
  * ice_vc_del_fdir_raw - delete a raw FDIR filter for VF
  * @vf: pointer to the VF info
  * @conf: FDIR configuration for each filter
- * @v_ret: the final VIRTCHNL code
  * @stat: pointer to the VIRTCHNL_OP_DEL_FDIR_FILTER
  * @len: length of the stat
  *
- * Return: 0 on success or negative errno on failure.
+ * Return: 0 on success, and other on error.
  */
 static int
 ice_vc_del_fdir_raw(struct ice_vf *vf,
 		    struct virtchnl_fdir_fltr_conf *conf,
-		    enum virtchnl_status_code *v_ret,
 		    struct virtchnl_fdir_del *stat, int len)
 {
 	struct ice_vsi *vf_vsi, *ctrl_vsi;
 	enum ice_block blk = ICE_BLK_FD;
+	enum virtchnl_status_code v_ret;
 	struct ice_fdir_prof_info *pi;
 	struct ice_pf *pf = vf->pf;
 	struct device *dev;
 	struct ice_hw *hw;
-	unsigned long id;
 	u16 vsi_num;
 	int ptg;
 	int ret;
+	int id;
 
 	dev = ice_pf_to_dev(pf);
 	hw = &pf->hw;
-	*v_ret = VIRTCHNL_STATUS_ERR_PARAM;
-	stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
 
 	id = find_first_bit(conf->prof->ptypes, ICE_FLOW_PTYPE_MAX);
 	ptg = hw->blk[ICE_BLK_FD].xlt1.t[id];
 
-	ret = ice_vc_fdir_write_fltr(vf, conf, false, false);
+	ret = ice_vc_fdir_add_del_raw(vf, conf, false);
 	if (ret) {
-		dev_err(dev, "VF %u: deleting FDIR raw flow rule failed: %d\n",
-			vf->vf_id, ret);
-		return ret;
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
+		ice_dev_err_errno(dev, ret, "VF %d: deleting FDIR raw flow rule failed",
+				  vf->vf_id);
+		goto err_del_tmr;
 	}
 
 	vf_vsi = ice_get_vf_vsi(vf);
 	if (!vf_vsi) {
-		dev_err(dev, "Can not get FDIR vf_vsi for VF %u\n", vf->vf_id);
-		return -ENODEV;
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
+		dev_err(dev, "Can not get FDIR vf_vsi for VF %d\n", vf->vf_id);
+		goto err_exit;
 	}
 
 	ctrl_vsi = pf->vsi[vf->ctrl_vsi_idx];
 	if (!ctrl_vsi) {
-		dev_err(dev, "Can not get FDIR ctrl_vsi for VF %u\n",
+		v_ret = VIRTCHNL_STATUS_SUCCESS;
+		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
+		dev_err(dev, "Can not get FDIR ctrl_vsi for VF %d\n",
 			vf->vf_id);
-		return -ENODEV;
+		goto err_exit;
 	}
 
 	pi = &vf->fdir_prof_info[ptg];
@@ -2296,8 +4185,20 @@ ice_vc_del_fdir_raw(struct ice_vf *vf,
 		}
 	}
 
+	kfree(conf->prof);
+	kfree(conf->pkt_buf);
 	conf->parser_ena = false;
-	return 0;
+	kfree(stat);
+
+	return ret;
+
+err_del_tmr:
+	ice_vc_fdir_clear_irq_ctx(vf);
+err_exit:
+	ret = ice_vc_send_msg_to_vf(vf, VIRTCHNL_OP_DEL_FDIR_FILTER, v_ret,
+				    (u8 *)stat, len);
+	kfree(stat);
+	return ret;
 }
 
 /**
@@ -2365,21 +4266,17 @@ int ice_vc_del_fdir_fltr(struct ice_vf *vf, u8 *msg)
 		goto err_exit;
 	}
 
-	/* For raw FDIR filters created by the parser */
-	if (conf->parser_ena) {
-		ret = ice_vc_del_fdir_raw(vf, conf, &v_ret, stat, len);
-		if (ret)
-			goto err_del_tmr;
-		goto exit;
-	}
+	/* For Protocol Agnostic Flow Offloading case only */
+	if (conf->parser_ena)
+		return ice_vc_del_fdir_raw(vf, conf, stat, len);
 
 	is_tun = ice_fdir_is_tunnel(conf->ttype);
 	ret = ice_vc_fdir_write_fltr(vf, conf, false, is_tun);
 	if (ret) {
 		v_ret = VIRTCHNL_STATUS_SUCCESS;
 		stat->status = VIRTCHNL_FDIR_FAILURE_RULE_NORESOURCE;
-		dev_err(dev, "VF %d: writing FDIR rule failed, ret:%d\n",
-			vf->vf_id, ret);
+		ice_dev_err_errno(dev, ret, "VF %d: writing FDIR rule failed",
+				  vf->vf_id);
 		goto err_del_tmr;
 	}
 
@@ -2389,7 +4286,6 @@ int ice_vc_del_fdir_fltr(struct ice_vf *vf, u8 *msg)
 	if (fdir->fdir_fltr_cnt[flow][is_tun] == 1)
 		ice_vc_fdir_rem_prof(vf, flow, is_tun);
 
-exit:
 	kfree(stat);
 
 	return ret;
@@ -2430,4 +4326,18 @@ void ice_vf_fdir_exit(struct ice_vf *vf)
 	idr_destroy(&vf->fdir.fdir_rule_idr);
 	ice_vc_fdir_rem_prof_all(vf);
 	ice_vc_fdir_free_prof_all(vf);
+}
+
+/**
+ * ice_vf_fdir_exit_all - destroy FDIR resource for all VFs in a PF
+ * @pf: pointer to PF info
+ */
+void
+ice_vf_fdir_exit_all(struct ice_pf *pf)
+{
+	struct ice_vf *vf;
+	unsigned int bkt;
+
+	ice_for_each_vf(pf, bkt, vf)
+		ice_vf_fdir_exit(vf);
 }

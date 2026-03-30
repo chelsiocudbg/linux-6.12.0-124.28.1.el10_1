@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+/* Copyright (c) 2015 - 2023 Intel Corporation */
 #include "osdep.h"
 #include "hmc.h"
 #include "defs.h"
@@ -142,7 +142,7 @@ static struct irdma_puda_buf *irdma_puda_alloc_buf(struct irdma_sc_dev *dev,
 	struct irdma_puda_buf *buf;
 	struct irdma_virt_mem buf_mem;
 
-	buf_mem.size = sizeof(struct irdma_puda_buf);
+	buf_mem.size = sizeof(*buf);
 	buf_mem.va = kzalloc(buf_mem.size, GFP_KERNEL);
 	if (!buf_mem.va)
 		return NULL;
@@ -337,7 +337,7 @@ int irdma_puda_poll_cmpl(struct irdma_sc_dev *dev, struct irdma_sc_cq *cq,
 							cq->vsi->ieq;
 	} else {
 		ibdev_dbg(to_ibdev(dev), "PUDA: qp_type error\n");
-		return -EINVAL;
+		return -EFAULT;
 	}
 
 	ret = irdma_puda_poll_info(cq, &info);
@@ -700,11 +700,14 @@ static int irdma_puda_qp_create(struct irdma_puda_rsrc *rsrc)
 	irdma_qp_add_qos(qp);
 	irdma_puda_qp_setctx(rsrc);
 
+	qp->qp_state = IRDMA_QP_STATE_RTS;
+
 	if (rsrc->dev->ceq_valid)
 		ret = irdma_cqp_qp_create_cmd(rsrc->dev, qp);
 	else
 		ret = irdma_puda_qp_wqe(rsrc->dev, qp);
 	if (ret) {
+		qp->qp_state = IRDMA_QP_STATE_INVALID;
 		irdma_qp_rem_qos(qp);
 		rsrc->dev->ws_remove(qp->vsi, qp->user_pri);
 		dma_free_coherent(rsrc->dev->hw->device, rsrc->qpmem.size,
@@ -734,7 +737,7 @@ static int irdma_puda_cq_wqe(struct irdma_sc_dev *dev, struct irdma_sc_cq *cq)
 		return -ENOMEM;
 
 	set_64bit_val(wqe, 0, cq->cq_uk.cq_size);
-	set_64bit_val(wqe, 8, (uintptr_t)cq >> 1);
+	set_64bit_val(wqe, 8, RS_64_1(cq, 1));
 	set_64bit_val(wqe, 16,
 		      FIELD_PREP(IRDMA_CQPSQ_CQ_SHADOW_READ_THRESHOLD, cq->shadow_read_threshold));
 	set_64bit_val(wqe, 32, cq->cq_pa);
@@ -758,13 +761,6 @@ static int irdma_puda_cq_wqe(struct irdma_sc_dev *dev, struct irdma_sc_cq *cq)
 	irdma_sc_cqp_post_sq(dev->cqp);
 	status = irdma_sc_poll_for_cqp_op_done(dev->cqp, IRDMA_CQP_OP_CREATE_CQ,
 					       &compl_info);
-	if (!status) {
-		struct irdma_sc_ceq *ceq = dev->ceq[0];
-
-		if (ceq && ceq->reg_cq)
-			status = irdma_sc_add_cq_ctx(ceq, cq);
-	}
-
 	return status;
 }
 
@@ -897,23 +893,17 @@ void irdma_puda_dele_rsrc(struct irdma_sc_vsi *vsi, enum puda_rsrc_type type,
 	struct irdma_puda_buf *buf = NULL;
 	struct irdma_puda_buf *nextbuf = NULL;
 	struct irdma_virt_mem *vmem;
-	struct irdma_sc_ceq *ceq;
 
-	ceq = vsi->dev->ceq[0];
 	switch (type) {
 	case IRDMA_PUDA_RSRC_TYPE_ILQ:
 		rsrc = vsi->ilq;
 		vmem = &vsi->ilq_mem;
 		vsi->ilq = NULL;
-		if (ceq && ceq->reg_cq)
-			irdma_sc_remove_cq_ctx(ceq, &rsrc->cq);
 		break;
 	case IRDMA_PUDA_RSRC_TYPE_IEQ:
 		rsrc = vsi->ieq;
 		vmem = &vsi->ieq_mem;
 		vsi->ieq = NULL;
-		if (ceq && ceq->reg_cq)
-			irdma_sc_remove_cq_ctx(ceq, &rsrc->cq);
 		break;
 	default:
 		ibdev_dbg(to_ibdev(dev), "PUDA: error resource type = 0x%x\n",
@@ -926,6 +916,7 @@ void irdma_puda_dele_rsrc(struct irdma_sc_vsi *vsi, enum puda_rsrc_type type,
 		irdma_free_hash_desc(rsrc->hash_desc);
 		fallthrough;
 	case PUDA_QP_CREATED:
+		rsrc->qp.qp_state = IRDMA_QP_STATE_INVALID;
 		irdma_qp_rem_qos(&rsrc->qp);
 
 		if (!reset)
@@ -1008,7 +999,7 @@ int irdma_puda_create_rsrc(struct irdma_sc_vsi *vsi,
 	struct irdma_virt_mem *vmem;
 
 	info->count = 1;
-	pudasize = sizeof(struct irdma_puda_rsrc);
+	pudasize = sizeof(*rsrc);
 	sqwridsize = info->sq_size * sizeof(struct irdma_sq_uk_wr_trk_info);
 	rqwridsize = info->rq_size * 8;
 	switch (info->type) {
@@ -1400,6 +1391,7 @@ static int irdma_ieq_handle_partial(struct irdma_puda_rsrc *ieq,
 						(fpdu_len - 4), mpacrc);
 		if (status) {
 			ibdev_dbg(to_ibdev(ieq->dev), "IEQ: error bad crc\n");
+			pfpdu->mpa_crc_err = true;
 			goto error;
 		}
 	}
@@ -1415,7 +1407,7 @@ static int irdma_ieq_handle_partial(struct irdma_puda_rsrc *ieq,
 
 error:
 	while (!list_empty(&pbufl)) {
-		buf = list_last_entry(&pbufl, struct irdma_puda_buf, list);
+		buf = (struct irdma_puda_buf *)(pbufl.prev);
 		list_move(&buf->list, rxlist);
 	}
 	if (txbuf)
@@ -1455,6 +1447,7 @@ static int irdma_ieq_process_buf(struct irdma_puda_rsrc *ieq,
 			ibdev_dbg(to_ibdev(ieq->dev),
 				  "IEQ: error bad fpdu len\n");
 			list_add(&buf->list, rxlist);
+			pfpdu->mpa_crc_err = true;
 			return -EINVAL;
 		}
 
@@ -1471,7 +1464,8 @@ static int irdma_ieq_process_buf(struct irdma_puda_rsrc *ieq,
 			list_add(&buf->list, rxlist);
 			ibdev_dbg(to_ibdev(ieq->dev),
 				  "ERR: IRDMA_ERR_MPA_CRC\n");
-			return -EINVAL;
+			pfpdu->mpa_crc_err = true;
+			return ret;
 		}
 		full++;
 		pfpdu->fpdu_processed++;
@@ -1553,8 +1547,7 @@ void irdma_ieq_process_fpdus(struct irdma_sc_qp *qp,
 		}
 		/* keep processing buffers from the head of the list */
 		status = irdma_ieq_process_buf(ieq, pfpdu, buf);
-		if (status == -EINVAL) {
-			pfpdu->mpa_crc_err = true;
+		if (status && pfpdu->mpa_crc_err) {
 			while (!list_empty(rxlist)) {
 				buf = irdma_puda_get_listbuf(rxlist);
 				irdma_puda_ret_bufpool(ieq, buf);

@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2015 - 2023 Intel Corporation */
 #ifndef I40IW_HW_H
 #define I40IW_HW_H
 #define I40E_VFPE_CQPTAIL1            0x0000A000 /* Reset: VFR */
@@ -86,13 +86,14 @@
 
 #define I40E_PFINT_LNKLSTN(_INTPF)           (0x00035000 + ((_INTPF) * 4)) /* _i=0...511 */ /* Reset: PFR */
 #define I40E_PFINT_LNKLSTN_MAX_INDEX         511
-#define I40E_PFINT_LNKLSTN_FIRSTQ_INDX GENMASK(10, 0)
-#define I40E_PFINT_LNKLSTN_FIRSTQ_TYPE GENMASK(12, 11)
-
-#define I40E_PFINT_CEQCTL(_INTPF)          (0x00036800 + ((_INTPF) * 4)) /* _i=0...511 */ /* Reset: CORER */
-#define I40E_PFINT_CEQCTL_MAX_INDEX        511
 
 /* shifts/masks for FLD_[LS/RS]_64 macros used in device table */
+#define I40E_PFINT_LNKLSTN_FIRSTQ_INDX_S 0
+#define I40E_PFINT_LNKLSTN_FIRSTQ_INDX GENMASK(10, 0)
+#define I40E_PFINT_LNKLSTN_FIRSTQ_TYPE_S 11
+#define I40E_PFINT_LNKLSTN_FIRSTQ_TYPE GENMASK(12, 11)
+#define I40E_PFINT_CEQCTL(_INTPF)          (0x00036800 + ((_INTPF) * 4)) /* _i=0...511 */ /* Reset: CORER */
+#define I40E_PFINT_CEQCTL_MAX_INDEX        511
 #define I40E_PFINT_CEQCTL_MSIX_INDX_S 0
 #define I40E_PFINT_CEQCTL_MSIX_INDX GENMASK(7, 0)
 #define I40E_PFINT_CEQCTL_ITR_INDX_S 11
@@ -123,6 +124,8 @@
 #define I40E_CQPSQ_CQ_CQID GENMASK_ULL(15, 0)
 #define I40E_COMMIT_FPM_CQCNT_S 0
 #define I40E_COMMIT_FPM_CQCNT GENMASK_ULL(17, 0)
+#define I40E_CQPSQ_UPESD_HMCFNID_S 0
+#define I40E_CQPSQ_UPESD_HMCFNID GENMASK_ULL(5, 0)
 
 #define I40E_VSIQF_CTL(_VSI)             (0x0020D800 + ((_VSI) * 4))
 
@@ -131,8 +134,8 @@ enum i40iw_device_caps_const {
 	I40IW_MAX_SGE_RD			= 1,
 	I40IW_MAX_PUSH_PAGE_COUNT		= 0,
 	I40IW_MAX_INLINE_DATA_SIZE		= 48,
-	I40IW_MAX_IRD_SIZE			= 63,
-	I40IW_MAX_ORD_SIZE			= 127,
+	I40IW_MAX_IRD_SIZE			= 64,
+	I40IW_MAX_ORD_SIZE			= 64,
 	I40IW_MAX_WQ_ENTRIES			= 2048,
 	I40IW_MAX_WQE_SIZE_RQ			= 128,
 	I40IW_MAX_PDS				= 32768,
@@ -140,7 +143,7 @@ enum i40iw_device_caps_const {
 	I40IW_MAX_CQ_SIZE			= 1048575,
 	I40IW_MAX_OUTBOUND_MSG_SIZE		= 2147483647,
 	I40IW_MAX_INBOUND_MSG_SIZE		= 2147483647,
-	I40IW_MIN_WQ_SIZE                       = 4 /* WQEs */,
+	I40IW_MIN_WQ_SIZE			= 4 /* WQEs */,
 };
 
 #define I40IW_QP_WQE_MIN_SIZE   32

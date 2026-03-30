@@ -1064,6 +1064,92 @@ err_bfreg:
 	return err;
 }
 
+/*
+ * Function: svc_mlx5_dma_buf_free
+ *
+ * Description:  svc_mlx5_dma_buf_free is called in place of mlx5_buf_free in QP
+ *              destroy path only.
+ *              All the work of mlx5_buf_free is done in svc_mlx5_dma_buf_free.
+ *              This is done as we have registered SVC specific functions for QP
+ *              memory and we do not want to free up the memory here
+ */
+static void svc_mlx5_dma_buf_free(struct mlx5_core_dev *dev, int size, struct mlx5_frag_buf *buf, struct ib_qp* qp_ptr, int count)
+{
+    SVC_DMA_FREE(&dev->pdev->dev, size, buf->frags[count].buf, buf->frags[count].map, qp_ptr);
+}
+
+static void svc_mlx5_frag_buf_free(struct mlx5_core_dev *dev, struct mlx5_frag_buf *buf, struct ib_qp* qp_ptr)
+{
+    int size = buf->size;
+    int i;
+
+    for (i = 0; i < buf->npages; i++) {
+        int frag_sz = min_t(int, size, PAGE_SIZE);
+
+        svc_mlx5_dma_buf_free(dev, frag_sz, buf, qp_ptr, i);
+        size -= frag_sz;
+    }
+
+    SVC_KFREE(buf->frags, qp_ptr);
+}
+
+/*
+ * Function: svc_mlx5_alloc_dma_mem
+ *
+ * Description: This is SVC specific function used to allocate the QP memory
+ *              through the functions registered by the upper layer SVC iSER
+ *              drivers
+ */
+static int svc_mlx5_alloc_dma_mem(struct mlx5_core_dev *dev, int size, struct mlx5_frag_buf *buf, struct ib_qp* qp_ptr)
+{
+    struct mlx5_priv *priv = &dev->priv;
+    int original_node, i;
+    void *cpu_handle;
+
+    buf->size = size;
+    buf->npages       = DIV_ROUND_UP(size, PAGE_SIZE);
+    buf->page_shift   = PAGE_SHIFT;
+    buf->frags = SVC_KMALLOC((buf->npages * sizeof(struct mlx5_buf_list)), FLAG_MLX_FRAG, qp_ptr);
+
+    if (!buf->frags)
+        goto err_out;
+
+    for (i = 0; i < buf->npages; i++) {
+        struct mlx5_buf_list *frag = &buf->frags[i];
+        int frag_sz = min_t(int, size, PAGE_SIZE);
+
+        mutex_lock(&priv->alloc_mutex);
+        original_node = dev_to_node(&dev->pdev->dev);
+        set_dev_node(&dev->pdev->dev, dev->priv.numa_node);
+        cpu_handle = SVC_DMA_ZALLOC(&dev->pdev->dev, frag_sz,
+                     &frag->map, GFP_KERNEL, qp_ptr);
+        set_dev_node(&dev->pdev->dev, original_node);
+        mutex_unlock(&priv->alloc_mutex);
+        frag->buf = cpu_handle;
+
+        if (!frag->buf)
+            goto err_free_buf;
+
+        if (frag->map & ((1 << buf->page_shift) - 1)) {
+            svc_mlx5_dma_buf_free(dev, frag_sz, buf, qp_ptr, i);
+            printk("unexpected map alignment: %pad, page_shift=%d\n",
+                    &frag->map, buf->page_shift);
+            goto err_free_buf;
+        }
+        size -= frag_sz;
+    }
+
+    return 0;
+
+err_free_buf:
+    while (i--)
+        svc_mlx5_dma_buf_free(dev, PAGE_SIZE, buf, qp_ptr, i);
+    SVC_KFREE(buf->frags, qp_ptr);
+err_out:
+    return -ENOMEM;
+
+}
+
 static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 		       struct mlx5_ib_qp_base *base, struct ib_udata *udata)
 {
@@ -1085,15 +1171,15 @@ static void destroy_qp(struct mlx5_ib_dev *dev, struct mlx5_ib_qp *qp,
 	}
 
 	/* Kernel QP */
-	kvfree(qp->sq.wqe_head);
-	kvfree(qp->sq.w_list);
-	kvfree(qp->sq.wrid);
-	kvfree(qp->sq.wr_data);
-	kvfree(qp->rq.wrid);
+	SVC_KFREE(qp->sq.wqe_head, &qp->ibqp);
+	SVC_KFREE(qp->sq.w_list, &qp->ibqp);
+	SVC_KFREE(qp->sq.wrid, &qp->ibqp);
+	SVC_KFREE(qp->sq.wr_data, &qp->ibqp);
+	SVC_KFREE(qp->rq.wrid, &qp->ibqp);
 	if (qp->db.db)
 		mlx5_db_free(dev->mdev, &qp->db);
 	if (qp->buf.frags)
-		mlx5_frag_buf_free(dev->mdev, &qp->buf);
+		svc_mlx5_frag_buf_free(dev->mdev, &qp->buf, &qp->ibqp);
 }
 
 static int _create_kernel_qp(struct mlx5_ib_dev *dev,
@@ -1126,8 +1212,13 @@ static int _create_kernel_qp(struct mlx5_ib_dev *dev,
 	qp->sq.offset = qp->rq.wqe_cnt << qp->rq.wqe_shift;
 	base->ubuffer.buf_size = err + (qp->rq.wqe_cnt << qp->rq.wqe_shift);
 
-	err = mlx5_frag_buf_alloc_node(dev->mdev, base->ubuffer.buf_size,
-				       &qp->buf, dev->mdev->priv.numa_node);
+	/*
+	 * svc_mlx5_alloc_dma_mem is called in place of mlx5_buf_alloc.
+	 * All the mlx5_buf_alloc specifc work is being done in svc_mlx5_alloc_dma_mem.
+	 * This is done as mlx5_buf_alloc is called from many paths and we have
+	 * registered SVC specific functions to allocate the QP memory.
+	 */
+    err = svc_mlx5_alloc_dma_mem(dev->mdev, base->ubuffer.buf_size, &qp->buf, &qp->ibqp);
 	if (err) {
 		mlx5_ib_dbg(dev, "err %d\n", err);
 		return err;
@@ -1179,16 +1270,11 @@ static int _create_kernel_qp(struct mlx5_ib_dev *dev,
 		goto err_free;
 	}
 
-	qp->sq.wrid = kvmalloc_array(qp->sq.wqe_cnt,
-				     sizeof(*qp->sq.wrid), GFP_KERNEL);
-	qp->sq.wr_data = kvmalloc_array(qp->sq.wqe_cnt,
-					sizeof(*qp->sq.wr_data), GFP_KERNEL);
-	qp->rq.wrid = kvmalloc_array(qp->rq.wqe_cnt,
-				     sizeof(*qp->rq.wrid), GFP_KERNEL);
-	qp->sq.w_list = kvmalloc_array(qp->sq.wqe_cnt,
-				       sizeof(*qp->sq.w_list), GFP_KERNEL);
-	qp->sq.wqe_head = kvmalloc_array(qp->sq.wqe_cnt,
-					 sizeof(*qp->sq.wqe_head), GFP_KERNEL);
+	qp->sq.wrid = SVC_KMALLOC(qp->sq.wqe_cnt * sizeof(*qp->sq.wrid), FLAG_MLX_SQ, &qp->ibqp);
+	qp->sq.wr_data = SVC_KMALLOC(qp->sq.wqe_cnt * sizeof(*qp->sq.wr_data), FLAG_MLX_SQ, &qp->ibqp);
+	qp->rq.wrid = SVC_KMALLOC(qp->rq.wqe_cnt * sizeof(*qp->rq.wrid),FLAG_MLX_RQ, &qp->ibqp);
+	qp->sq.w_list = SVC_KMALLOC(qp->sq.wqe_cnt * sizeof(*qp->sq.w_list), FLAG_MLX_SQ, &qp->ibqp);
+	qp->sq.wqe_head = SVC_KMALLOC(qp->sq.wqe_cnt * sizeof(*qp->sq.wqe_head), FLAG_MLX_SQ, &qp->ibqp);
 
 	if (!qp->sq.wrid || !qp->sq.wr_data || !qp->rq.wrid ||
 	    !qp->sq.w_list || !qp->sq.wqe_head) {
@@ -1199,18 +1285,25 @@ static int _create_kernel_qp(struct mlx5_ib_dev *dev,
 	return 0;
 
 err_wrid:
-	kvfree(qp->sq.wqe_head);
-	kvfree(qp->sq.w_list);
-	kvfree(qp->sq.wrid);
-	kvfree(qp->sq.wr_data);
-	kvfree(qp->rq.wrid);
+	SVC_KFREE(qp->sq.wqe_head, &qp->ibqp);
+	SVC_KFREE(qp->sq.w_list, &qp->ibqp);
+	SVC_KFREE(qp->sq.wrid, &qp->ibqp);
+	SVC_KFREE(qp->sq.wr_data, &qp->ibqp);
+	SVC_KFREE(qp->rq.wrid, &qp->ibqp);
 	mlx5_db_free(dev->mdev, &qp->db);
 
 err_free:
 	kvfree(*in);
 
 err_buf:
-	mlx5_frag_buf_free(dev->mdev, &qp->buf);
+      /*
+       * svc_mlx5_dma_buf_free is called in place of mlx5_buf_free.
+       * All the work of mlx5_buf_free is being done in svc_mlx5_dma_buf_free.
+       * This is done as we have registered SVC specific functions for QP
+       * memory and we do not want to free up the memory here
+       */
+        svc_mlx5_frag_buf_free(dev->mdev, &qp->buf, &qp->ibqp);
+
 	return err;
 }
 

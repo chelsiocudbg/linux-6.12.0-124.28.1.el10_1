@@ -1,20 +1,25 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2018, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #ifndef _ICE_COMMON_H_
 #define _ICE_COMMON_H_
 
-#include <linux/bitfield.h>
-
 #include "ice.h"
+
+#ifdef HAVE_INCLUDE_BITFIELD
+#include <linux/bitfield.h>
+#endif /* HAVE_INCLUDE_BITFIELD */
+
 #include "ice_type.h"
+#include "ice_adminq_cmd.h"
 #include "ice_nvm.h"
 #include "ice_flex_pipe.h"
 #include "ice_parser.h"
-#include <linux/avf/virtchnl.h>
+#include "virtchnl.h"
 #include "ice_switch.h"
 #include "ice_fdir.h"
 
+#define ICE_SQ_SEND_ATOMIC_DELAY_TIME_US 100
 #define ICE_SQ_SEND_DELAY_TIME_MS	10
 #define ICE_SQ_SEND_MAX_EXECUTE		3
 
@@ -39,47 +44,14 @@
 #define FEC_RECEIVER_ID_PCS0 (0x33 << FEC_RECV_ID_SHIFT)
 #define FEC_RECEIVER_ID_PCS1 (0x34 << FEC_RECV_ID_SHIFT)
 
-#define ICE_CGU_R9			0x24
-#define ICE_CGU_R9_TIME_REF_FREQ_SEL	GENMASK(2, 0)
-#define ICE_CGU_R9_CLK_EREF0_EN		BIT(4)
-#define ICE_CGU_R9_TIME_REF_EN		BIT(5)
-#define ICE_CGU_R9_TIME_SYNC_EN		BIT(6)
-#define ICE_CGU_R9_ONE_PPS_OUT_EN	BIT(7)
-#define ICE_CGU_R9_ONE_PPS_OUT_AMP	GENMASK(19, 18)
+enum ice_fw_modes {
+	ICE_FW_MODE_NORMAL,
+	ICE_FW_MODE_DBG,
+	ICE_FW_MODE_REC,
+	ICE_FW_MODE_ROLLBACK
+};
 
-#define ICE_CGU_R16			0x40
-#define ICE_CGU_R16_TSPLL_CK_REFCLKFREQ	GENMASK(31, 24)
-
-#define ICE_CGU_R19			0x4C
-#define ICE_CGU_R19_TSPLL_FBDIV_INTGR_E82X	GENMASK(7, 0)
-#define ICE_CGU_R19_TSPLL_FBDIV_INTGR_E825	GENMASK(9, 0)
-#define ICE_CGU_R19_TSPLL_NDIVRATIO	GENMASK(19, 16)
-
-#define ICE_CGU_R22			0x58
-#define ICE_CGU_R22_TIME1588CLK_DIV	GENMASK(23, 20)
-#define ICE_CGU_R22_TIME1588CLK_DIV2	BIT(30)
-
-#define ICE_CGU_R23			0x5C
-#define ICE_CGU_R24			0x60
-#define ICE_CGU_R24_FBDIV_FRAC		GENMASK(21, 0)
-#define ICE_CGU_R23_R24_TSPLL_ENABLE	BIT(24)
-#define ICE_CGU_R23_R24_REF1588_CK_DIV	GENMASK(30, 27)
-#define ICE_CGU_R23_R24_TIME_REF_SEL	BIT(31)
-
-#define ICE_CGU_BW_TDC			0x31C
-#define ICE_CGU_BW_TDC_PLLLOCK_SEL	GENMASK(30, 29)
-
-#define ICE_CGU_RO_LOCK			0x3F0
-#define ICE_CGU_RO_LOCK_TRUE_LOCK	BIT(12)
-#define ICE_CGU_RO_LOCK_UNLOCK		BIT(13)
-
-#define ICE_CGU_CNTR_BIST		0x344
-#define ICE_CGU_CNTR_BIST_PLLLOCK_SEL_0	BIT(15)
-#define ICE_CGU_CNTR_BIST_PLLLOCK_SEL_1	BIT(16)
-
-#define ICE_CGU_RO_BWM_LF		0x370
-#define ICE_CGU_RO_BWM_LF_TRUE_LOCK	BIT(12)
-
+void ice_set_umac_shared(struct ice_hw *hw);
 int ice_init_hw(struct ice_hw *hw);
 void ice_deinit_hw(struct ice_hw *hw);
 int ice_check_reset(struct ice_hw *hw);
@@ -102,10 +74,10 @@ int
 ice_alloc_hw_res(struct ice_hw *hw, u16 type, u16 num, bool btm, u16 *res);
 int
 ice_free_hw_res(struct ice_hw *hw, u16 type, u16 num, u16 *res);
-int ice_aq_alloc_free_res(struct ice_hw *hw,
-			  struct ice_aqc_alloc_free_res_elem *buf, u16 buf_size,
-			  enum ice_adminq_opc opc);
-bool ice_is_sbq_supported(struct ice_hw *hw);
+int
+ice_aq_alloc_free_res(struct ice_hw *hw, u16 num_entries,
+		      struct ice_aqc_alloc_free_res_elem *buf, u16 buf_size,
+		      enum ice_adminq_opc opc, struct ice_sq_cd *cd);
 struct ice_ctl_q_info *ice_get_sbq(struct ice_hw *hw);
 int
 ice_sq_send_cmd(struct ice_hw *hw, struct ice_ctl_q_info *cq,
@@ -116,9 +88,29 @@ int ice_get_caps(struct ice_hw *hw);
 
 void ice_set_safe_mode_caps(struct ice_hw *hw);
 
+int
+ice_aq_get_internal_data(struct ice_hw *hw, u16 cluster_id, u16 table_id,
+			 u32 start, void *buf, u16 buf_size, u16 *ret_buf_size,
+			 u16 *ret_next_cluster, u16 *ret_next_table,
+			 u32 *ret_next_index, struct ice_sq_cd *cd);
+
 int ice_write_rxq_ctx(struct ice_hw *hw, struct ice_rlan_ctx *rlan_ctx,
 		      u32 rxq_index);
+int ice_read_rxq_ctx(struct ice_hw *hw, struct ice_rlan_ctx *rlan_ctx,
+		     u32 rxq_index);
+int ice_read_txq_ctx(struct ice_hw *hw, struct ice_tlan_ctx *tlan_ctx,
+		     u32 txq_index);
+int ice_clear_rxq_ctx(struct ice_hw *hw, u32 rxq_index);
+int ice_clear_tx_cmpltnq_ctx(struct ice_hw *hw, u32 tx_cmpltnq_index);
+int ice_write_tx_cmpltnq_ctx(struct ice_hw *hw,
+			     struct ice_tx_cmpltnq_ctx *tx_cmpltnq_ctx,
+			     u32 tx_cmpltnq_index);
+int ice_clear_tx_drbell_q_ctx(struct ice_hw *hw, u32 tx_drbell_q_index);
+int ice_write_tx_drbell_q_ctx(struct ice_hw *hw,
+			      struct ice_tx_drbell_q_ctx *tx_drbell_q_ctx,
+			      u32 tx_drbell_q_index);
 
+int ice_lut_size_to_type(int lut_size);
 int
 ice_aq_get_rss_lut(struct ice_hw *hw, struct ice_aq_get_set_rss_lut_params *get_params);
 int
@@ -129,12 +121,33 @@ ice_aq_get_rss_key(struct ice_hw *hw, u16 vsi_handle,
 int
 ice_aq_set_rss_key(struct ice_hw *hw, u16 vsi_handle,
 		   struct ice_aqc_get_set_rss_keys *keys);
+int
+ice_aq_cfg_lan_txq(struct ice_hw *hw, struct ice_aqc_cfg_txqs_buf *buf,
+		   u16 buf_size, u16 num_qs, u8 oldport, u8 newport,
+		   u8 mode, struct ice_sq_cd *cd);
+int
+ice_aq_move_recfg_lan_txq(struct ice_hw *hw, u8 num_qs, bool is_move,
+			  bool is_tc_change, bool subseq_call, bool flush_pipe,
+			  u8 timeout, u32 *blocked_cgds,
+			  struct ice_aqc_cfg_txqs_buf *buf, u16 buf_size,
+			  u8 *txqs_moved, struct ice_sq_cd *cd);
 
+int
+ice_aq_set_txtimeq(struct ice_hw *hw, u16 txtimeq, u8 q_count,
+		   struct ice_aqc_set_txtime_qgrp *txtime_qg,
+		   u16 buf_size, struct ice_sq_cd *cd);
+int
+ice_aq_ena_dis_txtimeq(struct ice_hw *hw, u16 txtimeq, u16 q_count, bool q_ena,
+		       struct ice_aqc_ena_dis_txtime_qgrp *txtime_qg,
+		       struct ice_sq_cd *cd);
+extern const struct ice_ctx_ele ice_txtime_ctx_info[];
 bool ice_check_sq_alive(struct ice_hw *hw, struct ice_ctl_q_info *cq);
 int ice_aq_q_shutdown(struct ice_hw *hw, bool unloading);
 void ice_fill_dflt_direct_cmd_desc(struct ice_aq_desc *desc, u16 opcode);
-
-void ice_pack_txq_ctx(const struct ice_tlan_ctx *ctx, ice_txq_ctx_buf_t *buf);
+extern const struct ice_ctx_ele ice_tlan_ctx_info[];
+int ice_set_ctx(struct ice_hw *hw, u8 *src_ctx, u8 *dest_ctx,
+		const struct ice_ctx_ele *ce_info);
+int ice_get_ctx(u8 *src_ctx, u8 *dest_ctx, const struct ice_ctx_ele *ce_info);
 
 extern struct mutex ice_global_cfg_lock_sw;
 
@@ -147,48 +160,46 @@ int
 ice_aq_send_driver_ver(struct ice_hw *hw, struct ice_driver_ver *dv,
 		       struct ice_sq_cd *cd);
 int
-ice_aq_set_port_params(struct ice_port_info *pi, bool double_vlan,
+ice_aq_set_port_params(struct ice_port_info *pi, u16 bad_frame_vsi,
+		       bool save_bad_pac, bool pad_short_pac, bool double_vlan,
 		       struct ice_sq_cd *cd);
 int
-ice_aq_get_phy_caps(struct ice_port_info *pi, bool qual_mods, u8 report_mode,
-		    struct ice_aqc_get_phy_caps_data *caps,
-		    struct ice_sq_cd *cd);
-bool ice_is_phy_rclk_in_netlist(struct ice_hw *hw);
-bool ice_is_clock_mux_in_netlist(struct ice_hw *hw);
-bool ice_is_cgu_in_netlist(struct ice_hw *hw);
-bool ice_is_gps_in_netlist(struct ice_hw *hw);
+ice_aq_get_netlist_node_pin(struct ice_hw *hw,
+			    struct ice_aqc_get_link_topo_pin *cmd,
+			    u16 *node_handle);
 int
 ice_aq_get_netlist_node(struct ice_hw *hw, struct ice_aqc_get_link_topo *cmd,
 			u8 *node_part_number, u16 *node_handle);
+int ice_find_netlist_node(struct ice_hw *hw, u8 node_type, u8 ctx,
+			  u8 node_part_number, u16 *node_handle);
+int ice_get_pf_c827_idx(struct ice_hw *hw, u8 *idx);
+bool ice_is_pf_c827(struct ice_hw *hw);
+bool ice_is_phy_rclk_in_netlist(struct ice_hw *hw);
+bool ice_is_clock_mux_in_netlist(struct ice_hw *hw);
+bool ice_is_gps_in_netlist(struct ice_hw *hw);
 int
 ice_aq_list_caps(struct ice_hw *hw, void *buf, u16 buf_size, u32 *cap_count,
 		 enum ice_adminq_opc opc, struct ice_sq_cd *cd);
-int
-ice_discover_dev_caps(struct ice_hw *hw, struct ice_hw_dev_caps *dev_caps);
+int ice_discover_dev_caps(struct ice_hw *hw, struct ice_hw_dev_caps *dev_caps);
 void
 ice_update_phy_type(u64 *phy_type_low, u64 *phy_type_high,
 		    u16 link_speeds_bitmap);
 int
 ice_aq_manage_mac_write(struct ice_hw *hw, const u8 *mac_addr, u8 flags,
 			struct ice_sq_cd *cd);
-bool ice_is_generic_mac(struct ice_hw *hw);
+
 int ice_clear_pf_cfg(struct ice_hw *hw);
-int
-ice_aq_set_phy_cfg(struct ice_hw *hw, struct ice_port_info *pi,
-		   struct ice_aqc_set_phy_cfg_data *cfg, struct ice_sq_cd *cd);
 bool ice_fw_supports_link_override(struct ice_hw *hw);
+bool ice_fw_supports_fec_dis_auto(struct ice_hw *hw);
 int
 ice_get_link_default_override(struct ice_link_default_override_tlv *ldo,
 			      struct ice_port_info *pi);
 bool ice_is_phy_caps_an_enabled(struct ice_aqc_get_phy_caps_data *caps);
-bool ice_is_fw_health_report_supported(struct ice_hw *hw);
-int ice_aq_set_health_status_cfg(struct ice_hw *hw, u8 event_source);
 int ice_aq_get_phy_equalization(struct ice_hw *hw, u16 data_in, u16 op_code,
 				u8 serdes_num, int *output);
 int
 ice_aq_get_fec_stats(struct ice_hw *hw, u16 pcs_quad, u16 pcs_port,
 		     enum ice_fec_stats_types fec_type, u32 *output);
-
 enum ice_fc_mode ice_caps_to_fc_mode(u8 caps);
 enum ice_fec_mode ice_caps_to_fec_mode(u8 caps, u8 fec_options);
 int
@@ -208,13 +219,8 @@ int
 ice_cfg_phy_fec(struct ice_port_info *pi, struct ice_aqc_set_phy_cfg_data *cfg,
 		enum ice_fec_mode fec);
 int
-ice_aq_set_link_restart_an(struct ice_port_info *pi, bool ena_link,
-			   struct ice_sq_cd *cd);
-int
-ice_aq_set_mac_cfg(struct ice_hw *hw, u16 max_frame_size, struct ice_sq_cd *cd);
-int
-ice_aq_get_link_info(struct ice_port_info *pi, bool ena_lse,
-		     struct ice_link_status *link, struct ice_sq_cd *cd);
+ice_aq_set_mac_cfg(struct ice_hw *hw, u16 max_frame_size, bool auto_drop,
+		   struct ice_sq_cd *cd);
 int
 ice_aq_set_event_mask(struct ice_hw *hw, u8 port_num, u16 mask,
 		      struct ice_sq_cd *cd);
@@ -222,8 +228,35 @@ int
 ice_aq_set_mac_loopback(struct ice_hw *hw, bool ena_lpbk, struct ice_sq_cd *cd);
 
 int
+ice_aq_set_phy_debug(struct ice_hw *hw, u8 port_num, u8 cmd_flags, u8 phy_index,
+		     struct ice_sq_cd *cd);
+
+int
 ice_aq_set_port_id_led(struct ice_port_info *pi, bool is_orig_mode,
 		       struct ice_sq_cd *cd);
+int
+ice_aq_sff_eeprom(struct ice_hw *hw, u16 lport, u8 bus_addr,
+		  u16 mem_addr, u8 page, u8 set_page, u8 *data, u8 length,
+		  bool write, struct ice_sq_cd *cd);
+u32 ice_get_link_speed(u16 index);
+
+int
+ice_aq_prog_topo_dev_nvm(struct ice_hw *hw,
+			 struct ice_aqc_link_topo_params *topo_params,
+			 struct ice_sq_cd *cd);
+int
+ice_aq_read_topo_dev_nvm(struct ice_hw *hw,
+			 struct ice_aqc_link_topo_params *topo_params,
+			 u32 start_address, u8 *buf, u8 buf_size,
+			 struct ice_sq_cd *cd);
+
+void ice_dump_port_info(struct ice_port_info *pi);
+void ice_dump_caps(struct ice_hw *hw);
+void ice_dump_ptp_dev_caps(struct ice_hw *hw);
+void ice_dump_ptp_func_caps(struct ice_hw *hw);
+int ice_dump_port_dflt_topo(struct ice_port_info *pi);
+void ice_dump_port_topo(struct ice_port_info *pi);
+
 int
 ice_aq_get_port_options(struct ice_hw *hw,
 			struct ice_aqc_get_port_options_elem *options,
@@ -233,13 +266,6 @@ ice_aq_get_port_options(struct ice_hw *hw,
 int
 ice_aq_set_port_option(struct ice_hw *hw, u8 lport, u8 lport_valid,
 		       u8 new_option);
-int ice_get_phy_lane_number(struct ice_hw *hw);
-int
-ice_aq_sff_eeprom(struct ice_hw *hw, u16 lport, u8 bus_addr,
-		  u16 mem_addr, u8 page, u8 set_page, u8 *data, u8 length,
-		  bool write, struct ice_sq_cd *cd);
-u32 ice_get_link_speed(u16 index);
-
 int
 ice_cfg_vsi_rdma(struct ice_port_info *pi, u16 vsi_handle, u16 tc_bitmap,
 		 u16 *max_rdmaqs);
@@ -255,21 +281,27 @@ ice_dis_vsi_txq(struct ice_port_info *pi, u16 vsi_handle, u8 tc, u8 num_queues,
 		enum ice_disq_rst_src rst_src, u16 vmvf_num,
 		struct ice_sq_cd *cd);
 int
-ice_cfg_vsi_lan(struct ice_port_info *pi, u16 vsi_handle, u8 tc_bitmap,
+ice_cfg_vsi_lan(struct ice_port_info *pi, u16 vsi_handle, u16 tc_bitmap,
 		u16 *max_lanqs);
 int
 ice_ena_vsi_txq(struct ice_port_info *pi, u16 vsi_handle, u8 tc, u16 q_handle,
 		u8 num_qgrps, struct ice_aqc_add_tx_qgrp *buf, u16 buf_size,
 		struct ice_sq_cd *cd);
 int
-ice_aq_cfg_lan_txq(struct ice_hw *hw, struct ice_aqc_cfg_txqs_buf *buf,
-		   u16 buf_size, u16 num_qs, u8 oldport, u8 newport,
-		   struct ice_sq_cd *cd);
+ice_replay_pre_init(struct ice_hw *hw, struct ice_switch_info *sw);
 int ice_replay_vsi(struct ice_hw *hw, u16 vsi_handle);
 void ice_replay_post(struct ice_hw *hw);
 struct ice_q_ctx *
 ice_get_lan_q_ctx(struct ice_hw *hw, u16 vsi_handle, u8 tc, u16 q_handle);
 int ice_sbq_rw_reg(struct ice_hw *hw, struct ice_sbq_msg_input *in, u16 flag);
+#ifdef HAVE_DPLL_PHASE_OFFSET_MONITOR
+int ice_aq_get_cgu_input_pin_measure(struct ice_hw *hw, u8 dpll_idx,
+				     struct ice_cgu_input_measure *meas,
+				     u16 meas_num);
+#endif /* HAVE_DPLL_PHASE_OFFSET_MONITOR */
+int
+ice_aq_cfg_cgu_err(struct ice_hw *hw, bool ena_event_report, bool ena_err_report,
+		   struct ice_sq_cd *cd);
 int
 ice_aq_get_cgu_abilities(struct ice_hw *hw,
 			 struct ice_aqc_get_cgu_abilities *abilities);
@@ -301,24 +333,41 @@ ice_aq_get_cgu_ref_prio(struct ice_hw *hw, u8 dpll_num, u8 ref_idx,
 int
 ice_aq_get_cgu_info(struct ice_hw *hw, u32 *cgu_id, u32 *cgu_cfg_ver,
 		    u32 *cgu_fw_ver);
-
+int
+ice_aq_read_cgu_reg(struct ice_hw *hw, u16 offset, u8 data_len, u8 *data);
+int
+ice_aq_write_cgu_reg(struct ice_hw *hw, u16 offset, u8 data_len, u8 *data);
 int
 ice_aq_set_phy_rec_clk_out(struct ice_hw *hw, u8 phy_output, bool enable,
 			   u32 *freq);
 int
-ice_aq_get_phy_rec_clk_out(struct ice_hw *hw, u8 *phy_output, u8 *port_num,
+ice_aq_get_phy_rec_clk_out(struct ice_hw *hw, u8 phy_output, u8 *port_num,
 			   u8 *flags, u16 *node_handle);
-int ice_aq_get_sensor_reading(struct ice_hw *hw,
-			      struct ice_aqc_get_sensor_reading_resp *data);
+int
+ice_aq_get_sensor_reading(struct ice_hw *hw, u8 sensor, u8 format,
+			  struct ice_aqc_get_sensor_reading_resp *data,
+			  struct ice_sq_cd *cd);
 void
 ice_stat_update40(struct ice_hw *hw, u32 reg, bool prev_stat_loaded,
 		  u64 *prev_stat, u64 *cur_stat);
 void
 ice_stat_update32(struct ice_hw *hw, u32 reg, bool prev_stat_loaded,
 		  u64 *prev_stat, u64 *cur_stat);
+enum ice_fw_modes ice_get_fw_mode(struct ice_hw *hw);
+void ice_print_rollback_msg(struct ice_hw *hw);
+bool ice_is_generic_mac(struct ice_hw *hw);
 int
 ice_sched_query_elem(struct ice_hw *hw, u32 node_teid,
 		     struct ice_aqc_txsched_elem_data *buf);
+int ice_get_pca9575_handle(struct ice_hw *hw, u16 *pca9575_handle);
+int ice_read_sma_ctrl(struct ice_hw *hw, u8 *data);
+int ice_write_sma_ctrl(struct ice_hw *hw, u8 data);
+int
+ice_aq_set_driver_param(struct ice_hw *hw, enum ice_aqc_driver_params idx,
+			u32 value, struct ice_sq_cd *cd);
+int
+ice_aq_get_driver_param(struct ice_hw *hw, enum ice_aqc_driver_params idx,
+			u32 *value, struct ice_sq_cd *cd);
 int
 ice_aq_set_gpio(struct ice_hw *hw, u16 gpio_ctrl_handle, u8 pin_idx, bool value,
 		struct ice_sq_cd *cd);
@@ -327,6 +376,7 @@ ice_aq_get_gpio(struct ice_hw *hw, u16 gpio_ctrl_handle, u8 pin_idx,
 		bool *value, struct ice_sq_cd *cd);
 bool ice_is_100m_speed_supported(struct ice_hw *hw);
 u16 ice_get_link_speed_based_on_phy_type(u64 phy_type_low, u64 phy_type_high);
+enum ice_eth56g_link_spd ice_phy_get_speed_eth56g(struct ice_link_status *li);
 int
 ice_aq_set_lldp_mib(struct ice_hw *hw, u8 mib_type, void *buf, u16 buf_size,
 		    struct ice_sq_cd *cd);
@@ -342,9 +392,21 @@ int
 ice_aq_write_i2c(struct ice_hw *hw, struct ice_aqc_link_topo_addr topo_addr,
 		 u16 bus_addr, __le16 addr, u8 params, const u8 *data,
 		 struct ice_sq_cd *cd);
-int ice_get_pca9575_handle(struct ice_hw *hw, u16 *pca9575_handle);
 int ice_read_pca9575_reg(struct ice_hw *hw, u8 offset, u8 *data);
+int
+ice_aq_set_health_status_config(struct ice_hw *hw, u8 event_source,
+				struct ice_sq_cd *cd);
+int ice_aq_get_health_status(struct ice_hw *hw,
+			     struct ice_aqc_health_status_elem *buff, int num);
+bool ice_is_fw_health_report_supported(struct ice_hw *hw);
+int ice_is_health_status_code_supported(struct ice_hw *hw, u16 code,
+					bool *supported);
+int ice_get_last_health_status_code(struct ice_hw *hw,
+				    struct ice_aqc_health_status_elem *out,
+				    u16 code);
 bool ice_fw_supports_report_dflt_cfg(struct ice_hw *hw);
-int ice_read_cgu_reg(struct ice_hw *hw, u32 addr, u32 *val);
-int ice_write_cgu_reg(struct ice_hw *hw, u32 addr, u32 val);
+/* AQ API version for FW auto drop reports */
+bool ice_is_fw_auto_drop_supported(struct ice_hw *hw);
+void ice_init_lm_ops(struct ice_hw *hw);
+
 #endif /* _ICE_COMMON_H_ */

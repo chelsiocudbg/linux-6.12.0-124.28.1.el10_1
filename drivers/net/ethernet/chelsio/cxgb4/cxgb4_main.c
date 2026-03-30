@@ -178,11 +178,31 @@ module_param(select_queue, int, 0644);
 MODULE_PARM_DESC(select_queue,
 		 "Select between kernel provided method of selecting or driver method of selecting TX queue. Default is kernel method.");
 
+/* Maximum number of queues for tc-mqprio offload per port.
+ *
+ * Default: max_mqprio_queues=1024
+ */
+#define MAX_EOTIDS 8192U
+#define DEFAULT_EOTIDS 1024U
+
+static uint max_mqprio_queues = DEFAULT_EOTIDS;
+module_param(max_mqprio_queues, uint, 0644);
+MODULE_PARM_DESC(max_mqprio_queues,
+		"Set maximum number of queues for tc-mqprio offload. Default=1024, Max=8192, Disable=0.");
+
 static struct dentry *cxgb4_debugfs_root;
 
 LIST_HEAD(adapter_list);
 DEFINE_MUTEX(uld_mutex);
 LIST_HEAD(uld_list);
+
+static u32 cxgb4_modparam_max_mqprio_queues(void)
+{
+       if (max_mqprio_queues > MAX_EOTIDS)
+	       max_mqprio_queues = MAX_EOTIDS;
+
+       return max_mqprio_queues;
+}
 
 static int cfg_queues(struct adapter *adap);
 
@@ -979,6 +999,15 @@ static void enable_rx(struct adapter *adap)
 	}
 }
 
+static void free_non_data_intr(struct adapter *adap)
+{
+	if (adap->sge.nd_msix_idx < 0)
+		return;
+
+	cxgb4_free_msix_idx_in_bmap(adap, adap->sge.nd_msix_idx);
+	adap->sge.nd_msix_idx = -1;
+}
+
 static int setup_non_data_intr(struct adapter *adap)
 {
 	int msix;
@@ -998,6 +1027,18 @@ static int setup_non_data_intr(struct adapter *adap)
 
 	adap->sge.nd_msix_idx = msix;
 	return 0;
+}
+
+static void free_fw_sge_queues(struct adapter *adap)
+{
+	if (!adap->sge.fw_evtq.desc)
+		return;
+
+	free_rspq_fl(adap, &adap->sge.fw_evtq, NULL);
+	if (adap->sge.fwevtq_msix_idx >= 0)
+		cxgb4_free_msix_idx_in_bmap(adap,
+					    adap->sge.fwevtq_msix_idx);
+	adap->sge.fwevtq_msix_idx = -1;
 }
 
 static int setup_fw_sge_queues(struct adapter *adap)
@@ -1148,9 +1189,6 @@ static u16 cxgb_select_queue(struct net_device *dev, struct sk_buff *skb,
 
 		err = vlan_get_tag(skb, &vlan_tci);
 		if (unlikely(err)) {
-			if (net_ratelimit())
-				netdev_warn(dev,
-					    "TX Packet without VLAN Tag on DCB Link\n");
 			txq = 0;
 		} else {
 			txq = (vlan_tci & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
@@ -2649,13 +2687,16 @@ static void detach_ulds(struct adapter *adap)
 		return;
 
 	mutex_lock(&uld_mutex);
+	if (!adap->uld)
+		goto out_netevent_unregister;
+
 	list_del(&adap->list_node);
-
 	for (i = 0; i < CXGB4_ULD_MAX; i++)
-		if (adap->uld && adap->uld[i].handle)
+		if (adap->uld[i].handle)
 			adap->uld[i].state_change(adap->uld[i].handle,
-					     CXGB4_STATE_DETACH);
+					CXGB4_STATE_DETACH);
 
+out_netevent_unregister:
 	if (netevent_registered && list_empty(&adapter_list)) {
 		unregister_netevent_notifier(&cxgb4_netevent_nb);
 		netevent_registered = false;
@@ -3927,9 +3968,6 @@ void t4_fatal_err(struct adapter *adap)
 {
 	int port;
 
-	if (pci_channel_offline(adap->pdev))
-		return;
-
 	/* Disable the SGE since ULDs are going to free resources that
 	 * could be exposed to the adapter.  RDMA MWs for example...
 	 */
@@ -4176,90 +4214,6 @@ static int adap_config_hma(struct adapter *adapter)
 free_hma:
 	adap_free_hma_mem(adapter);
 	return ret;
-}
-
-static int adap_init1(struct adapter *adap, struct fw_caps_config_cmd *c)
-{
-	u32 v;
-	int ret;
-
-	/* Now that we've successfully configured and initialized the adapter
-	 * can ask the Firmware what resources it has provisioned for us.
-	 */
-	ret = t4_get_pfres(adap);
-	if (ret) {
-		dev_err(adap->pdev_dev,
-			"Unable to retrieve resource provisioning information\n");
-		return ret;
-	}
-
-	/* get device capabilities */
-	memset(c, 0, sizeof(*c));
-	c->op_to_write = htonl(FW_CMD_OP_V(FW_CAPS_CONFIG_CMD) |
-			       FW_CMD_REQUEST_F | FW_CMD_READ_F);
-	c->cfvalid_to_len16 = htonl(FW_LEN16(*c));
-	ret = t4_wr_mbox(adap, adap->mbox, c, sizeof(*c), c);
-	if (ret < 0)
-		return ret;
-
-	c->op_to_write = htonl(FW_CMD_OP_V(FW_CAPS_CONFIG_CMD) |
-			       FW_CMD_REQUEST_F | FW_CMD_WRITE_F);
-	ret = t4_wr_mbox(adap, adap->mbox, c, sizeof(*c), NULL);
-	if (ret < 0)
-		return ret;
-
-	ret = t4_config_glbl_rss(adap, adap->pf,
-				 FW_RSS_GLB_CONFIG_CMD_MODE_BASICVIRTUAL,
-				 FW_RSS_GLB_CONFIG_CMD_TNLMAPEN_F |
-				 FW_RSS_GLB_CONFIG_CMD_TNLALLLKP_F);
-	if (ret < 0)
-		return ret;
-
-	ret = t4_cfg_pfvf(adap, adap->mbox, adap->pf, 0, adap->sge.egr_sz, 64,
-			  MAX_INGQ, 0, 0, 4, 0xf, 0xf, 16, FW_CMD_CAP_PF,
-			  FW_CMD_CAP_PF);
-	if (ret < 0)
-		return ret;
-
-	t4_sge_init(adap);
-
-	/* tweak some settings */
-	t4_write_reg(adap, TP_SHIFT_CNT_A, 0x64f8849);
-	t4_write_reg(adap, ULP_RX_TDDP_PSZ_A, HPZ0_V(PAGE_SHIFT - 12));
-	t4_write_reg(adap, TP_PIO_ADDR_A, TP_INGRESS_CONFIG_A);
-	v = t4_read_reg(adap, TP_PIO_DATA_A);
-	t4_write_reg(adap, TP_PIO_DATA_A, v & ~CSUM_HAS_PSEUDO_HDR_F);
-
-	/* first 4 Tx modulation queues point to consecutive Tx channels */
-	adap->params.tp.tx_modq_map = 0xE4;
-	t4_write_reg(adap, TP_TX_MOD_QUEUE_REQ_MAP_A,
-		     TX_MOD_QUEUE_REQ_MAP_V(adap->params.tp.tx_modq_map));
-
-	/* associate each Tx modulation queue with consecutive Tx channels */
-	v = 0x84218421;
-	t4_write_indirect(adap, TP_PIO_ADDR_A, TP_PIO_DATA_A,
-			  &v, 1, TP_TX_SCHED_HDR_A);
-	t4_write_indirect(adap, TP_PIO_ADDR_A, TP_PIO_DATA_A,
-			  &v, 1, TP_TX_SCHED_FIFO_A);
-	t4_write_indirect(adap, TP_PIO_ADDR_A, TP_PIO_DATA_A,
-			  &v, 1, TP_TX_SCHED_PCMD_A);
-
-#define T4_TX_MODQ_10G_WEIGHT_DEFAULT 16 /* in KB units */
-	if (is_offload(adap)) {
-		t4_write_reg(adap, TP_TX_MOD_QUEUE_WEIGHT0_A,
-			     TX_MODQ_WEIGHT0_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT1_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT2_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT3_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT));
-		t4_write_reg(adap, TP_TX_MOD_CHANNEL_WEIGHT_A,
-			     TX_MODQ_WEIGHT0_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT1_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT2_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT) |
-			     TX_MODQ_WEIGHT3_V(T4_TX_MODQ_10G_WEIGHT_DEFAULT));
-	}
-
-	/* get basic stuff going */
-	return t4_early_init(adap, adap->pf);
 }
 
 /*
@@ -5172,6 +5126,8 @@ static int adap_init0(struct adapter *adap, int vpd_skip)
 	if (caps_cmd.ofldcaps)
 		adap->params.offload = 1;
 
+	adap->num_uld = 0;
+	adap->num_ofld_uld = 0;
 	if (caps_cmd.ofldcaps ||
 	    (caps_cmd.niccaps & htons(FW_CAPS_CONFIG_NIC_HASHFILTER)) ||
 	    (caps_cmd.niccaps & htons(FW_CAPS_CONFIG_NIC_ETHOFLD))) {
@@ -5224,9 +5180,11 @@ static int adap_init0(struct adapter *adap, int vpd_skip)
 					      params, val);
 			if (!ret) {
 				adap->tids.eotid_base = val[0];
-				adap->tids.neotids = min_t(u32, MAX_ATIDS,
+				adap->tids.neotids = min_t(u32, 
+							   cxgb4_modparam_max_mqprio_queues(),
 							   val[1] - val[0] + 1);
-				adap->params.ethofld = 1;
+				if (adap->tids.neotids)
+				       adap->params.ethofld = 1;
 			}
 		}
 	}
@@ -5425,45 +5383,65 @@ bye:
 	return ret;
 }
 
+static void cxgb4_adap_free(struct adapter *adapter);
+static int cxgb4_adap_init(struct adapter *adapter, bool vpd_skip, struct pci_dev *pdev);
+static int cxgb4_iov_configure(struct pci_dev *pdev, int num_vfs);
+
 /* EEH callbacks */
+
+static void eeh_pci_disable(struct adapter *adap)
+{
+	if ((adap->flags & CXGB4_DEV_ENABLED)) {
+		pci_disable_device(adap->pdev);
+		adap->flags &= ~CXGB4_DEV_ENABLED;
+	}
+}
+
+static int eeh_pci_enable(struct adapter *adap)
+{
+	if (!(adap->flags & CXGB4_DEV_ENABLED)) {
+		if (pci_enable_device(adap->pdev)) {
+			dev_err(adap->pdev_dev,
+				"Cannot reenable PCI device after reset\n");
+			return -EIO;
+		}
+		adap->flags |= CXGB4_DEV_ENABLED;
+		if (adap->pf == CXGB4_UNIFIED_PF)
+			pci_set_master(adap->pdev);
+		pci_restore_state(adap->pdev);
+		pci_save_state(adap->pdev);
+	}
+
+	return 0;
+}
 
 static pci_ers_result_t eeh_err_detected(struct pci_dev *pdev,
 					 pci_channel_state_t state)
 {
-	int i;
 	struct adapter *adap = pci_get_drvdata(pdev);
 
 	if (!adap)
 		goto out;
 
-	rtnl_lock();
+#ifdef CONFIG_PCI_IOV
+	if (adap->pf != CXGB4_UNIFIED_PF) {
+		eeh_pci_disable(adap);
+		goto out;
+	}
+#endif
+
 	adap->flags &= ~CXGB4_FW_OK;
-	notify_ulds(adap, CXGB4_STATE_START_RECOVERY);
-	spin_lock(&adap->stats_lock);
-	for_each_port(adap, i) {
-		struct net_device *dev = adap->port[i];
-		if (dev) {
-			netif_device_detach(dev);
-			netif_carrier_off(dev);
-		}
-	}
-	spin_unlock(&adap->stats_lock);
-	disable_interrupts(adap);
-	if (adap->flags & CXGB4_FULL_INIT_DONE)
-		cxgb_down(adap);
-	rtnl_unlock();
-	if ((adap->flags & CXGB4_DEV_ENABLED)) {
-		pci_disable_device(pdev);
-		adap->flags &= ~CXGB4_DEV_ENABLED;
-	}
-out:	return state == pci_channel_io_perm_failure ?
-		PCI_ERS_RESULT_DISCONNECT : PCI_ERS_RESULT_NEED_RESET;
+	t4_fatal_err(adap);
+	cxgb4_adap_free(adap);
+	eeh_pci_disable(adap);
+
+out:
+	return state == pci_channel_io_perm_failure ?
+	       PCI_ERS_RESULT_DISCONNECT : PCI_ERS_RESULT_NEED_RESET;
 }
 
 static pci_ers_result_t eeh_slot_reset(struct pci_dev *pdev)
 {
-	int i, ret;
-	struct fw_caps_config_cmd c;
 	struct adapter *adap = pci_get_drvdata(pdev);
 
 	if (!adap) {
@@ -5472,159 +5450,68 @@ static pci_ers_result_t eeh_slot_reset(struct pci_dev *pdev)
 		return PCI_ERS_RESULT_RECOVERED;
 	}
 
-	if (!(adap->flags & CXGB4_DEV_ENABLED)) {
-		if (pci_enable_device(pdev)) {
-			dev_err(&pdev->dev, "Cannot reenable PCI "
-					    "device after reset\n");
-			return PCI_ERS_RESULT_DISCONNECT;
-		}
-		adap->flags |= CXGB4_DEV_ENABLED;
-	}
-
-	pci_set_master(pdev);
-	pci_restore_state(pdev);
-	pci_save_state(pdev);
-
-	if (t4_wait_dev_ready(adap->regs) < 0)
-		return PCI_ERS_RESULT_DISCONNECT;
-	if (t4_fw_hello(adap, adap->mbox, adap->pf, MASTER_MUST, NULL) < 0)
-		return PCI_ERS_RESULT_DISCONNECT;
-	adap->flags |= CXGB4_FW_OK;
-	if (adap_init1(adap, &c))
+	if (eeh_pci_enable(adap) < 0)
 		return PCI_ERS_RESULT_DISCONNECT;
 
-	for_each_port(adap, i) {
-		struct port_info *pi = adap2pinfo(adap, i);
-		u8 vivld = 0, vin = 0;
-
-		ret = t4_alloc_vi(adap, adap->mbox, pi->tx_chan, adap->pf, 0, 1,
-				  NULL, NULL, &vivld, &vin);
-		if (ret < 0)
-			return PCI_ERS_RESULT_DISCONNECT;
-		pi->viid = ret;
-		pi->xact_addr_filt = -1;
-		/* If fw supports returning the VIN as part of FW_VI_CMD,
-		 * save the returned values.
-		 */
-		if (adap->params.viid_smt_extn_support) {
-			pi->vivld = vivld;
-			pi->vin = vin;
-		} else {
-			/* Retrieve the values from VIID */
-			pi->vivld = FW_VIID_VIVLD_G(pi->viid);
-			pi->vin = FW_VIID_VIN_G(pi->viid);
-		}
-	}
-
-	t4_load_mtus(adap, adap->params.mtus, adap->params.a_wnd,
-		     adap->params.b_wnd);
-	setup_memwin(adap);
-	if (cxgb_up(adap))
+	if (t4_wait_dev_ready(adap->regs) < 0 ||
+	    t4_fw_reset(adap, adap->mbox, 1) < 0)
 		return PCI_ERS_RESULT_DISCONNECT;
+
 	return PCI_ERS_RESULT_RECOVERED;
 }
 
 static void eeh_resume(struct pci_dev *pdev)
 {
-	int i;
 	struct adapter *adap = pci_get_drvdata(pdev);
 
 	if (!adap)
 		return;
 
-	rtnl_lock();
-	for_each_port(adap, i) {
-		struct net_device *dev = adap->port[i];
-		if (dev) {
-			if (netif_running(dev)) {
-				link_start(dev);
-				cxgb_set_rxmode(dev);
-			}
-			netif_device_attach(dev);
-		}
-	}
-	rtnl_unlock();
+#ifdef CONFIG_PCI_IOV
+	if (adap->pf != CXGB4_UNIFIED_PF)
+		return;
+#endif
+
+	cxgb4_adap_init(adap, true, pdev);
 }
 
 static void eeh_reset_prepare(struct pci_dev *pdev)
 {
-	struct adapter *adapter = pci_get_drvdata(pdev);
-	int i;
+	struct adapter *adap = pci_get_drvdata(pdev);
 
-	if (adapter->pf != 4)
+#ifdef CONFIG_PCI_IOV
+	if (adap->pf != CXGB4_UNIFIED_PF) {
+		eeh_pci_disable(adap);
 		return;
+	}
+#endif
 
-	adapter->flags &= ~CXGB4_FW_OK;
-
-	notify_ulds(adapter, CXGB4_STATE_DOWN);
-
-	for_each_port(adapter, i)
-		if (adapter->port[i]->reg_state == NETREG_REGISTERED)
-			cxgb_close(adapter->port[i]);
-
-	disable_interrupts(adapter);
-	cxgb4_free_mps_ref_entries(adapter);
-
-	adap_free_hma_mem(adapter);
-
-	if (adapter->flags & CXGB4_FULL_INIT_DONE)
-		cxgb_down(adapter);
+	adap->flags &= ~CXGB4_FW_OK;
+	cxgb4_adap_free(adap);
+	eeh_pci_disable(adap);
 }
 
 static void eeh_reset_done(struct pci_dev *pdev)
 {
-	struct adapter *adapter = pci_get_drvdata(pdev);
-	int err, i;
+	struct adapter *adap = pci_get_drvdata(pdev);
+	int err;
 
-	if (adapter->pf != 4)
+	if (eeh_pci_enable(adap) < 0)
 		return;
 
-	err = t4_wait_dev_ready(adapter->regs);
+#ifdef CONFIG_PCI_IOV
+	if (adap->pf != CXGB4_UNIFIED_PF)
+		return;
+#endif
+
+	err = t4_wait_dev_ready(adap->regs);
 	if (err < 0) {
-		dev_err(adapter->pdev_dev,
+		dev_err(adap->pdev_dev,
 			"Device not ready, err %d", err);
 		return;
 	}
 
-	setup_memwin(adapter);
-
-	err = adap_init0(adapter, 1);
-	if (err) {
-		dev_err(adapter->pdev_dev,
-			"Adapter init failed, err %d", err);
-		return;
-	}
-
-	setup_memwin_rdma(adapter);
-
-	if (adapter->flags & CXGB4_FW_OK) {
-		err = t4_port_init(adapter, adapter->pf, adapter->pf, 0);
-		if (err) {
-			dev_err(adapter->pdev_dev,
-				"Port init failed, err %d", err);
-			return;
-		}
-	}
-
-	err = cfg_queues(adapter);
-	if (err) {
-		dev_err(adapter->pdev_dev,
-			"Config queues failed, err %d", err);
-		return;
-	}
-
-	cxgb4_init_mps_ref_entries(adapter);
-
-	err = setup_fw_sge_queues(adapter);
-	if (err) {
-		dev_err(adapter->pdev_dev,
-			"FW sge queue allocation failed, err %d", err);
-		return;
-	}
-
-	for_each_port(adapter, i)
-		if (adapter->port[i]->reg_state == NETREG_REGISTERED)
-			cxgb_open(adapter->port[i]);
+	eeh_resume(pdev);
 }
 
 static const struct pci_error_handlers cxgb4_eeh = {
@@ -6176,6 +6063,9 @@ static void free_some_resources(struct adapter *adapter)
 
 	kvfree(adapter->smt);
 	kvfree(adapter->l2t);
+#if IS_ENABLED(CONFIG_IPV6)
+	t4_cleanup_clip_tbl(adapter);
+#endif
 	kvfree(adapter->srq);
 	t4_cleanup_sched(adapter);
 	kvfree(adapter->tids.tid_tab);
@@ -6191,9 +6081,11 @@ static void free_some_resources(struct adapter *adapter)
 #ifdef CONFIG_DEBUG_FS
 	bitmap_free(adapter->sge.blocked_fl);
 #endif
+	free_fw_sge_queues(adapter);
+	free_non_data_intr(adapter);
 	disable_msi(adapter);
 
-	for_each_port(adapter, i)
+	for_each_port(adapter, i) {
 		if (adapter->port[i]) {
 			struct port_info *pi = adap2pinfo(adapter, i);
 
@@ -6203,6 +6095,7 @@ static void free_some_resources(struct adapter *adapter)
 			kfree(adap2pinfo(adapter, i)->rss);
 			free_netdev(adapter->port[i]);
 		}
+	}
 	if (adapter->flags & CXGB4_FW_OK)
 		t4_fw_bye(adapter, adapter->pf);
 }
@@ -6584,16 +6477,14 @@ static const struct xfrmdev_ops cxgb4_xfrmdev_ops = {
 
 static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	struct net_device *netdev;
-	struct adapter *adapter;
+struct adapter *adapter;
 	static int adap_idx = 1;
 	int s_qpp, qpp, num_seg;
-	struct port_info *pi;
 	enum chip_type chip;
 	void __iomem *regs;
 	int func, chip_ver;
 	u16 device_id;
-	int i, err;
+	int  err;
 	u32 whoami;
 
 	err = pci_request_regions(pdev, KBUILD_MODNAME);
@@ -6716,6 +6607,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		goto out_free_adapter;
 
+#if 0
 	if (is_kdump_kernel()) {
 		/* Collect hardware state and append to /proc/vmcore */
 		err = cxgb4_cudbg_vmcore_add_dump(adapter);
@@ -6726,6 +6618,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			err = 0;
 		}
 	}
+#endif
 
 	if (!is_t4(adapter->params.chip)) {
 		s_qpp = (QUEUESPERPAGEPF0_S +
@@ -6755,13 +6648,48 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		}
 	}
 
+	pci_set_drvdata(pdev, adapter);
+
+	err = cxgb4_adap_init(adapter, false, pdev);
+	if (err < 0)
+		goto out_unmap_bar;
+
+	/* PCIe EEH recovery on powerpc platforms needs fundamental reset */
+	pdev->needs_freset = 1;
+	return 0;
+
+ out_unmap_bar:
+	if (!is_t4(adapter->params.chip))
+		iounmap(adapter->bar2);
+ out_free_adapter:
+	if (adapter->workq)
+		destroy_workqueue(adapter->workq);
+
+	kfree(adapter->mbox_log);
+	kfree(adapter);
+ out_unmap_bar0:
+	iounmap(regs);
+ out_disable_device:
+	pci_disable_device(pdev);
+ out_release_regions:
+	pci_release_regions(pdev);
+	return err;
+}
+
+static int cxgb4_adap_init(struct adapter *adapter, bool vpd_skip, struct pci_dev *pdev)
+{
+	struct net_device *netdev;
+	struct port_info *pi;
+	int chip_ver, err;
+	u8 i;
 	setup_memwin(adapter);
 	err = adap_init0(adapter, 0);
 	if (err)
-		goto out_unmap_bar;
+		return err;
 
 	setup_memwin_rdma(adapter);
 
+	chip_ver = CHELSIO_CHIP_VERSION(adapter->params.chip);
 	/* configure SGE_STAT_CFG_A to read WC stats */
 	if (!is_t4(adapter->params.chip))
 		t4_write_reg(adapter, SGE_STAT_CFG_A, STATSOURCE_T5_V(7) |
@@ -6779,10 +6707,11 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		 * know the actual # of EOTIDs supported.
 		 */
 		netdev = alloc_etherdev_mq(sizeof(struct port_info),
-					   MAX_ETH_QSETS + MAX_ATIDS);
+					               MAX_ETH_QSETS +
+                                   cxgb4_modparam_max_mqprio_queues());
 		if (!netdev) {
 			err = -ENOMEM;
-			goto out_free_dev;
+			goto out_free_resources;
 		}
 
 		SET_NETDEV_DEV(netdev, &pdev->dev);
@@ -6798,7 +6727,11 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
 			NETIF_F_RXCSUM | NETIF_F_RXHASH | NETIF_F_GRO |
 			NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
-			NETIF_F_HW_TC | NETIF_F_NTUPLE | NETIF_F_HIGHDMA;
+			NETIF_F_HW_TC | NETIF_F_NTUPLE;
+
+
+		if (dma_get_mask(&pdev->dev) > DMA_BIT_MASK(32))
+			netdev->hw_features |= NETIF_F_HIGHDMA;
 
 		if (chip_ver > CHELSIO_T5) {
 			netdev->hw_enc_features |= NETIF_F_IP_CSUM |
@@ -6818,6 +6751,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 		netdev->features |= netdev->hw_features;
 		netdev->vlan_features = netdev->features & VLAN_FEAT;
+
 #if IS_ENABLED(CONFIG_CHELSIO_TLS_DEVICE)
 		if (pi->adapter->params.crypto & FW_CAPS_CONFIG_TLS_HW) {
 			netdev->hw_features |= NETIF_F_HW_TLS_TX;
@@ -6851,12 +6785,10 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	cxgb4_init_ethtool_dump(adapter);
 
-	pci_set_drvdata(pdev, adapter);
-
 	if (adapter->flags & CXGB4_FW_OK) {
-		err = t4_port_init(adapter, func, func, 0);
+		err = t4_port_init(adapter, adapter->pf, adapter->pf, 0);
 		if (err)
-			goto out_free_dev;
+			goto out_free_resources;
 	} else if (adapter->params.nports == 1) {
 		/* If we don't have a connection to the firmware -- possibly
 		 * because of an error -- grab the raw VPD parameters so we
@@ -6883,7 +6815,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 */
 	err = cfg_queues(adapter);
 	if (err)
-		goto out_free_dev;
+	       goto out_free_resources;
 
 	adapter->smt = t4_init_smt();
 	if (!adapter->smt) {
@@ -6897,7 +6829,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		dev_warn(&pdev->dev, "could not allocate L2T, continuing\n");
 		adapter->params.offload = 0;
 	}
-
 #if IS_ENABLED(CONFIG_IPV6)
 	if (chip_ver <= CHELSIO_T5 &&
 	    (!(t4_read_reg(adapter, LE_DB_CONFIG_A) & ASLIPCOMPEN_F))) {
@@ -6973,7 +6904,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			dev_warn(&pdev->dev,
 				 "could not initialize ethtool filters, continuing\n");
 	}
-
 	/* See what interrupts we'll be using */
 	if (msi > 1 && enable_msix(adapter) == 0)
 		adapter->flags |= CXGB4_USING_MSIX;
@@ -6990,20 +6920,20 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	err = init_rss(adapter);
 	if (err)
-		goto out_free_dev;
+		goto out_free_resources;
 
 	err = setup_non_data_intr(adapter);
 	if (err) {
 		dev_err(adapter->pdev_dev,
 			"Non Data interrupt allocation failed, err: %d\n", err);
-		goto out_free_dev;
+		goto out_free_resources;
 	}
 
 	err = setup_fw_sge_queues(adapter);
 	if (err) {
 		dev_err(adapter->pdev_dev,
 			"FW sge queue allocation failed, err %d", err);
-		goto out_free_dev;
+		goto out_free_resources;
 	}
 
 fw_attach_fail:
@@ -7029,7 +6959,7 @@ fw_attach_fail:
 	}
 	if (i == 0) {
 		dev_err(&pdev->dev, "could not register any net devices\n");
-		goto out_free_dev;
+		goto out_free_resources;
 	}
 	if (err) {
 		dev_warn(&pdev->dev, "only %d net devices registered\n", i);
@@ -7042,9 +6972,6 @@ fw_attach_fail:
 		setup_debugfs(adapter);
 	}
 
-	/* PCIe EEH recovery on powerpc platforms needs fundamental reset */
-	pdev->needs_freset = 1;
-
 	if (is_uld(adapter))
 		cxgb4_uld_enable(adapter);
 
@@ -7056,32 +6983,80 @@ fw_attach_fail:
 		cxgb4_thermal_init(adapter);
 
 	print_adapter_info(adapter);
+	adapter->flags |= CXGB4_RES_ALLOC_DONE;
 	return 0;
 
- out_free_dev:
+	//TODO check
+out_free_resources:
 	t4_free_sge_resources(adapter);
 	free_some_resources(adapter);
-	if (adapter->flags & CXGB4_USING_MSIX)
+    	if (adapter->flags & CXGB4_USING_MSIX)
 		free_msix_info(adapter);
 	if (adapter->num_uld || adapter->num_ofld_uld)
 		t4_uld_mem_free(adapter);
- out_unmap_bar:
-	if (!is_t4(adapter->params.chip))
-		iounmap(adapter->bar2);
- out_free_adapter:
-	if (adapter->workq)
-		destroy_workqueue(adapter->workq);
-
-	kfree(adapter->mbox_log);
-	kfree(adapter);
- out_unmap_bar0:
-	iounmap(regs);
- out_disable_device:
-	pci_disable_device(pdev);
- out_release_regions:
-	pci_release_regions(pdev);
 	return err;
 }
+
+
+static void cxgb4_adap_free(struct adapter *adap)
+{
+	struct hash_mac_addr *entry, *tmp;
+	u8 i;
+
+	if (!(adap->flags & CXGB4_RES_ALLOC_DONE))
+		return;
+
+	for_each_port(adap, i) {
+		struct net_device *dev = adap->port[i];
+		if (dev) {
+			netif_device_detach(dev);
+			netif_carrier_off(dev);
+		}
+	}
+
+	flush_workqueue(adap->workq);
+	detach_ulds(adap);
+
+	for_each_port(adap, i)
+		if (adap->port[i]->reg_state == NETREG_REGISTERED)
+			unregister_netdev(adap->port[i]);
+
+       /* If we allocated filters, free up state associated with any
+ 	* valid filters ...
+	*/
+	clear_all_filters(adap);
+
+	t4_uld_clean_up(adap);
+
+	disable_interrupts(adap);
+
+	adap_free_hma_mem(adap);
+
+	cxgb4_free_mps_ref_entries(adap);
+
+	debugfs_remove_recursive(adap->debugfs_root);
+
+	if (!is_t4(adap->params.chip))
+	       cxgb4_ptp_stop(adap);
+	if (IS_REACHABLE(CONFIG_THERMAL))
+		cxgb4_thermal_remove(adap);
+
+	if (adap->flags & CXGB4_FULL_INIT_DONE)
+		cxgb_down(adap);
+
+	free_some_resources(adap);
+	if (adap->flags & CXGB4_USING_MSIX)
+		free_msix_info(adap);
+	if (adap->num_uld || adap->num_ofld_uld)
+		t4_uld_mem_free(adap);
+	list_for_each_entry_safe(entry, tmp, &adap->mac_hlist, list) {
+		list_del(&entry->list);
+		kfree(entry);
+	}
+	adap->flags &= ~CXGB4_RES_ALLOC_DONE;
+}
+
+
 
 static void remove_one(struct pci_dev *pdev)
 {
@@ -7191,6 +7166,9 @@ static void shutdown_one(struct pci_dev *pdev)
 		for_each_port(adapter, i)
 			if (adapter->port[i]->reg_state == NETREG_REGISTERED)
 				cxgb_close(adapter->port[i]);
+
+		if (!(adapter->flags & CXGB4_RES_ALLOC_DONE))
+			return;
 
 		rtnl_lock();
 		cxgb4_mqprio_stop_offload(adapter);

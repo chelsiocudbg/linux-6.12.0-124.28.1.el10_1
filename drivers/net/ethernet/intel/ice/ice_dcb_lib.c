@@ -1,25 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2019, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice_dcb_lib.h"
 #include "ice_dcb_nl.h"
-#include "devlink/devlink.h"
-
-/**
- * ice_dcb_get_ena_tc - return bitmap of enabled TCs
- * @dcbcfg: DCB config to evaluate for enabled TCs
- */
-static u8 ice_dcb_get_ena_tc(struct ice_dcbx_cfg *dcbcfg)
-{
-	u8 i, num_tc, ena_tc = 1;
-
-	num_tc = ice_dcb_get_num_tc(dcbcfg);
-
-	for (i = 0; i < num_tc; i++)
-		ena_tc |= BIT(i);
-
-	return ena_tc;
-}
+#include "ice_devlink.h"
 
 /**
  * ice_is_pfc_causing_hung_q
@@ -103,7 +87,7 @@ static u8 ice_dcb_get_mode(struct ice_port_info *port_info, bool host)
  * ice_dcb_get_num_tc - Get the number of TCs from DCBX config
  * @dcbcfg: config to retrieve number of TCs from
  */
-u8 ice_dcb_get_num_tc(struct ice_dcbx_cfg *dcbcfg)
+static u8 ice_dcb_get_num_tc(struct ice_dcbx_cfg *dcbcfg)
 {
 	bool tc_unused = false;
 	u8 num_tc = 0;
@@ -135,6 +119,22 @@ u8 ice_dcb_get_num_tc(struct ice_dcbx_cfg *dcbcfg)
 		ret = 1;
 
 	return ret;
+}
+
+/**
+ * ice_dcb_get_ena_tc - return bitmap of enabled TCs
+ * @dcbcfg: DCB config to evaluate for enabled TCs
+ */
+static u8 ice_dcb_get_ena_tc(struct ice_dcbx_cfg *dcbcfg)
+{
+	u8 i, num_tc, ena_tc = 1;
+
+	num_tc = ice_dcb_get_num_tc(dcbcfg);
+
+	for (i = 0; i < num_tc; i++)
+		ena_tc |= BIT(i);
+
+	return ena_tc;
 }
 
 /**
@@ -183,11 +183,17 @@ void ice_vsi_set_dcb_tc_cfg(struct ice_vsi *vsi)
 
 	switch (vsi->type) {
 	case ICE_VSI_PF:
+	case ICE_VSI_VF:
 		vsi->tc_cfg.ena_tc = ice_dcb_get_ena_tc(cfg);
 		vsi->tc_cfg.numtc = ice_dcb_get_num_tc(cfg);
 		break;
+#ifdef HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO
 	case ICE_VSI_CHNL:
-	case ICE_VSI_SF:
+#endif /* HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO */
+#ifdef HAVE_NDO_DFWD_OPS
+	case ICE_VSI_OFFLOAD_MACVLAN:
+#endif /* HAVE_NDO_DFWD_OPS */
+	case ICE_VSI_VMDQ2:
 		vsi->tc_cfg.ena_tc = BIT(ice_get_first_droptc(vsi));
 		vsi->tc_cfg.numtc = 1;
 		break;
@@ -199,6 +205,7 @@ void ice_vsi_set_dcb_tc_cfg(struct ice_vsi *vsi)
 	}
 }
 
+#ifdef HAVE_NDO_SET_TX_MAXRATE
 /**
  * ice_dcb_get_tc - Get the TC associated with the queue
  * @vsi: ptr to the VSI
@@ -208,6 +215,7 @@ u8 ice_dcb_get_tc(struct ice_vsi *vsi, int queue_index)
 {
 	return vsi->tx_rings[queue_index]->dcb_tc;
 }
+#endif /* HAVE_NDO_SET_TX_MAXRATE */
 
 /**
  * ice_vsi_cfg_dcb_rings - Update rings to reflect DCB TC
@@ -215,21 +223,17 @@ u8 ice_dcb_get_tc(struct ice_vsi *vsi, int queue_index)
  */
 void ice_vsi_cfg_dcb_rings(struct ice_vsi *vsi)
 {
-	struct ice_tx_ring *tx_ring;
-	struct ice_rx_ring *rx_ring;
 	u16 qoffset, qcount;
 	int i, n;
 
 	if (!test_bit(ICE_FLAG_DCB_ENA, vsi->back->flags)) {
 		/* Reset the TC information */
-		ice_for_each_txq(vsi, i) {
-			tx_ring = vsi->tx_rings[i];
-			tx_ring->dcb_tc = 0;
-		}
-		ice_for_each_rxq(vsi, i) {
-			rx_ring = vsi->rx_rings[i];
-			rx_ring->dcb_tc = 0;
-		}
+		ice_for_each_txq(vsi, i)
+			vsi->tx_rings[i]->dcb_tc = 0;
+
+		ice_for_each_rxq(vsi, i)
+			vsi->rx_rings[i]->dcb_tc = 0;
+
 		return;
 	}
 
@@ -238,6 +242,7 @@ void ice_vsi_cfg_dcb_rings(struct ice_vsi *vsi)
 			break;
 
 		qoffset = vsi->tc_cfg.tc_info[n].qoffset;
+
 		qcount = vsi->tc_cfg.tc_info[n].qcount_tx;
 		for (i = qoffset; i < (qoffset + qcount); i++)
 			vsi->tx_rings[i]->dcb_tc = n;
@@ -246,10 +251,23 @@ void ice_vsi_cfg_dcb_rings(struct ice_vsi *vsi)
 		for (i = qoffset; i < (qoffset + qcount); i++)
 			vsi->rx_rings[i]->dcb_tc = n;
 	}
-	/* applicable only if "all_enatc" is set, which will be set from
-	 * setup_tc method as part of configuring channels
+
+#ifdef HAVE_NDO_DFWD_OPS
+	/* when DCB is configured TC for MACVLAN queues should be
+	 * the first drop TC of the main VSI
 	 */
-	if (vsi->all_enatc) {
+	if (vsi->type == ICE_VSI_OFFLOAD_MACVLAN) {
+		u8 first_droptc = ice_get_first_droptc(vsi);
+
+		ice_for_each_alloc_txq(vsi, i)
+			vsi->tx_rings[i]->dcb_tc = first_droptc;
+		ice_for_each_alloc_rxq(vsi, i)
+			vsi->rx_rings[i]->dcb_tc = first_droptc;
+	}
+#endif /* HAVE_NDO_DFWD_OPS */
+
+#ifdef HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO
+	if (vsi->type == ICE_VSI_PF) {
 		u8 first_droptc = ice_get_first_droptc(vsi);
 
 		/* When DCB is configured, TC for ADQ queues (which are really
@@ -267,6 +285,7 @@ void ice_vsi_cfg_dcb_rings(struct ice_vsi *vsi)
 			}
 		}
 	}
+#endif /* HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO */
 }
 
 /**
@@ -275,7 +294,7 @@ void ice_vsi_cfg_dcb_rings(struct ice_vsi *vsi)
  * @ena: true to enable VSIs, false to disable
  * @locked: true if caller holds RTNL lock, false otherwise
  *
- * Before a new DCB configuration can be applied, VSIs of type PF, SWITCHDEV
+ * Before a new DCB configuration can be applied, VSIs of type PF, MACVLAN,
  * and CHNL need to be brought down. Following completion of DCB configuration
  * the VSIs that were downed need to be brought up again. This helper function
  * does both.
@@ -292,6 +311,8 @@ static void ice_dcb_ena_dis_vsi(struct ice_pf *pf, bool ena, bool locked)
 
 		switch (vsi->type) {
 		case ICE_VSI_CHNL:
+		case ICE_VSI_OFFLOAD_MACVLAN:
+		case ICE_VSI_VMDQ2:
 		case ICE_VSI_PF:
 			if (ena)
 				ice_ena_vsi(vsi, locked);
@@ -352,34 +373,25 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 	struct ice_aqc_port_ets_elem buf = { 0 };
 	struct ice_dcbx_cfg *old_cfg, *curr_cfg;
 	struct device *dev = ice_pf_to_dev(pf);
-	int ret = ICE_DCB_NO_HW_CHG;
 	struct iidc_event *event;
-	struct ice_vsi *pf_vsi;
+	int ret;
 
 	curr_cfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
-
-	/* FW does not care if change happened */
-	if (!pf->hw.port_info->qos_cfg.is_sw_lldp)
-		ret = ICE_DCB_HW_CHG_RST;
 
 	/* Enable DCB tagging only when more than one TC */
 	if (ice_dcb_get_num_tc(new_cfg) > 1) {
 		dev_dbg(dev, "DCB tagging enabled (num TC > 1)\n");
+#ifdef HAVE_DEVLINK_RATE_NODE_CREATE
 		if (pf->hw.port_info->is_custom_tx_enabled) {
-			dev_err(dev, "Custom Tx scheduler feature enabled, can't configure DCB\n");
+			dev_err(dev, "Cannot enable feature DCB because HQoS HW offload mode is currently enabled\n");
 			return -EBUSY;
 		}
 		ice_tear_down_devlink_rate_tree(pf);
-
+#endif /*HAVE_DEVLINK_RATE_NODE_CREATE */
 		set_bit(ICE_FLAG_DCB_ENA, pf->flags);
 	} else {
 		dev_dbg(dev, "DCB tagging disabled (num TC = 1)\n");
 		clear_bit(ICE_FLAG_DCB_ENA, pf->flags);
-	}
-
-	if (!memcmp(new_cfg, curr_cfg, sizeof(*new_cfg))) {
-		dev_dbg(dev, "No change in DCB config required\n");
-		return ret;
 	}
 
 	if (ice_dcb_bwchk(pf, new_cfg))
@@ -391,22 +403,15 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 		return -ENOMEM;
 
 	dev_info(dev, "Commit DCB Configuration to the hardware\n");
-	pf_vsi = ice_get_main_vsi(pf);
-	if (!pf_vsi) {
-		dev_dbg(dev, "PF VSI doesn't exist\n");
-		ret = -EINVAL;
-		goto free_cfg;
-	}
-
-	/* Notify AUX drivers about impending change to TCs */
+	/* Notify capable aux drivers about impending change to TCs */
 	event = kzalloc(sizeof(*event), GFP_KERNEL);
 	if (!event) {
-		ret = -ENOMEM;
-		goto free_cfg;
+		kfree(old_cfg);
+		return -ENOMEM;
 	}
 
 	set_bit(IIDC_EVENT_BEFORE_TC_CHANGE, event->type);
-	ice_send_event_to_aux(pf, event);
+	ice_send_event_to_auxs(pf, event);
 	kfree(event);
 
 	/* avoid race conditions by holding the lock while disabling and
@@ -441,14 +446,13 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 		goto out;
 	}
 
-	ice_pf_dcb_recfg(pf, false);
+	ice_pf_dcb_recfg(pf);
 
 out:
 	/* enable previously downed VSIs */
 	ice_dcb_ena_dis_vsi(pf, true, true);
 	if (!locked)
 		rtnl_unlock();
-free_cfg:
 	kfree(old_cfg);
 	return ret;
 }
@@ -481,7 +485,7 @@ static void ice_cfg_etsrec_defaults(struct ice_port_info *pi)
  * @old_cfg: current DCB config
  * @new_cfg: new DCB config
  */
-static bool
+bool
 ice_dcb_need_recfg(struct ice_pf *pf, struct ice_dcbx_cfg *old_cfg,
 		   struct ice_dcbx_cfg *new_cfg)
 {
@@ -501,13 +505,17 @@ ice_dcb_need_recfg(struct ice_pf *pf, struct ice_dcbx_cfg *old_cfg,
 
 		if (memcmp(&new_cfg->etscfg.tcbwtable,
 			   &old_cfg->etscfg.tcbwtable,
-			   sizeof(new_cfg->etscfg.tcbwtable)))
+			   sizeof(new_cfg->etscfg.tcbwtable))) {
+			need_reconfig = true;
 			dev_dbg(dev, "ETS TC BW Table changed.\n");
+		}
 
 		if (memcmp(&new_cfg->etscfg.tsatable,
 			   &old_cfg->etscfg.tsatable,
-			   sizeof(new_cfg->etscfg.tsatable)))
+			   sizeof(new_cfg->etscfg.tsatable))) {
+			need_reconfig = true;
 			dev_dbg(dev, "ETS TSA Table changed.\n");
+		}
 	}
 
 	/* Check if PFC configuration has changed */
@@ -538,12 +546,11 @@ void ice_dcb_rebuild(struct ice_pf *pf)
 	int ret;
 
 	ret = ice_query_port_ets(pf->hw.port_info, &buf, sizeof(buf), NULL);
+	mutex_lock(&pf->tc_mutex);
 	if (ret) {
 		dev_err(dev, "Query Port ETS failed\n");
 		goto dcb_error;
 	}
-
-	mutex_lock(&pf->tc_mutex);
 
 	if (!pf->hw.port_info->qos_cfg.is_sw_lldp)
 		ice_cfg_etsrec_defaults(pf->hw.port_info);
@@ -712,10 +719,12 @@ static int ice_dcb_noncontig_cfg(struct ice_pf *pf)
 	struct device *dev = ice_pf_to_dev(pf);
 	int ret;
 
+	dev_info(dev, "ETS configuration is not supported\n");
+
 	/* Configure SW DCB default with ETS non-willing */
 	ret = ice_dcb_sw_dflt_cfg(pf, false, true);
 	if (ret) {
-		dev_err(dev, "Failed to set local DCB config %d\n", ret);
+		ice_dev_err_errno(dev, ret, "Failed to set local DCB config");
 		return ret;
 	}
 
@@ -731,15 +740,15 @@ static int ice_dcb_noncontig_cfg(struct ice_pf *pf)
 /**
  * ice_pf_dcb_recfg - Reconfigure all VEBs and VSIs
  * @pf: pointer to the PF struct
- * @locked: is adev device lock held
  *
  * Assumed caller has already disabled all VSIs before
  * calling this function. Reconfiguring DCB based on
  * local_dcbx_cfg.
  */
-void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
+void ice_pf_dcb_recfg(struct ice_pf *pf)
 {
 	struct ice_dcbx_cfg *dcbcfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
+	struct iidc_core_dev_info *cdev_info;
 	struct iidc_event *event;
 	u8 tc_map = 0;
 	int v, ret;
@@ -752,6 +761,8 @@ void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
 			continue;
 
 		if (vsi->type == ICE_VSI_PF) {
+			if (ice_dcb_get_num_tc(dcbcfg) > vsi->alloc_txq)
+				dev_warn(ice_pf_to_dev(vsi->back), "More TCs defined than queues/rings allocated.\n");
 			tc_map = ice_dcb_get_ena_tc(dcbcfg);
 
 			/* If DCBX request non-contiguous TC, then configure
@@ -761,8 +772,11 @@ void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
 				tc_map = ICE_DFLT_TRAFFIC_CLASS;
 				ice_dcb_noncontig_cfg(pf);
 			}
-		} else if (vsi->type == ICE_VSI_CHNL) {
+#if defined(HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO) && defined(HAVE_NDO_DFWD_OPS)
+		} else if (vsi->type == ICE_VSI_CHNL ||
+			   vsi->type == ICE_VSI_OFFLOAD_MACVLAN) {
 			tc_map = BIT(ice_get_first_droptc(vsi));
+# endif /* HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO && HAVE_NDO_DFWD_OPS */
 		} else {
 			tc_map = ICE_DFLT_TRAFFIC_CLASS;
 		}
@@ -783,14 +797,19 @@ void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
 		if (vsi->type == ICE_VSI_PF)
 			ice_dcbnl_set_all(vsi);
 	}
-	if (!locked) {
-		/* Notify the AUX drivers that TC change is finished */
+	/* Notify the aux drivers that TC change is finished
+	 */
+	cdev_info = ICE_FIND_CDEV_INFO(pf, IIDC_RDMA_ID);
+	if (cdev_info) {
+		ice_setup_dcb_qos_info(pf, &cdev_info->qos_info);
+
 		event = kzalloc(sizeof(*event), GFP_KERNEL);
 		if (!event)
 			return;
 
 		set_bit(IIDC_EVENT_AFTER_TC_CHANGE, event->type);
-		ice_send_event_to_aux(pf, event);
+		event->info.port_qos = cdev_info->qos_info;
+		ice_send_event_to_auxs(pf, event);
 		kfree(event);
 	}
 }
@@ -817,7 +836,7 @@ int ice_init_pf_dcb(struct ice_pf *pf, bool locked)
 
 	dev_info(dev, "DCB is enabled in the hardware, max number of TCs supported on this port are %d\n",
 		 pf->hw.func_caps.common_cap.maxtc);
-	if (err) {
+	if (port_info->qos_cfg.is_sw_lldp) {
 		struct ice_vsi *pf_vsi;
 
 		/* FW LLDP is disabled, activate SW DCBX/LLDP mode */
@@ -830,8 +849,8 @@ int ice_init_pf_dcb(struct ice_pf *pf, bool locked)
 
 		err = ice_dcb_sw_dflt_cfg(pf, true, locked);
 		if (err) {
-			dev_err(dev, "Failed to set local DCB config %d\n",
-				err);
+			ice_dev_err_errno(dev, err,
+					  "Failed to set local DCB config");
 			err = -EIO;
 			goto dcb_init_err;
 		}
@@ -931,17 +950,61 @@ ice_tx_prepare_vlan_flags_dcb(struct ice_tx_ring *tx_ring,
 	if ((first->tx_flags & ICE_TX_FLAGS_HW_VLAN ||
 	     first->tx_flags & ICE_TX_FLAGS_HW_OUTER_SINGLE_VLAN) ||
 	    skb->priority != TC_PRIO_CONTROL) {
-		first->vid &= ~VLAN_PRIO_MASK;
+		first->tx_flags &= ~ICE_TX_FLAGS_VLAN_PR_M;
 		/* Mask the lower 3 bits to set the 802.1p priority */
-		first->vid |= FIELD_PREP(VLAN_PRIO_MASK, skb->priority);
+		first->tx_flags |= FIELD_PREP(ICE_TX_FLAGS_VLAN_PR_M,
+					      skb->priority & 0x7);
 		/* if this is not already set it means a VLAN 0 + priority needs
 		 * to be offloaded
 		 */
-		if (tx_ring->flags & ICE_TX_FLAGS_RING_VLAN_L2TAG2)
+		if (tx_ring->flags & ICE_TX_FLAGS_VLAN_TAG_LOC_L2TAG2)
 			first->tx_flags |= ICE_TX_FLAGS_HW_OUTER_SINGLE_VLAN;
 		else
 			first->tx_flags |= ICE_TX_FLAGS_HW_VLAN;
 	}
+}
+
+/**
+ * ice_setup_dcb_qos_info - Setup DCB QoS information
+ * @pf: ptr to ice_pf
+ * @qos_info: QoS param instance
+ */
+void ice_setup_dcb_qos_info(struct ice_pf *pf, struct iidc_qos_params *qos_info)
+{
+	struct iidc_core_dev_info *cdev_info;
+	struct ice_dcbx_cfg *dcbx_cfg;
+	unsigned int i;
+	u32 up2tc;
+
+	if (!pf || !qos_info)
+		return;
+
+	cdev_info = ICE_FIND_CDEV_INFO(pf, IIDC_RDMA_ID);
+	if (!cdev_info)
+		return;
+
+	dcbx_cfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
+	up2tc = rd32(&pf->hw, PRTDCB_TUP2TC);
+	qos_info->num_apps = dcbx_cfg->numapps;
+
+	qos_info->num_tc = ice_dcb_get_num_tc(dcbx_cfg);
+
+	for (i = 0; i < IIDC_MAX_USER_PRIORITY; i++)
+		qos_info->up2tc[i] = (up2tc >> (i * 3)) & 0x7;
+
+	for (i = 0; i < IEEE_8021QAZ_MAX_TCS; i++)
+		qos_info->tc_info[i].rel_bw =
+			dcbx_cfg->etscfg.tcbwtable[i];
+
+	for (i = 0; i < qos_info->num_apps; i++) {
+		qos_info->apps[i].priority = dcbx_cfg->app[i].priority;
+		qos_info->apps[i].prot_id = dcbx_cfg->app[i].prot_id;
+		qos_info->apps[i].selector = dcbx_cfg->app[i].selector;
+	}
+
+	qos_info->pfc_mode = dcbx_cfg->pfc_mode;
+	for (i = 0; i < ICE_DSCP_NUM_VAL; i++)
+		qos_info->dscp_map[i] = dcbx_cfg->dscp_map[i];
 }
 
 /**
@@ -965,12 +1028,14 @@ ice_dcb_process_lldp_set_mib_change(struct ice_pf *pf,
 {
 	struct ice_aqc_port_ets_elem buf = { 0 };
 	struct device *dev = ice_pf_to_dev(pf);
+	struct iidc_core_dev_info *cdev_info;
 	struct ice_aqc_lldp_get_mib *mib;
 	struct ice_dcbx_cfg tmp_dcbx_cfg;
 	bool pending_handled = true;
 	bool need_reconfig = false;
 	struct ice_port_info *pi;
 	u8 mib_type;
+	u32 numtc;
 	int ret;
 
 	/* Not DCB capable or capability disabled */
@@ -1054,12 +1119,32 @@ ice_dcb_process_lldp_set_mib_change(struct ice_pf *pf,
 		goto out;
 
 	/* Enable DCB tagging only when more than one TC */
-	if (ice_dcb_get_num_tc(&pi->qos_cfg.local_dcbx_cfg) > 1) {
+	numtc = ice_dcb_get_num_tc(&pi->qos_cfg.local_dcbx_cfg);
+	if (numtc > 1) {
 		dev_dbg(dev, "DCB tagging enabled (num TC > 1)\n");
 		set_bit(ICE_FLAG_DCB_ENA, pf->flags);
 	} else {
 		dev_dbg(dev, "DCB tagging disabled (num TC = 1)\n");
 		clear_bit(ICE_FLAG_DCB_ENA, pf->flags);
+	}
+
+	if (numtc > pf->hw.func_caps.common_cap.maxtc)
+		dev_warn(dev, "%d TCs more than supported max of %d\n", numtc,
+			 pf->hw.func_caps.common_cap.maxtc);
+
+	cdev_info = ICE_FIND_CDEV_INFO(pf, IIDC_RDMA_ID);
+	if (cdev_info) {
+		struct iidc_event *ievent;
+
+		/* can't fail the LAN flow based on a failure to notify
+		 * the RDMA driver
+		 */
+		ievent = kzalloc(sizeof(*ievent), GFP_KERNEL);
+		if (ievent) {
+			set_bit(IIDC_EVENT_BEFORE_TC_CHANGE, ievent->type);
+			ice_send_event_to_auxs(pf, ievent);
+			kfree(ievent);
+		}
 	}
 
 	/* Send Execute Pending MIB Change event if it is a Pending event */
@@ -1079,7 +1164,7 @@ ice_dcb_process_lldp_set_mib_change(struct ice_pf *pf,
 	}
 
 	/* changes in configuration update VSI */
-	ice_pf_dcb_recfg(pf, false);
+	ice_pf_dcb_recfg(pf);
 
 	/* enable previously downed VSIs */
 	ice_dcb_ena_dis_vsi(pf, true, true);

@@ -50,7 +50,15 @@
  */
 
 #define CHCR_CRA_PRIORITY 500
-#define CHCR_AEAD_PRIORITY 6000
+/*
+ * Set priority for chcr AEAD to  3500 instead of 6000.
+ * This value is intentionally set to lower than QAT AEAD ciphers, 
+ * which is at 4001
+ * and higher than kenel aesni AEAD cihpers, which are at priority 3170
+ * This will prioritize QAT, chelsio-chcr, aesni in that order based on
+ * availability of the offload.
+ */
+#define CHCR_AEAD_PRIORITY 3500
 #define CHCR_AES_MAX_KEY_LEN  (2 * (AES_MAX_KEY_SIZE)) /* consider xts */
 #define CHCR_MAX_CRYPTO_IV_LEN 16 /* AES IV len */
 

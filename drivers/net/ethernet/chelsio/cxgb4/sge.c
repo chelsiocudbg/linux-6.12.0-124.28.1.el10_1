@@ -1586,7 +1586,15 @@ static netdev_tx_t cxgb4_eth_xmit(struct sk_buff *skb, struct net_device *dev)
 		 * has opened up.
 		 */
 		eth_txq_stop(q);
-		if (chip_ver > CHELSIO_T5)
+
+		/* If we're using the SGE Doorbell Queue Timer facility, we
+		 * don't need to ask the Firmware to send us Egress Queue CIDX
+		 * Updates: the Hardware will do this automatically.  And
+		 * since we send the Ingress Queue CIDX Updates to the
+		 * corresponding Ethernet Response Queue, we'll get them very
+		 * quickly.
+		 */
+		if (!q->dbqt && chip_ver > CHELSIO_T5)
 			wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
 	}
 
@@ -1898,7 +1906,15 @@ static netdev_tx_t cxgb4_vf_eth_xmit(struct sk_buff *skb,
 		 * has opened up.
 		 */
 		eth_txq_stop(txq);
-		if (chip_ver > CHELSIO_T5)
+
+		/* If we're using the SGE Doorbell Queue Timer facility, we
+		 * don't need to ask the Firmware to send us Egress Queue CIDX
+		 * Updates: the Hardware will do this automatically.  And
+		 * since we send the Ingress Queue CIDX Updates to the
+		 * corresponding Ethernet Response Queue, we'll get them very
+		 * quickly.
+		 */
+		if (!txq->dbqt && chip_ver > CHELSIO_T5)
 			wr_mid |= FW_WR_EQUEQ_F | FW_WR_EQUIQ_F;
 	}
 
@@ -3615,7 +3631,8 @@ static void t4_tx_completion_handler(struct sge_rspq *rspq,
 	 * considered here since both are Big Endian and we're just copying
 	 * bytes consistently ...
 	 */
-	if (CHELSIO_CHIP_VERSION(adapter->params.chip) <= CHELSIO_T5) {
+	if (txq->dbqt ||
+	    CHELSIO_CHIP_VERSION(adapter->params.chip) <= CHELSIO_T5) {
 		struct cpl_sge_egr_update *egr;
 
 		egr = (struct cpl_sge_egr_update *)rsp;
@@ -4607,13 +4624,14 @@ int t4_sge_alloc_eth_txq(struct adapter *adap, struct sge_eth_txq *txq,
 	 * write the CIDX Updates into the Status Page at the end of the
 	 * TX Queue.
 	 */
-	c.autoequiqe_to_viid = htonl(((chip_ver <= CHELSIO_T5) ?
+	c.autoequiqe_to_viid = htonl(((dbqt || chip_ver <= CHELSIO_T5) ?
 				      FW_EQ_ETH_CMD_AUTOEQUIQE_F :
 				      FW_EQ_ETH_CMD_AUTOEQUEQE_F) |
 				     FW_EQ_ETH_CMD_VIID_V(pi->viid));
 
 	c.fetchszm_to_iqid =
-		htonl(FW_EQ_ETH_CMD_HOSTFCMODE_V((chip_ver <= CHELSIO_T5) ?
+		htonl(FW_EQ_ETH_CMD_HOSTFCMODE_V((dbqt ||
+						  chip_ver <= CHELSIO_T5) ?
 						 HOSTFCMODE_INGRESS_QUEUE_X :
 						 HOSTFCMODE_STATUS_PAGE_X) |
 		      FW_EQ_ETH_CMD_PCIECHN_V(pi->tx_chan) |
@@ -4959,16 +4977,6 @@ void t4_free_sge_resources(struct adapter *adap)
 			free_txq(adap, &cq->q);
 		}
 	}
-
-	if (adap->sge.fw_evtq.desc) {
-		free_rspq_fl(adap, &adap->sge.fw_evtq, NULL);
-		if (adap->sge.fwevtq_msix_idx >= 0)
-			cxgb4_free_msix_idx_in_bmap(adap,
-						    adap->sge.fwevtq_msix_idx);
-	}
-
-	if (adap->sge.nd_msix_idx >= 0)
-		cxgb4_free_msix_idx_in_bmap(adap, adap->sge.nd_msix_idx);
 
 	if (adap->sge.intrq.desc)
 		free_rspq_fl(adap, &adap->sge.intrq, NULL);

@@ -713,6 +713,7 @@ enum {                                 /* adapter flags */
 	CXGB4_ROOT_NO_RELAXED_ORDERING	= (1 << 10),
 	CXGB4_SHUTTING_DOWN		= (1 << 11),
 	CXGB4_SGE_DBQ_TIMER		= (1 << 12),
+	CXGB4_RES_ALLOC_DONE		= (1 << 13),
 };
 
 enum {
@@ -1961,7 +1962,6 @@ void t4_mk_filtdelwr(unsigned int ftid, struct fw_filter_wr *wr, int qid);
 int t4_fw_hello(struct adapter *adap, unsigned int mbox, unsigned int evt_mbox,
 		enum dev_master master, enum dev_state *state);
 int t4_fw_bye(struct adapter *adap, unsigned int mbox);
-int t4_early_init(struct adapter *adap, unsigned int mbox);
 int t4_fw_reset(struct adapter *adap, unsigned int mbox, int reset);
 int t4_fixup_host_params(struct adapter *adap, unsigned int page_size,
 			  unsigned int cache_line_size);

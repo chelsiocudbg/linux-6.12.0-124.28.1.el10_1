@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #ifndef _ICE_SBQ_CMD_H_
 #define _ICE_SBQ_CMD_H_
@@ -46,15 +46,17 @@ struct ice_sbq_evt_desc {
 	u8 data[24];
 };
 
-enum ice_sbq_dev_id {
-	ice_sbq_dev_phy_0	= 0x02,
-	ice_sbq_dev_cgu		= 0x06,
-	ice_sbq_dev_phy_0_peer	= 0x0D,
+enum ice_sbq_msg_dev {
+	phy_0	= 2,
+	cgu	= 6,
+	phy_0_peer = 13,
+	cgu_peer = 15,
 };
 
 enum ice_sbq_msg_opcode {
-	ice_sbq_msg_rd	= 0x00,
-	ice_sbq_msg_wr	= 0x01
+	ice_sbq_msg_rd		= 0x00,
+	ice_sbq_msg_wr_p	= 0x01,
+	ice_sbq_msg_wr_np	= 0x02
 };
 
 #define ICE_SBQ_MSG_FLAGS	0x40

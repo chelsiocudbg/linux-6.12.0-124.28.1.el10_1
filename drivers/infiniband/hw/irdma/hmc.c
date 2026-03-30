@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+/* Copyright (c) 2015 - 2024 Intel Corporation */
 #include "osdep.h"
 #include "hmc.h"
 #include "defs.h"
 #include "type.h"
 #include "protos.h"
+#include "virtchnl.h"
 
 /**
  * irdma_find_sd_index_limit - finds segment descriptor index limit
@@ -76,7 +77,8 @@ static void irdma_set_sd_entry(u64 pa, u32 idx, enum irdma_sd_entry_type type,
 				 type == IRDMA_SD_TYPE_PAGED ? 0 : 1) |
 		      FIELD_PREP(IRDMA_PFHMC_SDDATALOW_PMSDVALID, 1);
 
-	entry->cmd = idx | FIELD_PREP(IRDMA_PFHMC_SDCMD_PMSDWR, 1) | BIT(15);
+	entry->cmd = idx | FIELD_PREP(IRDMA_PFHMC_SDCMD_PMSDWR, 1) |
+		     IRDMA_PFHMC_SDCMD_PMSDPARTSEL;
 }
 
 /**
@@ -92,7 +94,8 @@ static void irdma_clr_sd_entry(u32 idx, enum irdma_sd_entry_type type,
 		      FIELD_PREP(IRDMA_PFHMC_SDDATALOW_PMSDTYPE,
 				 type == IRDMA_SD_TYPE_PAGED ? 0 : 1);
 
-	entry->cmd = idx | FIELD_PREP(IRDMA_PFHMC_SDCMD_PMSDWR, 1) | BIT(15);
+	entry->cmd = idx | FIELD_PREP(IRDMA_PFHMC_SDCMD_PMSDWR, 1) |
+		     IRDMA_PFHMC_SDCMD_PMSDPARTSEL;
 }
 
 /**
@@ -112,6 +115,24 @@ static inline void irdma_invalidate_pf_hmc_pd(struct irdma_sc_dev *dev, u32 sd_i
 }
 
 /**
+ * irdma_invalidate_vf_hmc_pd - Invalidates the pd cache in the hardware for VF
+ * @dev: pointer to our device struct
+ * @sd_idx: segment descriptor index
+ * @pd_idx: page descriptor index
+ * @hmc_fn_id: VF's function id
+ */
+static inline void irdma_invalidate_vf_hmc_pd(struct irdma_sc_dev *dev,
+					      u32 sd_idx, u32 pd_idx,
+					      u16 hmc_fn_id)
+{
+	u32 val = FIELD_PREP(IRDMA_PFHMC_PDINV_PMSDIDX, sd_idx) |
+		  FIELD_PREP(IRDMA_PFHMC_PDINV_PMPDIDX, pd_idx);
+
+	writel(val,
+	       dev->hw_regs[IRDMA_GLHMC_VFPDINV] + hmc_fn_id - dev->hw_attrs.first_hw_vf_fpm_id);
+}
+
+/**
  * irdma_hmc_sd_one - setup 1 sd entry for cqp
  * @dev: pointer to the device structure
  * @hmc_fn_id: hmc's function id
@@ -120,7 +141,7 @@ static inline void irdma_invalidate_pf_hmc_pd(struct irdma_sc_dev *dev, u32 sd_i
  * @type: paged or direct sd
  * @setsd: flag to set or clear sd
  */
-int irdma_hmc_sd_one(struct irdma_sc_dev *dev, u8 hmc_fn_id, u64 pa, u32 sd_idx,
+int irdma_hmc_sd_one(struct irdma_sc_dev *dev, u16 hmc_fn_id, u64 pa, u32 sd_idx,
 		     enum irdma_sd_entry_type type, bool setsd)
 {
 	struct irdma_update_sds_info sdinfo;
@@ -188,6 +209,48 @@ static int irdma_hmc_sd_grp(struct irdma_sc_dev *dev,
 }
 
 /**
+ * irdma_vchnl_dev_from_fpm - return vc dev ptr for hmc function id
+ * @dev: pointer to the device structure
+ * @hmc_fn_id: hmc's function id
+ */
+struct irdma_vchnl_dev *irdma_vchnl_dev_from_fpm(struct irdma_sc_dev *dev,
+						 u16 hmc_fn_id)
+{
+	struct irdma_vchnl_dev *vc_dev = NULL;
+	u16 idx;
+
+	for (idx = 0; idx < dev->num_vfs; idx++) {
+		if (dev->vc_dev[idx] &&
+		    dev->vc_dev[idx]->pmf_index == hmc_fn_id) {
+			vc_dev = dev->vc_dev[idx];
+			break;
+		}
+	}
+	return vc_dev;
+}
+
+/**
+ * irdma_vf_hmcinfo_from_fpm - get ptr to hmc for func_id
+ * @dev: pointer to the device structure
+ * @hmc_fn_id: hmc's function id
+ */
+struct irdma_hmc_info *irdma_vf_hmcinfo_from_fpm(struct irdma_sc_dev *dev,
+						 u16 hmc_fn_id)
+{
+	struct irdma_hmc_info *hmc_info = NULL;
+	u16 idx;
+
+	for (idx = 0; idx < dev->num_vfs; idx++) {
+		if (dev->vc_dev[idx] &&
+		    dev->vc_dev[idx]->pmf_index == hmc_fn_id) {
+			hmc_info = &dev->vc_dev[idx]->hmc_info;
+			break;
+		}
+	}
+	return hmc_info;
+}
+
+/**
  * irdma_hmc_finish_add_sd_reg - program sd entries for objects
  * @dev: pointer to the device structure
  * @info: create obj info
@@ -228,17 +291,33 @@ int irdma_sc_create_hmc_obj(struct irdma_sc_dev *dev,
 	bool pd_error = false;
 	int ret_code = 0;
 
-	if (info->start_idx >= info->hmc_info->hmc_obj[info->rsrc_type].cnt)
+	if (dev->hw_attrs.uk_attrs.hw_rev >= IRDMA_GEN_3 &&
+	    dev->hmc_info->hmc_obj[info->rsrc_type].mem_loc == IRDMA_LOC_MEM)
+		return 0;
+
+	if (info->start_idx >= info->hmc_info->hmc_obj[info->rsrc_type].cnt) {
+		ibdev_dbg(to_ibdev(dev),
+			  "ERR: invalid hmc obj type %u, start = %u, req cnt %u, cnt = %u\n",
+			  info->rsrc_type, info->start_idx, info->count,
+			  info->hmc_info->hmc_obj[info->rsrc_type].cnt);
+
 		return -EINVAL;
+	}
 
 	if ((info->start_idx + info->count) >
 	    info->hmc_info->hmc_obj[info->rsrc_type].cnt) {
 		ibdev_dbg(to_ibdev(dev),
-			  "HMC: error type %u, start = %u, req cnt %u, cnt = %u\n",
+			  "ERR: error type %u, start = %u, req cnt %u, cnt = %u\n",
 			  info->rsrc_type, info->start_idx, info->count,
 			  info->hmc_info->hmc_obj[info->rsrc_type].cnt);
 		return -EINVAL;
 	}
+
+	if (dev->hw_attrs.uk_attrs.hw_rev <= IRDMA_GEN_2 &&
+	    !dev->privileged)
+		return irdma_vchnl_req_add_hmc_objs(dev, info->rsrc_type,
+						   info->start_idx,
+						   info->count);
 
 	irdma_find_sd_index_limit(info->hmc_info, info->rsrc_type,
 				  info->start_idx, info->count, &sd_idx,
@@ -327,10 +406,10 @@ static int irdma_finish_del_sd_reg(struct irdma_sc_dev *dev,
 {
 	struct irdma_hmc_sd_entry *sd_entry;
 	int ret_code = 0;
-	u32 i, sd_idx;
 	struct irdma_dma_mem *mem;
+	u32 i, sd_idx;
 
-	if (!reset)
+	if (dev->privileged && !reset)
 		ret_code = irdma_hmc_sd_grp(dev, info->hmc_info,
 					    info->hmc_info->sd_indexes[0],
 					    info->del_sd_cnt, false);
@@ -340,13 +419,14 @@ static int irdma_finish_del_sd_reg(struct irdma_sc_dev *dev,
 	for (i = 0; i < info->del_sd_cnt; i++) {
 		sd_idx = info->hmc_info->sd_indexes[i];
 		sd_entry = &info->hmc_info->sd_table.sd_entry[sd_idx];
-		mem = (sd_entry->entry_type == IRDMA_SD_TYPE_PAGED) ?
-			      &sd_entry->u.pd_table.pd_page_addr :
-			      &sd_entry->u.bp.addr;
 
-		if (!mem || !mem->va) {
+		mem = (sd_entry->entry_type == IRDMA_SD_TYPE_PAGED) ?
+		       &sd_entry->u.pd_table.pd_page_addr :
+		       &sd_entry->u.bp.addr;
+
+		if (!mem || !mem->va)
 			ibdev_dbg(to_ibdev(dev), "HMC: error cqp sd mem\n");
-		} else {
+		else {
 			dma_free_coherent(dev->hw->device, mem->size, mem->va,
 					  mem->pa);
 			mem->va = NULL;
@@ -376,6 +456,9 @@ int irdma_sc_del_hmc_obj(struct irdma_sc_dev *dev,
 	u32 i, j;
 	int ret_code = 0;
 
+	if (dev->hmc_info->hmc_obj[info->rsrc_type].mem_loc == IRDMA_LOC_MEM)
+		return 0;
+
 	if (info->start_idx >= info->hmc_info->hmc_obj[info->rsrc_type].cnt) {
 		ibdev_dbg(to_ibdev(dev),
 			  "HMC: error start_idx[%04d]  >= [type %04d].cnt[%04d]\n",
@@ -391,6 +474,16 @@ int irdma_sc_del_hmc_obj(struct irdma_sc_dev *dev,
 			  info->start_idx, info->count, info->rsrc_type,
 			  info->hmc_info->hmc_obj[info->rsrc_type].cnt);
 		return -EINVAL;
+	}
+	if (dev->hw_attrs.uk_attrs.hw_rev <= IRDMA_GEN_2 &&
+	    !dev->privileged) {
+		if (!reset)
+			ret_code = irdma_vchnl_req_del_hmc_obj(dev,
+							      info->rsrc_type,
+							      info->start_idx,
+							      info->count);
+		if (info->rsrc_type != IRDMA_HMC_IW_PBLE)
+			return ret_code;
 	}
 
 	irdma_find_pd_index_limit(info->hmc_info, info->rsrc_type,
@@ -589,7 +682,15 @@ int irdma_add_pd_table_entry(struct irdma_sc_dev *dev,
 		pd_entry->sd_index = sd_idx;
 		pd_entry->valid = true;
 		pd_table->use_cnt++;
-		irdma_invalidate_pf_hmc_pd(dev, sd_idx, rel_pd_idx);
+		/* Invalidating hmc_pd is only relevant to IRDMA_GEN_1/2 */
+
+		if (hmc_info->hmc_fn_id < dev->hw_attrs.first_hw_vf_fpm_id &&
+		    dev->privileged)
+			irdma_invalidate_pf_hmc_pd(dev, sd_idx, rel_pd_idx);
+		else if (dev->hw->hmc.hmc_fn_id != hmc_info->hmc_fn_id &&
+			 dev->privileged)
+			irdma_invalidate_vf_hmc_pd(dev, sd_idx, rel_pd_idx,
+						   hmc_info->hmc_fn_id);
 	}
 	pd_entry->bp.use_cnt++;
 
@@ -640,7 +741,12 @@ int irdma_remove_pd_bp(struct irdma_sc_dev *dev,
 	pd_addr = pd_table->pd_page_addr.va;
 	pd_addr += rel_pd_idx;
 	memset(pd_addr, 0, sizeof(u64));
-	irdma_invalidate_pf_hmc_pd(dev, sd_idx, idx);
+	if (dev->privileged && dev->hmc_fn_id == hmc_info->hmc_fn_id)
+		irdma_invalidate_pf_hmc_pd(dev, sd_idx, idx);
+
+	if (dev->privileged && dev->hmc_fn_id != hmc_info->hmc_fn_id)
+		irdma_invalidate_vf_hmc_pd(dev, sd_idx, idx,
+					   hmc_info->hmc_fn_id);
 
 	if (!pd_entry->rsrc_pg) {
 		mem = &pd_entry->bp.addr;
@@ -694,4 +800,23 @@ int irdma_prep_remove_pd_page(struct irdma_hmc_info *hmc_info, u32 idx)
 	hmc_info->sd_table.use_cnt--;
 
 	return 0;
+}
+
+/**
+ * irdma_pf_init_vfhmc -
+ * @dev: pointer to irdma_dev struct
+ * @vf_hmc_fn_id: hmc function id for vf driver
+ *
+ * Called by pf driver to initialize hmc_info for vf driver instance.
+ */
+int irdma_pf_init_vfhmc(struct irdma_sc_dev *dev, u8 vf_hmc_fn_id)
+{
+	if (vf_hmc_fn_id < dev->hw_attrs.first_hw_vf_fpm_id ||
+	    (vf_hmc_fn_id >= dev->hw_attrs.first_hw_vf_fpm_id + dev->num_vfs)) {
+		ibdev_dbg(to_ibdev(dev), "HMC: invalid vf_hmc_fn_id  0x%x\n",
+			  vf_hmc_fn_id);
+		return -EINVAL;
+	}
+
+	return irdma_sc_init_iw_hmc(dev, vf_hmc_fn_id);
 }

@@ -1,27 +1,31 @@
-# SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
-# Copyright (c) 2019, Intel Corporation.
-
-#
-# Makefile for the Intel(R) Ethernet Connection RDMA Linux Driver
+# SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+# Copyright (c) 2015 - 2023 Intel Corporation
+# Makefile for the Intel(R) Ethernet Protocol Driver for RDMA
 #
 
-obj-$(CONFIG_INFINIBAND_IRDMA) += irdma.o
+ccflags-y := -Werror -Wall -Wno-cast-function-type
+obj-m += irdma.o
 
-irdma-objs := cm.o        \
-              ctrl.o      \
-              hmc.o       \
-              hw.o        \
-              i40iw_hw.o  \
-              i40iw_if.o  \
-              icrdma_hw.o \
-              main.o      \
-              pble.o      \
-              puda.o      \
-              trace.o     \
-              uda.o       \
-              uk.o        \
-              utils.o     \
-              verbs.o     \
-              ws.o        \
+irdma-objs := main.o      \
+	      hw.o        \
+	      cm.o        \
+	      ctrl.o      \
+	      hmc.o       \
+	      pble.o      \
+	      puda.o      \
+	      uk.o        \
+	      utils.o     \
+	      verbs.o     \
+	      uda.o       \
+	      ws.o        \
+	      trace.o     \
+	      i40iw_if.o  \
+	      i40iw_hw.o  \
+	      ig3rdma_hw.o \
+	      icrdma_hw.o \
+	      configfs.o  \
+	      virtchnl.o  \
+	      irdma_kcompat.o \
+	      debugfs.o
 
 CFLAGS_trace.o = -I$(src)

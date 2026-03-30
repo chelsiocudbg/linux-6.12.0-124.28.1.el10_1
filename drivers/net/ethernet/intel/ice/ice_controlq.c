@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2018, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice_common.h"
 
@@ -151,8 +151,8 @@ ice_alloc_rq_bufs(struct ice_hw *hw, struct ice_ctl_q_info *cq)
 	/* We'll be allocating the buffer info memory first, then we can
 	 * allocate the mapped buffers for the event processing
 	 */
-	cq->rq.dma_head = devm_kcalloc(ice_hw_to_dev(hw), cq->num_rq_entries,
-				       sizeof(cq->rq.desc_buf), GFP_KERNEL);
+	cq->rq.dma_head = kcalloc(cq->num_rq_entries,
+				     sizeof(cq->rq.desc_buf), GFP_KERNEL);
 	if (!cq->rq.dma_head)
 		return -ENOMEM;
 	cq->rq.r.rq_bi = (struct ice_dma_mem *)cq->rq.dma_head;
@@ -204,7 +204,7 @@ unwind_alloc_rq_bufs:
 		cq->rq.r.rq_bi[i].size = 0;
 	}
 	cq->rq.r.rq_bi = NULL;
-	devm_kfree(ice_hw_to_dev(hw), cq->rq.dma_head);
+	kfree(cq->rq.dma_head);
 	cq->rq.dma_head = NULL;
 
 	return -ENOMEM;
@@ -221,8 +221,8 @@ ice_alloc_sq_bufs(struct ice_hw *hw, struct ice_ctl_q_info *cq)
 	int i;
 
 	/* No mapped memory needed yet, just the buffer info structures */
-	cq->sq.dma_head = devm_kcalloc(ice_hw_to_dev(hw), cq->num_sq_entries,
-				       sizeof(cq->sq.desc_buf), GFP_KERNEL);
+	cq->sq.dma_head = kcalloc(cq->num_sq_entries,
+				     sizeof(cq->sq.desc_buf), GFP_KERNEL);
 	if (!cq->sq.dma_head)
 		return -ENOMEM;
 	cq->sq.r.sq_bi = (struct ice_dma_mem *)cq->sq.dma_head;
@@ -252,7 +252,7 @@ unwind_alloc_sq_bufs:
 		cq->sq.r.sq_bi[i].size = 0;
 	}
 	cq->sq.r.sq_bi = NULL;
-	devm_kfree(ice_hw_to_dev(hw), cq->sq.dma_head);
+	kfree(cq->sq.dma_head);
 	cq->sq.dma_head = NULL;
 
 	return -ENOMEM;
@@ -328,7 +328,7 @@ do {									\
 		}							\
 	}								\
 	/* free DMA head */						\
-	devm_kfree(ice_hw_to_dev(hw), (qi)->ring.dma_head);		\
+	kfree((qi)->ring.dma_head);					\
 } while (0)
 
 /**
@@ -457,34 +457,30 @@ init_ctrlq_exit:
  * @cq: pointer to the specific Control queue
  *
  * The main shutdown routine for the Control Transmit Queue
+ *
+ * Return:
+ * * %0      - success
+ * * %-EBUSY - no send queue descriptors
  */
 static int ice_shutdown_sq(struct ice_hw *hw, struct ice_ctl_q_info *cq)
 {
-	int ret_code = 0;
+	if (!cq->sq.count)
+		return -EBUSY;
 
-	mutex_lock(&cq->sq_lock);
-
-	if (!cq->sq.count) {
-		ret_code = -EBUSY;
-		goto shutdown_sq_out;
+	scoped_guard(ice_var_lock, &cq->sq_lock) {
+		/* Stop processing of the control queue */
+		wr32(hw, cq->sq.head, 0);
+		wr32(hw, cq->sq.tail, 0);
+		wr32(hw, cq->sq.len, 0);
+		wr32(hw, cq->sq.bal, 0);
+		wr32(hw, cq->sq.bah, 0);
+		cq->sq.count = 0;	/* to indicate uninitialized queue */
 	}
-
-	/* Stop processing of the control queue */
-	wr32(hw, cq->sq.head, 0);
-	wr32(hw, cq->sq.tail, 0);
-	wr32(hw, cq->sq.len, 0);
-	wr32(hw, cq->sq.bal, 0);
-	wr32(hw, cq->sq.bah, 0);
-
-	cq->sq.count = 0;	/* to indicate uninitialized queue */
-
 	/* free ring buffers and the ring itself */
 	ICE_FREE_CQ_BUFS(hw, cq, sq);
 	ice_free_cq_ring(hw, &cq->sq);
 
-shutdown_sq_out:
-	mutex_unlock(&cq->sq_lock);
-	return ret_code;
+	return 0;
 }
 
 /**
@@ -657,7 +653,7 @@ init_ctrlq_free_sq:
  * Returns true if the sideband control queue interface is
  * supported for the device, false otherwise
  */
-bool ice_is_sbq_supported(struct ice_hw *hw)
+static bool ice_is_sbq_supported(struct ice_hw *hw)
 {
 	/* The device sideband queue is only supported on devices with the
 	 * generic MAC type.
@@ -780,12 +776,14 @@ int ice_init_all_ctrlq(struct ice_hw *hw)
 /**
  * ice_init_ctrlq_locks - Initialize locks for a control queue
  * @cq: pointer to the control queue
+ * @q_type: specific Control queue type
  *
  * Initializes the send and receive queue locks for a given control queue.
  */
-static void ice_init_ctrlq_locks(struct ice_ctl_q_info *cq)
+static void ice_init_ctrlq_locks(struct ice_ctl_q_info *cq,
+				 enum ice_ctl_q q_type)
 {
-	mutex_init(&cq->sq_lock);
+	ice_vlock_init(&cq->sq_lock,  q_type != ICE_CTL_Q_SB);
 	mutex_init(&cq->rq_lock);
 }
 
@@ -807,10 +805,10 @@ static void ice_init_ctrlq_locks(struct ice_ctl_q_info *cq)
  */
 int ice_create_all_ctrlq(struct ice_hw *hw)
 {
-	ice_init_ctrlq_locks(&hw->adminq);
+	ice_init_ctrlq_locks(&hw->adminq, ICE_CTL_Q_ADMIN);
 	if (ice_is_sbq_supported(hw))
-		ice_init_ctrlq_locks(&hw->sbq);
-	ice_init_ctrlq_locks(&hw->mailboxq);
+		ice_init_ctrlq_locks(&hw->sbq, ICE_CTL_Q_SB);
+	ice_init_ctrlq_locks(&hw->mailboxq, ICE_CTL_Q_MAILBOX);
 
 	return ice_init_all_ctrlq(hw);
 }
@@ -823,7 +821,7 @@ int ice_create_all_ctrlq(struct ice_hw *hw)
  */
 static void ice_destroy_ctrlq_locks(struct ice_ctl_q_info *cq)
 {
-	mutex_destroy(&cq->sq_lock);
+	ice_vlock_destroy(&cq->sq_lock);
 	mutex_destroy(&cq->rq_lock);
 }
 
@@ -972,9 +970,11 @@ static bool ice_sq_done(struct ice_hw *hw, struct ice_ctl_q_info *cq)
 	 */
 	udelay(5);
 
-	return !rd32_poll_timeout(hw, cq->sq.head,
-				  head, head == cq->sq.next_to_use,
-				  20, ICE_CTL_Q_SQ_CMD_TIMEOUT);
+	return !vlock_rd32_poll_timeout(hw, cq->sq.head, head,
+					head == cq->sq.next_to_use, 20, 5,
+					ICE_CTL_Q_SQ_CMD_TIMEOUT,
+					ICE_CTL_Q_SQ_CMD_TIMEOUT_SPIN,
+					&cq->sq_lock);
 }
 
 /**
@@ -989,157 +989,147 @@ static bool ice_sq_done(struct ice_hw *hw, struct ice_ctl_q_info *cq)
  * Main command for the transmit side of a control queue. It puts the command
  * on the queue, bumps the tail, waits for processing of the command, captures
  * command status and results, etc.
+ *
+ * Return:
+ * * %0       - success
+ * * %-EIO    - incorrect control send queue state, timeout or FW error
+ * * %-EINVAL - incorrect arguments
+ * * %-ENOSPC - control send queue is full
  */
-int
-ice_sq_send_cmd(struct ice_hw *hw, struct ice_ctl_q_info *cq,
-		struct ice_aq_desc *desc, void *buf, u16 buf_size,
-		struct ice_sq_cd *cd)
+int ice_sq_send_cmd(struct ice_hw *hw, struct ice_ctl_q_info *cq,
+		    struct ice_aq_desc *desc, void *buf, u16 buf_size,
+		    struct ice_sq_cd *cd)
 {
-	struct ice_dma_mem *dma_buf = NULL;
 	struct ice_aq_desc *desc_on_ring;
-	bool cmd_completed = false;
-	int status = 0;
-	u16 retval = 0;
-	u32 val = 0;
+	struct ice_dma_mem *dma_buf;
+	u32 val;
 
-	/* if reset is in progress return a soft error */
+	/* If reset is in progress return a soft error. */
 	if (hw->reset_ongoing)
 		return -EBUSY;
-	mutex_lock(&cq->sq_lock);
 
-	cq->sq_last_status = ICE_AQ_RC_OK;
+	if (!buf && buf_size)
+		return -EINVAL;
 
-	if (!cq->sq.count) {
-		ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send queue not initialized.\n");
-		status = -EIO;
-		goto sq_send_command_error;
-	}
+	scoped_guard(ice_var_lock, &cq->sq_lock) {
+		cq->sq_last_status = ICE_AQ_RC_OK;
 
-	if ((buf && !buf_size) || (!buf && buf_size)) {
-		status = -EINVAL;
-		goto sq_send_command_error;
-	}
-
-	if (buf) {
-		if (buf_size > cq->sq_buf_size) {
-			ice_debug(hw, ICE_DBG_AQ_MSG, "Invalid buffer size for Control Send queue: %d.\n",
-				  buf_size);
-			status = -EINVAL;
-			goto sq_send_command_error;
+		if (!cq->sq.count) {
+			ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send queue not initialized.\n");
+			return -EIO;
 		}
 
-		desc->flags |= cpu_to_le16(ICE_AQ_FLAG_BUF);
-		if (buf_size > ICE_AQ_LG_BUF)
-			desc->flags |= cpu_to_le16(ICE_AQ_FLAG_LB);
-	}
-
-	val = rd32(hw, cq->sq.head);
-	if (val >= cq->num_sq_entries) {
-		ice_debug(hw, ICE_DBG_AQ_MSG, "head overrun at %d in the Control Send Queue ring\n",
-			  val);
-		status = -EIO;
-		goto sq_send_command_error;
-	}
-
-	/* Call clean and check queue available function to reclaim the
-	 * descriptors that were processed by FW/MBX; the function returns the
-	 * number of desc available. The clean function called here could be
-	 * called in a separate thread in case of asynchronous completions.
-	 */
-	if (ice_clean_sq(hw, cq) == 0) {
-		ice_debug(hw, ICE_DBG_AQ_MSG, "Error: Control Send Queue is full.\n");
-		status = -ENOSPC;
-		goto sq_send_command_error;
-	}
-
-	/* initialize the temp desc pointer with the right desc */
-	desc_on_ring = ICE_CTL_Q_DESC(cq->sq, cq->sq.next_to_use);
-
-	/* if the desc is available copy the temp desc to the right place */
-	memcpy(desc_on_ring, desc, sizeof(*desc_on_ring));
-
-	/* if buf is not NULL assume indirect command */
-	if (buf) {
-		dma_buf = &cq->sq.r.sq_bi[cq->sq.next_to_use];
-		/* copy the user buf into the respective DMA buf */
-		memcpy(dma_buf->va, buf, buf_size);
-		desc_on_ring->datalen = cpu_to_le16(buf_size);
-
-		/* Update the address values in the desc with the pa value
-		 * for respective buffer
-		 */
-		desc_on_ring->params.generic.addr_high =
-			cpu_to_le32(upper_32_bits(dma_buf->pa));
-		desc_on_ring->params.generic.addr_low =
-			cpu_to_le32(lower_32_bits(dma_buf->pa));
-	}
-
-	/* Debug desc and buffer */
-	ice_debug(hw, ICE_DBG_AQ_DESC, "ATQ: Control Send queue desc and buffer:\n");
-
-	ice_debug_cq(hw, cq, (void *)desc_on_ring, buf, buf_size, false);
-
-	(cq->sq.next_to_use)++;
-	if (cq->sq.next_to_use == cq->sq.count)
-		cq->sq.next_to_use = 0;
-	wr32(hw, cq->sq.tail, cq->sq.next_to_use);
-	ice_flush(hw);
-
-	/* Wait for the command to complete. If it finishes within the
-	 * timeout, copy the descriptor back to temp.
-	 */
-	if (ice_sq_done(hw, cq)) {
-		memcpy(desc, desc_on_ring, sizeof(*desc));
 		if (buf) {
-			/* get returned length to copy */
-			u16 copy_size = le16_to_cpu(desc->datalen);
-
-			if (copy_size > buf_size) {
-				ice_debug(hw, ICE_DBG_AQ_MSG, "Return len %d > than buf len %d\n",
-					  copy_size, buf_size);
-				status = -EIO;
-			} else {
-				memcpy(buf, dma_buf->va, copy_size);
+			if (!buf_size || buf_size > cq->sq_buf_size) {
+				ice_debug(hw, ICE_DBG_AQ_MSG, "Invalid buffer size for Control Send queue: %d.\n",
+					  buf_size);
+				return -EINVAL;
 			}
-		}
-		retval = le16_to_cpu(desc->retval);
-		if (retval) {
-			ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send Queue command 0x%04X completed with error 0x%X\n",
-				  le16_to_cpu(desc->opcode),
-				  retval);
 
-			/* strip off FW internal code */
-			retval &= 0xff;
+			desc->flags |= cpu_to_le16(ICE_AQ_FLAG_BUF);
+			if (buf_size > ICE_AQ_LG_BUF)
+				desc->flags |= cpu_to_le16(ICE_AQ_FLAG_LB);
 		}
-		cmd_completed = true;
-		if (!status && retval != ICE_AQ_RC_OK)
-			status = -EIO;
-		cq->sq_last_status = (enum ice_aq_err)retval;
+		val = rd32(hw, cq->sq.head);
+		if (val >= cq->num_sq_entries) {
+			ice_debug(hw, ICE_DBG_AQ_MSG, "head overrun at %d in the Control Send Queue ring\n",
+				  val);
+			return -EIO;
+		}
+
+		/* Call clean and check queue available function to reclaim the
+		 * descriptors that were processed by FW/MBX; the function
+		 * returns the number of desc available. The clean function
+		 * called here could be called in a separate thread in case of
+		 * asynchronous completions.
+		 */
+		if (ice_clean_sq(hw, cq) == 0) {
+			ice_debug(hw, ICE_DBG_AQ_MSG, "Error: Control Send Queue is full.\n");
+			return -ENOSPC;
+		}
+
+		/* Initialize the desc_on_ring with the right descriptor. */
+		desc_on_ring = ICE_CTL_Q_DESC(cq->sq, cq->sq.next_to_use);
+		memcpy(desc_on_ring, desc, sizeof(*desc_on_ring));
+
+		/* If buf is not NULL, assume indirect command. */
+		if (buf) {
+			dma_buf = &cq->sq.r.sq_bi[cq->sq.next_to_use];
+			/* Copy the user buf into the respective DMA buf. */
+			memcpy(dma_buf->va, buf, buf_size);
+			desc_on_ring->datalen = cpu_to_le16(buf_size);
+			/* Update the address values in the desc with the pa
+			 * value for respective buffer.
+			 */
+			desc_on_ring->params.generic.addr_high =
+				cpu_to_le32(upper_32_bits(dma_buf->pa));
+			desc_on_ring->params.generic.addr_low =
+				cpu_to_le32(lower_32_bits(dma_buf->pa));
+		}
+
+		ice_debug(hw, ICE_DBG_AQ_DESC, "ATQ: Control Send queue desc and buffer:\n");
+		ice_debug_cq(hw, cq, (void *)desc_on_ring, buf, buf_size,
+			     false);
+
+		(cq->sq.next_to_use)++;
+		if (cq->sq.next_to_use == cq->sq.count)
+			cq->sq.next_to_use = 0;
+		wr32(hw, cq->sq.tail, cq->sq.next_to_use);
+		ice_flush(hw);
+
+		/* If the message is posted, don't wait for completion. */
+		if (cd && cd->postpone)
+			return 0;
+
+		/* Wait for the command to complete. If it finishes within the
+		 * timeout, copy the descriptor back to temp.
+		 */
+		if (ice_sq_done(hw, cq)) {
+			u16 copy_size = 0;
+
+			memcpy(desc, desc_on_ring, sizeof(*desc));
+			if (buf) {
+				/* Get returned length to copy. */
+				copy_size = le16_to_cpu(desc->datalen);
+
+				if (copy_size > buf_size)
+					ice_debug(hw, ICE_DBG_AQ_MSG, "Return len %d > than buf len %d\n",
+						  copy_size, buf_size);
+				else
+					memcpy(buf, dma_buf->va, copy_size);
+			}
+
+			/* Strip off FW internal code. */
+			cq->sq_last_status = (enum ice_aq_err)
+				(le16_to_cpu(desc->retval) & 0xFF);
+			if (cq->sq_last_status)
+				ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send Queue command 0x%04X completed with error 0x%X\n",
+					  le16_to_cpu(desc->opcode),
+					  cq->sq_last_status);
+
+			if (copy_size > buf_size ||
+			    cq->sq_last_status != ICE_AQ_RC_OK)
+				return -EIO;
+		} else {
+			/* Update the error if timeout occurred. */
+			if (rd32(hw, cq->rq.len) & cq->rq.len_crit_mask ||
+			    rd32(hw, cq->sq.len) & cq->sq.len_crit_mask)
+				ice_debug(hw, ICE_DBG_AQ_MSG, "Critical FW error.\n");
+			else
+				ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send Queue Writeback timeout.\n");
+
+			return -EIO;
+		}
 	}
 
 	ice_debug(hw, ICE_DBG_AQ_MSG, "ATQ: desc and buffer writeback:\n");
-
 	ice_debug_cq(hw, cq, (void *)desc, buf, buf_size, true);
 
 	/* save writeback AQ if requested */
 	if (cd && cd->wb_desc)
 		memcpy(cd->wb_desc, desc_on_ring, sizeof(*cd->wb_desc));
 
-	/* update the error if time out occurred */
-	if (!cmd_completed) {
-		if (rd32(hw, cq->rq.len) & cq->rq.len_crit_mask ||
-		    rd32(hw, cq->sq.len) & cq->sq.len_crit_mask) {
-			ice_debug(hw, ICE_DBG_AQ_MSG, "Critical FW error.\n");
-			status = -EIO;
-		} else {
-			ice_debug(hw, ICE_DBG_AQ_MSG, "Control Send Queue Writeback timeout.\n");
-			status = -EIO;
-		}
-	}
-
-sq_send_command_error:
-	mutex_unlock(&cq->sq_lock);
-	return status;
+	return 0;
 }
 
 /**

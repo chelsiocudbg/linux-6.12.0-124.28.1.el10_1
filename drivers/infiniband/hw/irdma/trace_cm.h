@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2019 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2019 - 2022 Intel Corporation */
 #if !defined(__TRACE_CM_H) || defined(TRACE_HEADER_MULTI_READ)
 #define __TRACE_CM_H
 
@@ -144,7 +144,7 @@ DEFINE_EVENT(tos_template, irdma_dcb_tos,
 DECLARE_EVENT_CLASS(qhash_template,
 		    TP_PROTO(struct irdma_device *iwdev,
 			     struct irdma_cm_listener *listener,
-			     const char *dev_addr),
+			     const unsigned char *dev_addr),
 		    TP_ARGS(iwdev, listener, dev_addr),
 		    TP_STRUCT__entry(__field(struct irdma_device *, iwdev)
 				     __field(u16, lport)
@@ -174,13 +174,13 @@ DECLARE_EVENT_CLASS(qhash_template,
 DEFINE_EVENT(qhash_template, irdma_add_mqh_6,
 	     TP_PROTO(struct irdma_device *iwdev,
 		      struct irdma_cm_listener *listener,
-		      const char *dev_addr),
+		      const unsigned char *dev_addr),
 	     TP_ARGS(iwdev, listener, dev_addr));
 
 DEFINE_EVENT(qhash_template, irdma_add_mqh_4,
 	     TP_PROTO(struct irdma_device *iwdev,
 		      struct irdma_cm_listener *listener,
-		      const char *dev_addr),
+		      const unsigned char *dev_addr),
 	     TP_ARGS(iwdev, listener, dev_addr));
 
 TRACE_EVENT(irdma_addr_resolve,

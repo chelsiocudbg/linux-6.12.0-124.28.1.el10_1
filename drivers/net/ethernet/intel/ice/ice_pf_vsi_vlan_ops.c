@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2019-2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
+#include "ice.h"
 #include "ice_vsi_vlan_ops.h"
 #include "ice_vsi_vlan_lib.h"
 #include "ice_vlan_mode.h"
-#include "ice.h"
 #include "ice_pf_vsi_vlan_ops.h"
 
 void ice_pf_vsi_init_vlan_ops(struct ice_vsi *vsi)

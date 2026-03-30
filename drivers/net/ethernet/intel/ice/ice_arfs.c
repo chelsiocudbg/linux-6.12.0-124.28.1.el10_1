@@ -1,8 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2018-2020, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice.h"
+#ifdef HAVE_NET_RPS_H
 #include <net/rps.h>
+#endif /* HAVE_NET_RPS_H */
+#include "ice_irq.h"
 
 /**
  * ice_is_arfs_active - helper to check is aRFS is active
@@ -227,8 +230,9 @@ ice_arfs_update_flow_rules(struct ice_vsi *vsi, u16 idx,
 		/* check if filter needs to be added to HW */
 		if (e->fltr_state == ICE_ARFS_INACTIVE) {
 			enum ice_fltr_ptype flow_type = e->fltr_info.flow_type;
-			struct ice_arfs_entry_ptr *ep =
-				devm_kzalloc(dev, sizeof(*ep), GFP_ATOMIC);
+			struct ice_arfs_entry_ptr *ep = devm_kzalloc(dev,
+								     sizeof(*ep),
+								     GFP_ATOMIC);
 
 			if (!ep)
 				continue;
@@ -288,6 +292,68 @@ void ice_sync_arfs_fltrs(struct ice_pf *pf)
 	ice_arfs_add_flow_rules(pf_vsi, &tmp_add_list);
 }
 
+#ifdef ICE_ADD_PROBES
+static u16
+ice_arfs_get_cnt_index(struct ice_pf *pf, struct ice_arfs_entry *entry)
+{
+	struct ice_hw *hw = &pf->hw;
+
+	switch (entry->fltr_info.flow_type) {
+	case ICE_FLTR_PTYPE_NONF_IPV4_TCP:
+		return ICE_ARFS_STAT_TCPV4_IDX(hw->fd_ctr_base);
+	case ICE_FLTR_PTYPE_NONF_IPV6_TCP:
+		return ICE_ARFS_STAT_TCPV6_IDX(hw->fd_ctr_base);
+	case ICE_FLTR_PTYPE_NONF_IPV4_UDP:
+		return ICE_ARFS_STAT_UDPV4_IDX(hw->fd_ctr_base);
+	case ICE_FLTR_PTYPE_NONF_IPV6_UDP:
+		return ICE_ARFS_STAT_UDPV6_IDX(hw->fd_ctr_base);
+	default:
+		dev_err(ice_pf_to_dev(pf), "aRFS: Invalid flow type %d\n",
+			entry->fltr_info.flow_type);
+		return ICE_FD_SB_STAT_IDX(hw->fd_ctr_base);
+	}
+}
+#endif /* ICE_ADD_PROBES */
+
+/**
+ * ice_arfs_cmp - compare flow to a saved ARFS entry's filter info
+ * @fltr_info: filter info of the saved ARFS entry
+ * @fk: flow dissector keys
+ *
+ * Caller must hold all appropriate locks
+ */
+static bool
+ice_arfs_cmp(struct ice_fdir_fltr *fltr_info, const struct flow_keys *fk)
+{
+	bool is_v4;
+
+	if (!fltr_info || !fk)
+		return false;
+
+	is_v4 = (fltr_info->flow_type == ICE_FLTR_PTYPE_NONF_IPV4_UDP ||
+		fltr_info->flow_type == ICE_FLTR_PTYPE_NONF_IPV4_TCP);
+
+	if (fk->basic.n_proto == htons(ETH_P_IP) && is_v4)
+		return (fltr_info->ip.v4.proto == fk->basic.ip_proto &&
+			fltr_info->ip.v4.src_port == fk->ports.src &&
+			fltr_info->ip.v4.dst_port == fk->ports.dst &&
+			fltr_info->ip.v4.src_ip == fk->addrs.v4addrs.src &&
+			fltr_info->ip.v4.dst_ip == fk->addrs.v4addrs.dst);
+
+	else if (fk->basic.n_proto == htons(ETH_P_IPV6) && !is_v4)
+		return (fltr_info->ip.v6.proto == fk->basic.ip_proto &&
+			fltr_info->ip.v6.src_port == fk->ports.src &&
+			fltr_info->ip.v6.dst_port == fk->ports.dst &&
+			!memcmp(&fltr_info->ip.v6.src_ip,
+				&fk->addrs.v6addrs.src,
+				sizeof(struct in6_addr)) &&
+			!memcmp(&fltr_info->ip.v6.dst_ip,
+				&fk->addrs.v6addrs.dst,
+				sizeof(struct in6_addr)));
+
+	return false;
+}
+
 /**
  * ice_arfs_build_entry - builds an aRFS entry based on input
  * @vsi: destination VSI for this flow
@@ -315,6 +381,8 @@ ice_arfs_build_entry(struct ice_vsi *vsi, const struct flow_keys *fk,
 	fltr_info->q_index = rxq_idx;
 	fltr_info->dest_ctl = ICE_FLTR_PRGM_DESC_DEST_DIRECT_PKT_QINDEX;
 	fltr_info->dest_vsi = vsi->idx;
+	fltr_info->fdid_prio = ICE_FXD_FLTR_QW1_FDID_PRI_THREE;
+	fltr_info->comp_report = ICE_FXD_FLTR_QW0_COMP_REPORT_SW_FAIL;
 	ip_proto = fk->basic.ip_proto;
 
 	if (fk->basic.n_proto == htons(ETH_P_IP)) {
@@ -338,6 +406,12 @@ ice_arfs_build_entry(struct ice_vsi *vsi, const struct flow_keys *fk,
 		fltr_info->ip.v6.src_port = fk->ports.src;
 		fltr_info->ip.v6.dst_port = fk->ports.dst;
 	}
+
+#ifdef ICE_ADD_PROBES
+	fltr_info->cnt_index =
+		ice_arfs_get_cnt_index(vsi->back, arfs_entry);
+	fltr_info->cnt_ena = ICE_FXD_FLTR_QW0_STAT_ENA_PKTS;
+#endif /* ICE_ADD_PROBES */
 
 	arfs_entry->flow_id = flow_id;
 	fltr_info->fltr_id =
@@ -413,6 +487,15 @@ ice_rx_flow_steer(struct net_device *netdev, const struct sk_buff *skb,
 
 	pf = vsi->back;
 
+#ifdef NETIF_F_HW_TC
+#ifdef HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO
+	/* aRFS only supported on Rx queues belonging to PF VSI */
+	if (vsi->type == ICE_VSI_PF && ice_is_adq_active(pf) &&
+	    rxq_idx >= vsi->mqprio_qopt.qopt.count[0])
+		return -EOPNOTSUPP;
+#endif /* HAVE_TC_CB_AND_SETUP_QDISC_MQPRIO */
+#endif /* NETIF_F_HW_TC */
+
 	if (skb->encapsulation)
 		return -EPROTONOSUPPORT;
 
@@ -437,17 +520,17 @@ ice_rx_flow_steer(struct net_device *netdev, const struct sk_buff *skb,
 
 	/* choose the aRFS list bucket based on skb hash */
 	idx = skb_get_hash_raw(skb) & ICE_ARFS_LST_MASK;
+
 	/* search for entry in the bucket */
 	spin_lock_bh(&vsi->arfs_lock);
 	hlist_for_each_entry(arfs_entry, &vsi->arfs_fltr_list[idx],
 			     list_entry) {
-		struct ice_fdir_fltr *fltr_info;
+		struct ice_fdir_fltr *fltr_info = &arfs_entry->fltr_info;
 
 		/* keep searching for the already existing arfs_entry flow */
-		if (arfs_entry->flow_id != flow_id)
+		if (!ice_arfs_cmp(fltr_info, &fk))
 			continue;
 
-		fltr_info = &arfs_entry->fltr_info;
 		ret = fltr_info->fltr_id;
 
 		if (fltr_info->q_index == rxq_idx ||
@@ -511,7 +594,7 @@ void ice_init_arfs(struct ice_vsi *vsi)
 	struct hlist_head *arfs_fltr_list;
 	unsigned int i;
 
-	if (!vsi || vsi->type != ICE_VSI_PF || ice_is_arfs_active(vsi))
+	if (!vsi || vsi->type != ICE_VSI_PF || vsi->arfs_fltr_list)
 		return;
 
 	arfs_fltr_list = kcalloc(ICE_MAX_ARFS_LIST, sizeof(*arfs_fltr_list),
@@ -596,15 +679,13 @@ void ice_free_cpu_rx_rmap(struct ice_vsi *vsi)
 int ice_set_cpu_rx_rmap(struct ice_vsi *vsi)
 {
 	struct net_device *netdev;
-	struct ice_pf *pf;
 	int i;
 
 	if (!vsi || vsi->type != ICE_VSI_PF)
 		return 0;
 
-	pf = vsi->back;
 	netdev = vsi->netdev;
-	if (!pf || !netdev || !vsi->num_q_vectors)
+	if (!vsi->back || !netdev || !vsi->num_q_vectors)
 		return -EINVAL;
 
 	netdev_dbg(netdev, "Setup CPU RMAP: vsi type 0x%x, ifname %s, q_vectors %d\n",
@@ -632,6 +713,9 @@ void ice_remove_arfs(struct ice_pf *pf)
 {
 	struct ice_vsi *pf_vsi;
 
+	if(!pf || !pf->vsi)
+		return;
+
 	pf_vsi = ice_get_main_vsi(pf);
 	if (!pf_vsi)
 		return;
@@ -646,6 +730,9 @@ void ice_remove_arfs(struct ice_pf *pf)
 void ice_rebuild_arfs(struct ice_pf *pf)
 {
 	struct ice_vsi *pf_vsi;
+
+	if(!pf || !pf->vsi)
+		return;
 
 	pf_vsi = ice_get_main_vsi(pf);
 	if (!pf_vsi)

@@ -676,4 +676,5 @@ static inline bool is_bad_pmem(struct badblocks *bb, sector_t sector,
 }
 const uuid_t *nd_dev_to_uuid(struct device *dev);
 bool pmem_should_map_pages(struct device *dev);
+int setup_pgmap_resource(struct nd_namespace_io *nsio, u32 start_pad, u32 end_trunc, struct dev_pagemap *pgmap);
 #endif /* __ND_H__ */

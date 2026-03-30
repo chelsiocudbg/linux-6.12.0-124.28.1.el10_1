@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2019-2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice_common.h"
 
+#include "ice_ddp.h"
 /**
- * ice_pkg_get_supported_vlan_mode - determine if DDP supports Double VLAN mode
+ * ice_pkg_get_supported_vlan_mode - chk if DDP supports Double VLAN mode (DVM)
  * @hw: pointer to the HW struct
  * @dvm: output variable to determine if DDP supports DVM(true) or SVM(false)
  */
@@ -39,7 +40,7 @@ ice_pkg_get_supported_vlan_mode(struct ice_hw *hw, bool *dvm)
 
 		/* convert to host bitmap format */
 		for (i = 0; i < ICE_META_INIT_DW_CNT; i++)
-			arr[i] = le32_to_cpu(sect->entry.bm[i]);
+			arr[i] = le32_to_cpu(sect->entry[0].bm[i]);
 
 		bitmap_from_arr32(entry, arr, (u16)ICE_META_INIT_BITS);
 
@@ -134,8 +135,8 @@ static void ice_cache_vlan_mode(struct ice_hw *hw)
  */
 static bool ice_pkg_supports_dvm(struct ice_hw *hw)
 {
-	bool pkg_supports_dvm;
 	int status;
+	bool pkg_supports_dvm;
 
 	status = ice_pkg_get_supported_vlan_mode(hw, &pkg_supports_dvm);
 	if (status) {
@@ -328,7 +329,8 @@ static int ice_set_dvm(struct ice_hw *hw)
 		return status;
 	}
 
-	status = ice_aq_set_port_params(hw->port_info, true, NULL);
+	status = ice_aq_set_port_params(hw->port_info, 0, false, false, true,
+					NULL);
 	if (status) {
 		ice_debug(hw, ICE_DBG_INIT, "Failed to set port in double VLAN mode, status %d\n",
 			  status);
@@ -354,14 +356,13 @@ static int ice_set_svm(struct ice_hw *hw)
 	struct ice_aqc_set_vlan_mode *set_params;
 	int status;
 
-	status = ice_aq_set_port_params(hw->port_info, false, NULL);
+	status = ice_aq_set_port_params(hw->port_info, 0, false, false, false, NULL);
 	if (status) {
 		ice_debug(hw, ICE_DBG_INIT, "Failed to set port parameters for single VLAN mode\n");
 		return status;
 	}
 
-	set_params = devm_kzalloc(ice_hw_to_dev(hw), sizeof(*set_params),
-				  GFP_KERNEL);
+	set_params = kzalloc(sizeof(*set_params), GFP_KERNEL);
 	if (!set_params)
 		return -ENOMEM;
 
@@ -374,7 +375,7 @@ static int ice_set_svm(struct ice_hw *hw)
 	if (status)
 		ice_debug(hw, ICE_DBG_INIT, "Failed to configure port in single VLAN mode\n");
 
-	devm_kfree(ice_hw_to_dev(hw), set_params);
+	kfree(set_params);
 	return status;
 }
 
@@ -407,11 +408,14 @@ static void ice_print_dvm_not_supported(struct ice_hw *hw)
 	bool fw_supports_dvm = ice_fw_supports_dvm(hw);
 
 	if (!fw_supports_dvm && !pkg_supports_dvm)
-		dev_info(ice_hw_to_dev(hw), "QinQ functionality cannot be enabled on this device. Update your DDP package and NVM to versions that support QinQ.\n");
+		dev_info(ice_hw_to_dev(hw),
+		         "QinQ functionality cannot be enabled on this device. Update your DDP package and NVM to versions that support QinQ.\n");
 	else if (!pkg_supports_dvm)
-		dev_info(ice_hw_to_dev(hw), "QinQ functionality cannot be enabled on this device. Update your DDP package to a version that supports QinQ.\n");
+		dev_info(ice_hw_to_dev(hw),
+		         "QinQ functionality cannot be enabled on this device. Update your DDP package to a version that supports QinQ.\n");
 	else if (!fw_supports_dvm)
-		dev_info(ice_hw_to_dev(hw), "QinQ functionality cannot be enabled on this device. Update your NVM to a version that supports QinQ.\n");
+		dev_info(ice_hw_to_dev(hw),
+		         "QinQ functionality cannot be enabled on this device. Update your NVM to a version that supports QinQ.\n");
 }
 
 /**

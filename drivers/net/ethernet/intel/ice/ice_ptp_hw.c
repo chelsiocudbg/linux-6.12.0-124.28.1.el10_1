@@ -1,23 +1,33 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
-#include <linux/delay.h>
-#include <linux/iopoll.h>
+#include "ice_type.h"
 #include "ice_common.h"
 #include "ice_ptp_hw.h"
 #include "ice_ptp_consts.h"
+#include "ice_phy_regs.h"
+#include "ice_cpi.h"
 
+#include "kcompat.h"
+#ifndef NEED_READ_POLL_TIMEOUT
+#include <linux/iopoll.h>
+#endif
+
+#if defined(CONFIG_DPLL)
 static struct dpll_pin_frequency ice_cgu_pin_freq_common[] = {
+	DPLL_PIN_FREQUENCY_RANGE(1, 25000000),
+};
+
+static struct dpll_pin_frequency ice_cgu_pin_freq_1hz[] = {
 	DPLL_PIN_FREQUENCY_1PPS,
+};
+
+static struct dpll_pin_frequency ice_cgu_pin_freq_10mhz[] = {
 	DPLL_PIN_FREQUENCY_10MHZ,
 };
 
-static struct dpll_pin_frequency ice_cgu_pin_freq_1_hz[] = {
-	DPLL_PIN_FREQUENCY_1PPS,
-};
-
-static struct dpll_pin_frequency ice_cgu_pin_freq_10_mhz[] = {
-	DPLL_PIN_FREQUENCY_10MHZ,
+static struct dpll_pin_frequency ice_cgu_pin_freq_156_25mhz[] = {
+	DPLL_PIN_FREQUENCY_RANGE(156250000, 156250000),
 };
 
 static const struct ice_cgu_pin_desc ice_e810t_sfp_cgu_inputs[] = {
@@ -25,14 +35,16 @@ static const struct ice_cgu_pin_desc ice_e810t_sfp_cgu_inputs[] = {
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP20",	  ZL_REF0N, DPLL_PIN_TYPE_INT_OSCILLATOR,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
-	{ "C827_0-RCLKA", ZL_REF1P, DPLL_PIN_TYPE_MUX, 0, },
-	{ "C827_0-RCLKB", ZL_REF1N, DPLL_PIN_TYPE_MUX, 0, },
+	{ "C827_0-RCLKA", ZL_REF1P, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "C827_0-RCLKB", ZL_REF1N, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "SMA1",	  ZL_REF3P, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "SMA2/U.FL2",	  ZL_REF3N, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "GNSS-1PPS",	  ZL_REF4P, DPLL_PIN_TYPE_GNSS,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 };
 
 static const struct ice_cgu_pin_desc ice_e810t_qsfp_cgu_inputs[] = {
@@ -40,16 +52,20 @@ static const struct ice_cgu_pin_desc ice_e810t_qsfp_cgu_inputs[] = {
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP20",	  ZL_REF0N, DPLL_PIN_TYPE_INT_OSCILLATOR,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
-	{ "C827_0-RCLKA", ZL_REF1P, DPLL_PIN_TYPE_MUX, },
-	{ "C827_0-RCLKB", ZL_REF1N, DPLL_PIN_TYPE_MUX, },
-	{ "C827_1-RCLKA", ZL_REF2P, DPLL_PIN_TYPE_MUX, },
-	{ "C827_1-RCLKB", ZL_REF2N, DPLL_PIN_TYPE_MUX, },
+	{ "C827_0-RCLKA", ZL_REF1P, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "C827_0-RCLKB", ZL_REF1N, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common},
+	{ "C827_1-RCLKA", ZL_REF2P, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "C827_1-RCLKB", ZL_REF2N, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "SMA1",	  ZL_REF3P, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "SMA2/U.FL2",	  ZL_REF3N, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "GNSS-1PPS",	  ZL_REF4P, DPLL_PIN_TYPE_GNSS,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 };
 
 static const struct ice_cgu_pin_desc ice_e810t_sfp_cgu_outputs[] = {
@@ -57,12 +73,14 @@ static const struct ice_cgu_pin_desc ice_e810t_sfp_cgu_outputs[] = {
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "REF-SMA2/U.FL2", ZL_OUT1, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
-	{ "PHY-CLK",	    ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT, },
-	{ "MAC-CLK",	    ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT, },
+	{ "PHY-CLK",	    ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "MAC-CLK",	    ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP21",	    ZL_OUT4, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP23",	    ZL_OUT5, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 };
 
 static const struct ice_cgu_pin_desc ice_e810t_qsfp_cgu_outputs[] = {
@@ -70,20 +88,25 @@ static const struct ice_cgu_pin_desc ice_e810t_qsfp_cgu_outputs[] = {
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "REF-SMA2/U.FL2", ZL_OUT1, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
-	{ "PHY-CLK",	    ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
-	{ "PHY2-CLK",	    ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
-	{ "MAC-CLK",	    ZL_OUT4, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
+	{ "PHY-CLK",	    ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "PHY2-CLK",	    ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "MAC-CLK",	    ZL_OUT4, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP21",	    ZL_OUT5, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CVL-SDP23",	    ZL_OUT6, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 };
 
 static const struct ice_cgu_pin_desc ice_e823_si_cgu_inputs[] = {
 	{ "NONE",	  SI_REF0P, 0, 0 },
 	{ "NONE",	  SI_REF0N, 0, 0 },
-	{ "SYNCE0_DP",	  SI_REF1P, DPLL_PIN_TYPE_MUX, 0 },
-	{ "SYNCE0_DN",	  SI_REF1N, DPLL_PIN_TYPE_MUX, 0 },
+	{ "SYNCE0_DP",	  SI_REF1P, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "SYNCE0_DN",	  SI_REF1N, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "EXT_CLK_SYNC", SI_REF2P, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "NONE",	  SI_REF2N, 0, 0 },
@@ -96,9 +119,10 @@ static const struct ice_cgu_pin_desc ice_e823_si_cgu_inputs[] = {
 static const struct ice_cgu_pin_desc ice_e823_si_cgu_outputs[] = {
 	{ "1588-TIME_SYNC", SI_OUT0, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
-	{ "PHY-CLK",	    SI_OUT1, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
+	{ "PHY-CLK",	    SI_OUT1, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "10MHZ-SMA2",	    SI_OUT2, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_10_mhz), ice_cgu_pin_freq_10_mhz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "PPS-SMA1",	    SI_OUT3, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 };
@@ -106,31 +130,88 @@ static const struct ice_cgu_pin_desc ice_e823_si_cgu_outputs[] = {
 static const struct ice_cgu_pin_desc ice_e823_zl_cgu_inputs[] = {
 	{ "NONE",	  ZL_REF0P, 0, 0 },
 	{ "INT_PPS_OUT",  ZL_REF0N, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
-	{ "SYNCE0_DP",	  ZL_REF1P, DPLL_PIN_TYPE_MUX, 0 },
-	{ "SYNCE0_DN",	  ZL_REF1N, DPLL_PIN_TYPE_MUX, 0 },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "SYNCE0_DP",	  ZL_REF1P, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "SYNCE0_DN",	  ZL_REF1N, DPLL_PIN_TYPE_MUX,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "NONE",	  ZL_REF2P, 0, 0 },
 	{ "NONE",	  ZL_REF2N, 0, 0 },
 	{ "EXT_CLK_SYNC", ZL_REF3P, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "NONE",	  ZL_REF3N, 0, 0 },
 	{ "EXT_PPS_OUT",  ZL_REF4P, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "OCXO",	  ZL_REF4N, DPLL_PIN_TYPE_INT_OSCILLATOR, 0 },
 };
 
 static const struct ice_cgu_pin_desc ice_e823_zl_cgu_outputs[] = {
 	{ "PPS-SMA1",	   ZL_OUT0, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_1_hz), ice_cgu_pin_freq_1_hz },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "10MHZ-SMA2",	   ZL_OUT1, DPLL_PIN_TYPE_EXT,
-		ARRAY_SIZE(ice_cgu_pin_freq_10_mhz), ice_cgu_pin_freq_10_mhz },
-	{ "PHY-CLK",	   ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
-	{ "1588-TIME_REF", ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT, 0 },
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "PHY-CLK",	   ZL_OUT2, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
+	{ "1588-TIME_REF", ZL_OUT3, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "CPK-TIME_SYNC", ZL_OUT4, DPLL_PIN_TYPE_EXT,
 		ARRAY_SIZE(ice_cgu_pin_freq_common), ice_cgu_pin_freq_common },
 	{ "NONE",	   ZL_OUT5, 0, 0 },
 };
 
+static const struct ice_cgu_pin_desc ice_e830_unmanaged_inputs[] = {
+	{ "1588-TIME_SYNC", 0, DPLL_PIN_TYPE_EXT,
+	  ARRAY_SIZE(ice_cgu_pin_freq_10mhz), ice_cgu_pin_freq_10mhz },
+};
+
+static const struct ice_cgu_pin_desc ice_e830_unmanaged_outputs[] = {
+	{ "MAC-PHY-CLK", 0, DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+	  ARRAY_SIZE(ice_cgu_pin_freq_156_25mhz), ice_cgu_pin_freq_156_25mhz },
+	{ "1588-TIME_REF", 1, DPLL_PIN_TYPE_INT_OSCILLATOR,
+	  ARRAY_SIZE(ice_cgu_pin_freq_1hz), ice_cgu_pin_freq_1hz},
+};
+#else /* defined(CONFIG_DPLL) */
+static const struct ice_cgu_pin_desc ice_e810t_cgu_inputs[] = {
+	/* name		  idx */
+	{ "CVL-SDP22",    ZL_REF0P },
+	{ "CVL-SDP20",    ZL_REF0N },
+	{ "C827_0-RCLKA", ZL_REF1P },
+	{ "C827_0-RCLKB", ZL_REF1N },
+	{ "C827_1-RCLKA", ZL_REF2P },
+	{ "C827_1-RCLKB", ZL_REF2N },
+	{ "SMA1",         ZL_REF3P },
+	{ "SMA2/U.FL2",   ZL_REF3N },
+	{ "GNSS-1PPS",    ZL_REF4P },
+	{ "OCXO",         ZL_REF4N },
+};
+
+static const struct ice_cgu_pin_desc ice_e823_si_cgu_inputs[] = {
+	/* name		  idx */
+	{ "NONE",         SI_REF0P },
+	{ "NONE",         SI_REF0N },
+	{ "SYNCE0_DP",    SI_REF1P },
+	{ "SYNCE0_DN",    SI_REF1N },
+	{ "EXT_CLK_SYNC", SI_REF2P },
+	{ "NONE",         SI_REF2N },
+	{ "EXT_PPS_OUT",  SI_REF3  },
+	{ "INT_PPS_OUT",  SI_REF4  },
+};
+
+static const struct ice_cgu_pin_desc ice_e823_zl_cgu_inputs[] = {
+	/* name		  idx */
+	{ "NONE",         ZL_REF0P },
+	{ "INT_PPS_OUT",  ZL_REF0N },
+	{ "SYNCE0_DP",    ZL_REF1P },
+	{ "SYNCE0_DN",    ZL_REF1N },
+	{ "NONE",         ZL_REF2P },
+	{ "NONE",         ZL_REF2N },
+	{ "EXT_CLK_SYNC", ZL_REF3P },
+	{ "NONE",         ZL_REF3N },
+	{ "EXT_PPS_OUT",  ZL_REF4P },
+	{ "OCXO",         ZL_REF4N },
+};
+
+#endif /* DPLL_SUPPORT */
 /* Low level functions for interacting with and managing the device clock used
  * for the Precision Time Protocol.
  *
@@ -156,7 +237,7 @@ static const struct ice_cgu_pin_desc ice_e823_zl_cgu_outputs[] = {
  *
  * For E810 devices, the increment frequency is 812.5 MHz
  *
- * For E822 devices the clock can be derived from different sources, and the
+ * For E82X devices the clock can be derived from different sources, and the
  * increment has an effective frequency of one of the following:
  * - 823.4375 MHz
  * - 783.36 MHz
@@ -177,9 +258,9 @@ static const struct ice_cgu_pin_desc ice_e823_zl_cgu_outputs[] = {
  * The driver supports devices which have different PHYs with subtly different
  * mechanisms to program and control the timers. We divide the devices into
  * families named after the first major device, E810 and similar devices, and
- * E822 and similar devices.
+ * E82X and similar devices.
  *
- * - E822 based devices have additional support for fine grained Vernier
+ * - E82X based devices have additional support for fine grained Vernier
  *   calibration which requires significant setup
  * - The layout of timestamp data in the PHY register blocks is different
  * - The way timer synchronization commands are issued is different.
@@ -229,7 +310,7 @@ static u64 ice_ptp_read_src_incval(struct ice_hw *hw)
  * @hw: pointer to HW struct
  * @cmd: Timer command
  *
- * Return: the source timer command register value for the given PTP timer
+ * Returns: the source timer command register value for the given PTP timer
  * command.
  */
 static u32 ice_ptp_tmr_cmd_to_src_reg(struct ice_hw *hw,
@@ -260,9 +341,9 @@ static u32 ice_ptp_tmr_cmd_to_src_reg(struct ice_hw *hw,
 		cmd_val = 0;
 	}
 
-	tmr_idx = ice_get_ptp_src_clock_index(hw);
+	tmr_idx = ice_get_ptp_src_clock_index(hw) << SEL_CPK_SRC;
 
-	return tmr_idx << SEL_CPK_SRC | cmd_val;
+	return tmr_idx | cmd_val;
 }
 
 /**
@@ -274,7 +355,7 @@ static u32 ice_ptp_tmr_cmd_to_src_reg(struct ice_hw *hw,
  * the PHY ports, while other hardware families use the same register values
  * as the source timer.
  *
- * Return: the PHY port timer command register value for the given PTP timer
+ * Returns: the PHY port timer command register value for the given PTP timer
  * command.
  */
 static u32 ice_ptp_tmr_cmd_to_port_reg(struct ice_hw *hw,
@@ -318,9 +399,9 @@ static u32 ice_ptp_tmr_cmd_to_port_reg(struct ice_hw *hw,
 		cmd_val = 0;
 	}
 
-	tmr_idx = ice_get_ptp_src_clock_index(hw);
+	tmr_idx = ice_get_ptp_src_clock_index(hw) << SEL_PHY_SRC;
 
-	return tmr_idx << SEL_PHY_SRC | cmd_val;
+	return tmr_idx | cmd_val;
 }
 
 /**
@@ -352,12 +433,26 @@ void ice_ptp_src_cmd(struct ice_hw *hw, enum ice_ptp_tmr_cmd cmd)
 static void ice_ptp_exec_tmr_cmd(struct ice_hw *hw)
 {
 	struct ice_pf *pf = container_of(hw, struct ice_pf, hw);
+	struct ice_sbq_msg_input msg = {
+		.dest_dev = phy_0,
+		.opcode = ice_sbq_msg_rd
+	};
+
+	/* Flush SBQ by reading address 0 on PHY 0 */
+	ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
+
+	if (hw->mac_type == ICE_MAC_GENERIC_3K_E825 && ice_is_dual(hw)) {
+		/* Flush also the peer SBQ */
+		msg.dest_dev = phy_0_peer;
+		ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
+	}
 
 	if (!ice_is_primary(hw))
 		hw = ice_get_primary_hw(pf);
 
-	guard(spinlock)(&pf->adapter->ptp_gltsyn_time_lock);
+	spin_lock(&pf->adapter->ptp_gltsyn_time_lock);
 	wr32(hw, GLTSYN_CMD_SYNC, SYNC_EXEC_CMD);
+	spin_unlock(&pf->adapter->ptp_gltsyn_time_lock);
 	ice_flush(hw);
 }
 
@@ -366,7 +461,7 @@ static void ice_ptp_exec_tmr_cmd(struct ice_hw *hw)
  * @hw: pointer to HW struct
  * @delay: delay between PHC and PHY SYNC command execution in nanoseconds
  */
-static void ice_ptp_cfg_sync_delay(const struct ice_hw *hw, u32 delay)
+static void ice_ptp_cfg_sync_delay(struct ice_hw *hw, u32 delay)
 {
 	wr32(hw, GLTSYN_SYNC_DLAY, delay);
 	ice_flush(hw);
@@ -378,19 +473,28 @@ static void ice_ptp_cfg_sync_delay(const struct ice_hw *hw, u32 delay)
  */
 
 /**
- * ice_ptp_get_dest_dev_e825 - get destination PHY for given port number
+ * ice_ptp_init_phc_e825c - Perform E825C specific PHC initialization
+ * @hw: pointer to HW struct
+ *
+ * Perform E825C-specific PTP hardware clock initialization steps.
+ */
+static void ice_ptp_init_phc_e825c(struct ice_hw *hw)
+{
+	ice_ptp_cfg_sync_delay(hw, ICE_E825C_SYNC_DELAY);
+}
+
+/**
+ * ice_ptp_get_dest_dev_e825c - get destination PHY for given port number
  * @hw: pointer to the HW struct
  * @port: destination port
- *
- * Return: destination sideband queue PHY device.
  */
-static enum ice_sbq_dev_id ice_ptp_get_dest_dev_e825(struct ice_hw *hw,
-						     u8 port)
+static enum ice_sbq_msg_dev ice_ptp_get_dest_dev_e825c(struct ice_hw *hw,
+						       u8 port)
 {
 	u8 curr_phy, tgt_phy;
 
-	tgt_phy = port >= hw->ptp.ports_per_phy;
-	curr_phy = hw->lane_num >= hw->ptp.ports_per_phy;
+	tgt_phy = port / hw->ptp.ports_per_phy;
+	curr_phy = hw->lane_num / hw->ptp.ports_per_phy;
 	/* In the driver, lanes 4..7 are in fact 0..3 on a second PHY.
 	 * On a single complex E825C, PHY 0 is always destination device phy_0
 	 * and PHY 1 is phy_0_peer.
@@ -399,9 +503,9 @@ static enum ice_sbq_dev_id ice_ptp_get_dest_dev_e825(struct ice_hw *hw,
 	 */
 	if ((!ice_is_dual(hw) && tgt_phy == 1) ||
 	    (ice_is_dual(hw) && tgt_phy != curr_phy))
-		return ice_sbq_dev_phy_0_peer;
+		return phy_0_peer;
 	else
-		return ice_sbq_dev_phy_0;
+		return phy_0;
 }
 
 /**
@@ -410,19 +514,18 @@ static enum ice_sbq_dev_id ice_ptp_get_dest_dev_e825(struct ice_hw *hw,
  * @port: destination port
  * @addr: PHY register address
  * @val: Value to write
- *
- * Return: 0 on success, other error codes when failed to write to PHY
  */
-static int ice_write_phy_eth56g(struct ice_hw *hw, u8 port, u32 addr, u32 val)
+int ice_write_phy_eth56g(struct ice_hw *hw, u8 port, u32 addr, u32 val)
 {
 	struct ice_sbq_msg_input msg = {
-		.dest_dev = ice_ptp_get_dest_dev_e825(hw, port),
-		.opcode = ice_sbq_msg_wr,
+		.opcode = ice_sbq_msg_wr_p,
 		.msg_addr_low = lower_16_bits(addr),
 		.msg_addr_high = upper_16_bits(addr),
 		.data = val
 	};
 	int err;
+
+	msg.dest_dev = ice_ptp_get_dest_dev_e825c(hw, port);
 
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
 	if (err)
@@ -438,52 +541,48 @@ static int ice_write_phy_eth56g(struct ice_hw *hw, u8 port, u32 addr, u32 val)
  * @port: destination port
  * @addr: PHY register address
  * @val: Value to write
- *
- * Return: 0 on success, other error codes when failed to read from PHY
  */
-static int ice_read_phy_eth56g(struct ice_hw *hw, u8 port, u32 addr, u32 *val)
+int ice_read_phy_eth56g(struct ice_hw *hw, u8 port, u32 addr, u32 *val)
 {
 	struct ice_sbq_msg_input msg = {
-		.dest_dev = ice_ptp_get_dest_dev_e825(hw, port),
 		.opcode = ice_sbq_msg_rd,
 		.msg_addr_low = lower_16_bits(addr),
 		.msg_addr_high = upper_16_bits(addr)
 	};
 	int err;
 
+	msg.dest_dev = ice_ptp_get_dest_dev_e825c(hw, port);
+
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
-	if (err)
+	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "PTP failed to send msg to phy %d\n",
 			  err);
-	else
-		*val = msg.data;
+		return err;
+	}
 
-	return err;
+	*val = msg.data;
+
+	return 0;
 }
 
 /**
- * ice_phy_res_address_eth56g - Calculate a PHY port register address
+ * ice_phy_res_addr_eth56g - Calculate a PHY port register address
  * @hw: pointer to the HW struct
  * @lane: Lane number to be written
  * @res_type: resource type (register/memory)
  * @offset: Offset from PHY port register base
  * @addr: The result address
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
  */
-static int ice_phy_res_address_eth56g(struct ice_hw *hw, u8 lane,
-				      enum eth56g_res_type res_type,
-				      u32 offset,
-				      u32 *addr)
+static int ice_phy_res_addr_eth56g(struct ice_hw *hw, u8 lane,
+				   enum eth56g_res_type res_type, u32 offset,
+				   u32 *addr)
 {
 	if (res_type >= NUM_ETH56G_PHY_RES)
 		return -EINVAL;
 
 	/* Lanes 4..7 are in fact 0..3 on a second PHY */
 	lane %= hw->ptp.ports_per_phy;
-	*addr = eth56g_phy_res[res_type].base_addr +
+	*addr = eth56g_phy_res[res_type].base[0] +
 		lane * eth56g_phy_res[res_type].step + offset;
 
 	return 0;
@@ -492,26 +591,21 @@ static int ice_phy_res_address_eth56g(struct ice_hw *hw, u8 lane,
 /**
  * ice_write_port_eth56g - Write a PHY port register
  * @hw: pointer to the HW struct
- * @offset: PHY register offset
+ * @reg_offs: PHY register offset
  * @port: Port number
  * @val: Value to write
  * @res_type: resource type (register/memory)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to write to PHY
  */
-static int ice_write_port_eth56g(struct ice_hw *hw, u8 port, u32 offset,
+static int ice_write_port_eth56g(struct ice_hw *hw, u8 port, u32 reg_offs,
 				 u32 val, enum eth56g_res_type res_type)
 {
 	u32 addr;
 	int err;
 
 	if (port >= hw->ptp.num_lports)
-		return -EINVAL;
+		return -EIO;
 
-	err = ice_phy_res_address_eth56g(hw, port, res_type, offset, &addr);
+	err = ice_phy_res_addr_eth56g(hw, port, res_type, reg_offs, &addr);
 	if (err)
 		return err;
 
@@ -521,26 +615,21 @@ static int ice_write_port_eth56g(struct ice_hw *hw, u8 port, u32 offset,
 /**
  * ice_read_port_eth56g - Read a PHY port register
  * @hw: pointer to the HW struct
- * @offset: PHY register offset
+ * @reg_offs: PHY register offset
  * @port: Port number
  * @val: Value to write
  * @res_type: resource type (register/memory)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to read from PHY
  */
-static int ice_read_port_eth56g(struct ice_hw *hw, u8 port, u32 offset,
+static int ice_read_port_eth56g(struct ice_hw *hw, u8 port, u32 reg_offs,
 				u32 *val, enum eth56g_res_type res_type)
 {
 	u32 addr;
 	int err;
 
 	if (port >= hw->ptp.num_lports)
-		return -EINVAL;
+		return -EIO;
 
-	err = ice_phy_res_address_eth56g(hw, port, res_type, offset, &addr);
+	err = ice_phy_res_addr_eth56g(hw, port, res_type, reg_offs, &addr);
 	if (err)
 		return err;
 
@@ -553,11 +642,6 @@ static int ice_read_port_eth56g(struct ice_hw *hw, u8 port, u32 offset,
  * @port: Port number to be written
  * @offset: Offset from PHY port register base
  * @val: Value to write
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to write to PHY
  */
 static int ice_write_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				    u32 val)
@@ -572,11 +656,6 @@ static int ice_write_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
  * @port: Port number to be written
  * @offset: Offset from PHY port register base
  * @val: Value to write
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to write to PHY
  */
 static int ice_write_mac_reg_eth56g(struct ice_hw *hw, u8 port, u32 offset,
 				    u32 val)
@@ -585,16 +664,11 @@ static int ice_write_mac_reg_eth56g(struct ice_hw *hw, u8 port, u32 offset,
 }
 
 /**
- * ice_write_xpcs_reg_eth56g - Write a PHY port register
+ * ice_write_xpcs_reg_eth56g - Write a port XPCS register
  * @hw: pointer to the HW struct
  * @port: Port number to be written
  * @offset: Offset from PHY port register base
  * @val: Value to write
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to write to PHY
  */
 static int ice_write_xpcs_reg_eth56g(struct ice_hw *hw, u8 port, u32 offset,
 				     u32 val)
@@ -604,16 +678,11 @@ static int ice_write_xpcs_reg_eth56g(struct ice_hw *hw, u8 port, u32 offset,
 }
 
 /**
- * ice_read_ptp_reg_eth56g - Read a PHY port register
+ * ice_read_ptp_reg_eth56g - Read a port PTP register
  * @hw: pointer to the HW struct
  * @port: Port number to be read
  * @offset: Offset from PHY port register base
  * @val: Pointer to the value to read (out param)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to read from PHY
  */
 static int ice_read_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				   u32 *val)
@@ -622,16 +691,11 @@ static int ice_read_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 }
 
 /**
- * ice_read_mac_reg_eth56g - Read a PHY port register
+ * ice_read_mac_reg_eth56g - Read a port MAC register
  * @hw: pointer to the HW struct
  * @port: Port number to be read
  * @offset: Offset from PHY port register base
  * @val: Pointer to the value to read (out param)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to read from PHY
  */
 static int ice_read_mac_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				   u32 *val)
@@ -640,16 +704,11 @@ static int ice_read_mac_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 }
 
 /**
- * ice_read_gpcs_reg_eth56g - Read a PHY port register
+ * ice_read_gpcs_reg_eth56g - Read a port GPCS register
  * @hw: pointer to the HW struct
  * @port: Port number to be read
  * @offset: Offset from PHY port register base
  * @val: Pointer to the value to read (out param)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to read from PHY
  */
 static int ice_read_gpcs_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				    u32 *val)
@@ -658,16 +717,11 @@ static int ice_read_gpcs_reg_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 }
 
 /**
- * ice_read_port_mem_eth56g - Read a PHY port memory location
+ * ice_read_port_mem_eth56g - Read a port memory location
  * @hw: pointer to the HW struct
  * @port: Port number to be read
  * @offset: Offset from PHY port register base
  * @val: Pointer to the value to read (out param)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to read from PHY
  */
 static int ice_read_port_mem_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				    u32 *val)
@@ -676,16 +730,11 @@ static int ice_read_port_mem_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 }
 
 /**
- * ice_write_port_mem_eth56g - Write a PHY port memory location
+ * ice_write_port_mem_eth56g - Write a port memory location
  * @hw: pointer to the HW struct
  * @port: Port number to be read
  * @offset: Offset from PHY port register base
  * @val: Pointer to the value to read (out param)
- *
- * Return:
- * * %0      - success
- * * %EINVAL - invalid port number or resource type
- * * %other  - failed to write to PHY
  */
 static int ice_write_port_mem_eth56g(struct ice_hw *hw, u8 port, u16 offset,
 				     u32 val)
@@ -699,21 +748,18 @@ static int ice_write_port_mem_eth56g(struct ice_hw *hw, u8 port, u16 offset,
  * @offset: PHY register offset
  * @port: Port number
  * @val: Value to write
- *
- * Return:
- * * %0     - success
- * * %EIO  - invalid port number or resource type
- * * %other - failed to write to PHY
  */
 static int ice_write_quad_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
 					 u32 offset, u32 val)
 {
 	u32 addr;
+	u8 quad;
 
 	if (port >= hw->ptp.num_lports)
 		return -EIO;
 
-	addr = eth56g_phy_res[ETH56G_PHY_REG_PTP].base_addr + offset;
+	quad = 0;
+	addr = eth56g_phy_res[ETH56G_PHY_REG_PTP].base[quad] + offset;
 
 	return ice_write_phy_eth56g(hw, port, addr, val);
 }
@@ -724,21 +770,18 @@ static int ice_write_quad_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
  * @offset: PHY register offset
  * @port: Port number
  * @val: Value to read
- *
- * Return:
- * * %0     - success
- * * %EIO  - invalid port number or resource type
- * * %other - failed to read from PHY
  */
 static int ice_read_quad_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
 					u32 offset, u32 *val)
 {
 	u32 addr;
+	u8 quad;
 
 	if (port >= hw->ptp.num_lports)
 		return -EIO;
 
-	addr = eth56g_phy_res[ETH56G_PHY_REG_PTP].base_addr + offset;
+	quad = 0;
+	addr = eth56g_phy_res[ETH56G_PHY_REG_PTP].base[quad] + offset;
 
 	return ice_read_phy_eth56g(hw, port, addr, val);
 }
@@ -748,10 +791,9 @@ static int ice_read_quad_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
  * @low_addr: the low address to check
  * @high_addr: on return, contains the high address of the 64bit register
  *
- * Write the appropriate high register offset to use.
- *
- * Return: true if the provided low address is one of the known 64bit PHY values
- * represented as two 32bit registers, false otherwise.
+ * Check if the provided low address is one of the known 64bit PHY values
+ * represented as two 32bit registers. If it is, return the appropriate high
+ * register offset to use.
  */
 static bool ice_is_64b_phy_reg_eth56g(u16 low_addr, u16 *high_addr)
 {
@@ -787,11 +829,10 @@ static bool ice_is_64b_phy_reg_eth56g(u16 low_addr, u16 *high_addr)
  * @low_addr: the low address to check
  * @high_addr: on return, contains the high address of the 40bit value
  *
- * Write the appropriate high register offset to use.
- *
- * Return: true if the provided low address is one of the known 40bit PHY
- * values split into two registers with the lower 8 bits in the low register and
- * the upper 32 bits in the high register, false otherwise.
+ * Check if the provided low address is one of the known 40bit PHY values
+ * split into two registers with the lower 8 bits in the low register and the
+ * upper 32 bits in the high register. If it is, return the high register
+ * offset to use.
  */
 static bool ice_is_40b_phy_reg_eth56g(u16 low_addr, u16 *high_addr)
 {
@@ -821,11 +862,6 @@ static bool ice_is_40b_phy_reg_eth56g(u16 low_addr, u16 *high_addr)
  * Check if the caller has specified a known 40 bit register offset and read
  * the two registers associated with a 40bit value and return it in the val
  * pointer.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 64 bit register
- * * %other  - failed to read from PHY
  */
 static int ice_read_64b_phy_reg_eth56g(struct ice_hw *hw, u8 port, u16 low_addr,
 				       u64 *val, enum eth56g_res_type res_type)
@@ -866,11 +902,6 @@ static int ice_read_64b_phy_reg_eth56g(struct ice_hw *hw, u8 port, u16 low_addr,
  * Check if the caller has specified a known 40 bit register offset and read
  * the two registers associated with a 40bit value and return it in the val
  * pointer.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 64 bit register
- * * %other  - failed to read from PHY
  */
 static int ice_read_64b_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 low_addr,
 				       u64 *val)
@@ -890,11 +921,6 @@ static int ice_read_64b_ptp_reg_eth56g(struct ice_hw *hw, u8 port, u16 low_addr,
  * Check if the caller has specified a known 40 bit register offset and write
  * provided 40b value to the two associated registers by splitting it up into
  * two chunks, the lower 8 bits and the upper 32 bits.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 40 bit register
- * * %other  - failed to write to PHY
  */
 static int ice_write_40b_phy_reg_eth56g(struct ice_hw *hw, u8 port,
 					u16 low_addr, u64 val,
@@ -907,8 +933,8 @@ static int ice_write_40b_phy_reg_eth56g(struct ice_hw *hw, u8 port,
 	if (!ice_is_40b_phy_reg_eth56g(low_addr, &high_addr))
 		return -EINVAL;
 
-	lo = FIELD_GET(P_REG_40B_LOW_M, val);
-	hi = (u32)(val >> P_REG_40B_HIGH_S);
+	lo = FIELD_GET(PHY_40B_LOW_M, val);
+	hi = FIELD_GET(PHY_40B_HIGH_M, val);
 
 	err = ice_write_port_eth56g(hw, port, low_addr, lo, res_type);
 	if (err) {
@@ -937,11 +963,6 @@ static int ice_write_40b_phy_reg_eth56g(struct ice_hw *hw, u8 port,
  * Check if the caller has specified a known 40 bit register offset and write
  * provided 40b value to the two associated registers by splitting it up into
  * two chunks, the lower 8 bits and the upper 32 bits.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 40 bit register
- * * %other  - failed to write to PHY
  */
 static int ice_write_40b_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
 					u16 low_addr, u64 val)
@@ -960,11 +981,6 @@ static int ice_write_40b_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
  *
  * Check if the caller has specified a known 64 bit register offset and write
  * the 64bit value to the two associated 32bit PHY registers.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 64 bit register
- * * %other  - failed to write to PHY
  */
 static int ice_write_64b_phy_reg_eth56g(struct ice_hw *hw, u8 port,
 					u16 low_addr, u64 val,
@@ -1006,11 +1022,6 @@ static int ice_write_64b_phy_reg_eth56g(struct ice_hw *hw, u8 port,
  *
  * Check if the caller has specified a known 64 bit register offset and write
  * the 64bit value to the two associated 32bit PHY registers.
- *
- * Return:
- * * %0      - success
- * * %EINVAL - not a 64 bit register
- * * %other  - failed to write to PHY
  */
 static int ice_write_64b_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
 					u16 low_addr, u64 val)
@@ -1028,10 +1039,6 @@ static int ice_write_64b_ptp_reg_eth56g(struct ice_hw *hw, u8 port,
  *
  * Read a 40bit timestamp value out of the two associated entries in the
  * port memory block of the internal PHYs of the 56G devices.
- *
- * Return:
- * * %0     - success
- * * %other - failed to read from PHY
  */
 static int ice_read_ptp_tstamp_eth56g(struct ice_hw *hw, u8 port, u8 idx,
 				      u64 *tstamp)
@@ -1063,6 +1070,7 @@ static int ice_read_ptp_tstamp_eth56g(struct ice_hw *hw, u8 port, u8 idx,
 	 */
 	*tstamp = FIELD_PREP(PHY_40B_HIGH_M, hi) |
 		  FIELD_PREP(PHY_40B_LOW_M, lo);
+
 	return 0;
 }
 
@@ -1082,10 +1090,6 @@ static int ice_read_ptp_tstamp_eth56g(struct ice_hw *hw, u8 port, u8 idx,
  *
  * This function should only be called on an idx whose bit is set according to
  * ice_get_phy_tx_tstamp_ready().
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_clear_ptp_tstamp_eth56g(struct ice_hw *hw, u8 port, u8 idx)
 {
@@ -1137,13 +1141,8 @@ static void ice_ptp_reset_ts_memory_eth56g(struct ice_hw *hw)
  * @time: time to initialize the PHY port clocks to
  *
  * Write a new initial time value into registers of a specific PHY port.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
-static int ice_ptp_prep_port_time_eth56g(struct ice_hw *hw, u8 port,
-					 u64 time)
+static int ice_ptp_prep_port_time_eth56g(struct ice_hw *hw, u8 port, u64 time)
 {
 	int err;
 
@@ -1152,7 +1151,6 @@ static int ice_ptp_prep_port_time_eth56g(struct ice_hw *hw, u8 port,
 					   time);
 	if (err)
 		return err;
-
 	/* Rx case */
 	return ice_write_64b_ptp_reg_eth56g(hw, port,
 					    PHY_REG_RX_TIMER_INC_PRE_L, time);
@@ -1167,10 +1165,6 @@ static int ice_ptp_prep_port_time_eth56g(struct ice_hw *hw, u8 port,
  * clock will be initialized once the driver issues an ICE_PTP_INIT_TIME sync
  * command. The time value is the upper 32 bits of the PHY timer, usually in
  * units of nominal nanoseconds.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_ptp_prep_phy_time_eth56g(struct ice_hw *hw, u32 time)
 {
@@ -1210,10 +1204,6 @@ static int ice_ptp_prep_phy_time_eth56g(struct ice_hw *hw, u32 time)
  * including the lower sub-nanosecond portion of the port timer.
  *
  * Negative adjustments are supported using 2s complement arithmetic.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_ptp_prep_port_adj_eth56g(struct ice_hw *hw, u8 port, s64 time)
 {
@@ -1225,23 +1215,23 @@ static int ice_ptp_prep_port_adj_eth56g(struct ice_hw *hw, u8 port, s64 time)
 
 	/* Tx case */
 	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_TX_TIMER_INC_PRE_L,
-				       l_time);
+				    l_time);
 	if (err)
 		goto exit_err;
 
 	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_TX_TIMER_INC_PRE_U,
-				       u_time);
+				    u_time);
 	if (err)
 		goto exit_err;
 
 	/* Rx case */
 	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_RX_TIMER_INC_PRE_L,
-				       l_time);
+				    l_time);
 	if (err)
 		goto exit_err;
 
 	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_RX_TIMER_INC_PRE_U,
-				       u_time);
+				    u_time);
 	if (err)
 		goto exit_err;
 
@@ -1261,32 +1251,27 @@ exit_err:
  * Prepare the PHY ports for an atomic time adjustment by programming the PHY
  * Tx and Rx port registers. The actual adjustment is completed by issuing an
  * ICE_PTP_ADJ_TIME or ICE_PTP_ADJ_TIME_AT_TIME sync command.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_ptp_prep_phy_adj_eth56g(struct ice_hw *hw, s32 adj)
 {
+	int err = 0;
 	s64 cycles;
 	u8 port;
 
 	/* The port clock supports adjustment of the sub-nanosecond portion of
-	 * the clock (lowest 32 bits). We shift the provided adjustment in
-	 * nanoseconds by 32 to calculate the appropriate adjustment to program
-	 * into the PHY ports.
+	 * the clock. We shift the provided adjustment in nanoseconds to
+	 * calculate the appropriate adjustment to program into the PHY ports.
 	 */
 	cycles = (s64)adj << 32;
 
 	for (port = 0; port < hw->ptp.num_lports; port++) {
-		int err;
 
 		err = ice_ptp_prep_port_adj_eth56g(hw, port, cycles);
 		if (err)
-			return err;
+			break;
 	}
 
-	return 0;
+	return err;
 }
 
 /**
@@ -1297,10 +1282,6 @@ static int ice_ptp_prep_phy_adj_eth56g(struct ice_hw *hw, s32 adj)
  * Prepare each of the PHY ports for a new increment value by programming the
  * port's TIMETUS registers. The new increment value will be updated after
  * issuing an ICE_PTP_INIT_INCVAL command.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_ptp_prep_phy_incval_eth56g(struct ice_hw *hw, u64 incval)
 {
@@ -1308,7 +1289,6 @@ static int ice_ptp_prep_phy_incval_eth56g(struct ice_hw *hw, u64 incval)
 
 	for (port = 0; port < hw->ptp.num_lports; port++) {
 		int err;
-
 		err = ice_write_40b_ptp_reg_eth56g(hw, port, PHY_REG_TIMETUS_L,
 						   incval);
 		if (err) {
@@ -1329,13 +1309,9 @@ static int ice_ptp_prep_phy_incval_eth56g(struct ice_hw *hw, u64 incval)
  * @rx_ts: on return, the Rx port time capture
  *
  * Read the port's Tx and Rx local time capture values.
- *
- * Return:
- * * %0     - success
- * * %other - failed to read from PHY
  */
 static int ice_ptp_read_port_capture_eth56g(struct ice_hw *hw, u8 port,
-					    u64 *tx_ts, u64 *rx_ts)
+					  u64 *tx_ts, u64 *rx_ts)
 {
 	int err;
 
@@ -1371,19 +1347,24 @@ static int ice_ptp_read_port_capture_eth56g(struct ice_hw *hw, u8 port,
  * @cmd: Command to be sent to the port
  *
  * Prepare the requested port for an upcoming timer sync command.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_ptp_write_port_cmd_eth56g(struct ice_hw *hw, u8 port,
 					 enum ice_ptp_tmr_cmd cmd)
 {
 	u32 val = ice_ptp_tmr_cmd_to_port_reg(hw, cmd);
+	u32 addr;
 	int err;
 
+	if (port >= hw->ptp.num_lports)
+		return -EIO;
+
 	/* Tx case */
-	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_TX_TMR_CMD, val);
+	err = ice_phy_res_addr_eth56g(hw, port, ETH56G_PHY_REG_PTP,
+				      PHY_REG_TX_TMR_CMD, &addr);
+	if (err)
+		return err;
+
+	err = ice_write_phy_eth56g(hw, port, addr, val);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to write back TX_TMR_CMD, err %d\n",
 			  err);
@@ -1391,7 +1372,12 @@ static int ice_ptp_write_port_cmd_eth56g(struct ice_hw *hw, u8 port,
 	}
 
 	/* Rx case */
-	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_RX_TMR_CMD, val);
+	err = ice_phy_res_addr_eth56g(hw, port, ETH56G_PHY_REG_PTP,
+				      PHY_REG_RX_TMR_CMD, &addr);
+	if (err)
+		return err;
+
+	err = ice_write_phy_eth56g(hw, port, addr, val);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to write back RX_TMR_CMD, err %d\n",
 			  err);
@@ -1402,77 +1388,30 @@ static int ice_ptp_write_port_cmd_eth56g(struct ice_hw *hw, u8 port,
 }
 
 /**
- * ice_phy_get_speed_eth56g - Get link speed based on PHY link type
- * @li: pointer to link information struct
- *
- * Return: simplified ETH56G PHY speed
- */
-static enum ice_eth56g_link_spd
-ice_phy_get_speed_eth56g(struct ice_link_status *li)
-{
-	u16 speed = ice_get_link_speed_based_on_phy_type(li->phy_type_low,
-							 li->phy_type_high);
-
-	switch (speed) {
-	case ICE_AQ_LINK_SPEED_1000MB:
-		return ICE_ETH56G_LNK_SPD_1G;
-	case ICE_AQ_LINK_SPEED_2500MB:
-		return ICE_ETH56G_LNK_SPD_2_5G;
-	case ICE_AQ_LINK_SPEED_10GB:
-		return ICE_ETH56G_LNK_SPD_10G;
-	case ICE_AQ_LINK_SPEED_25GB:
-		return ICE_ETH56G_LNK_SPD_25G;
-	case ICE_AQ_LINK_SPEED_40GB:
-		return ICE_ETH56G_LNK_SPD_40G;
-	case ICE_AQ_LINK_SPEED_50GB:
-		switch (li->phy_type_low) {
-		case ICE_PHY_TYPE_LOW_50GBASE_SR:
-		case ICE_PHY_TYPE_LOW_50GBASE_FR:
-		case ICE_PHY_TYPE_LOW_50GBASE_LR:
-		case ICE_PHY_TYPE_LOW_50GBASE_KR_PAM4:
-		case ICE_PHY_TYPE_LOW_50G_AUI1_AOC_ACC:
-		case ICE_PHY_TYPE_LOW_50G_AUI1:
-			return ICE_ETH56G_LNK_SPD_50G;
-		default:
-			return ICE_ETH56G_LNK_SPD_50G2;
-		}
-	case ICE_AQ_LINK_SPEED_100GB:
-		if (li->phy_type_high ||
-		    li->phy_type_low == ICE_PHY_TYPE_LOW_100GBASE_SR2)
-			return ICE_ETH56G_LNK_SPD_100G2;
-		else
-			return ICE_ETH56G_LNK_SPD_100G;
-	default:
-		return ICE_ETH56G_LNK_SPD_1G;
-	}
-}
-
-/**
  * ice_phy_cfg_parpcs_eth56g - Configure TUs per PAR/PCS clock cycle
  * @hw: pointer to the HW struct
  * @port: port to configure
  *
  * Configure the number of TUs for the PAR and PCS clocks used as part of the
  * timestamp calibration process.
- *
- * Return:
- * * %0     - success
- * * %other - PHY read/write failed
  */
 static int ice_phy_cfg_parpcs_eth56g(struct ice_hw *hw, u8 port)
 {
+	struct ice_port_info *port_info;
 	u32 val;
 	int err;
 
+	port_info = hw->port_info;
+
 	err = ice_write_xpcs_reg_eth56g(hw, port, PHY_VENDOR_TXLANE_THRESH,
-					ICE_ETH56G_NOMINAL_THRESH4);
+				     ICE_ETH56G_NOMINAL_THRESH4);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to read VENDOR_TXLANE_THRESH, status: %d",
 			  err);
 		return err;
 	}
 
-	switch (ice_phy_get_speed_eth56g(&hw->port_info->phy.link_info)) {
+	switch (ice_phy_get_speed_eth56g(&port_info->phy.link_info)) {
 	case ICE_ETH56G_LNK_SPD_1G:
 	case ICE_ETH56G_LNK_SPD_2_5G:
 		err = ice_read_quad_ptp_reg_eth56g(hw, port,
@@ -1522,18 +1461,16 @@ static int ice_phy_cfg_parpcs_eth56g(struct ice_hw *hw, u8 port)
  * ice_phy_cfg_ptp_1step_eth56g - Configure 1-step PTP settings
  * @hw: Pointer to the HW struct
  * @port: Port to configure
- *
- * Return:
- * * %0     - success
- * * %other - PHY read/write failed
  */
 int ice_phy_cfg_ptp_1step_eth56g(struct ice_hw *hw, u8 port)
 {
 	u8 quad_lane = port % ICE_PORTS_PER_QUAD;
+	struct ice_port_info *port_info;
 	u32 addr, val, peer_delay;
 	bool enable, sfd_ena;
 	int err;
 
+	port_info = hw->port_info;
 	enable = hw->ptp.phy.eth56g.onestep_ena;
 	peer_delay = hw->ptp.phy.eth56g.peer_delay;
 	sfd_ena = hw->ptp.phy.eth56g.sfd_ena;
@@ -1548,7 +1485,8 @@ int ice_phy_cfg_ptp_1step_eth56g(struct ice_hw *hw, u8 port)
 	else
 		val &= ~BIT(quad_lane);
 
-	val &= ~(PHY_PTP_1STEP_T1S_UP64_M | PHY_PTP_1STEP_T1S_DELTA_M);
+	val &= ~PHY_PTP_1STEP_T1S_UP64_M;
+	val &= ~PHY_PTP_1STEP_T1S_DELTA_M;
 
 	err = ice_write_quad_ptp_reg_eth56g(hw, port, addr, val);
 	if (err)
@@ -1574,9 +1512,9 @@ int ice_phy_cfg_ptp_1step_eth56g(struct ice_hw *hw, u8 port)
 		return err;
 
 	val &= ~(PHY_MAC_XIF_1STEP_ENA_M | PHY_MAC_XIF_TS_BIN_MODE_M |
-		 PHY_MAC_XIF_TS_SFD_ENA_M | PHY_MAC_XIF_GMII_TS_SEL_M);
+		     PHY_MAC_XIF_TS_SFD_ENA_M | PHY_MAC_XIF_GMII_TS_SEL_M);
 
-	switch (ice_phy_get_speed_eth56g(&hw->port_info->phy.link_info)) {
+	switch (ice_phy_get_speed_eth56g(&port_info->phy.link_info)) {
 	case ICE_ETH56G_LNK_SPD_1G:
 	case ICE_ETH56G_LNK_SPD_2_5G:
 		val |= PHY_MAC_XIF_GMII_TS_SEL_M;
@@ -1596,10 +1534,8 @@ int ice_phy_cfg_ptp_1step_eth56g(struct ice_hw *hw, u8 port)
  * mul_u32_u32_fx_q9 - Multiply two u32 fixed point Q9 values
  * @a: multiplier value
  * @b: multiplicand value
- *
- * Return: result of multiplication
  */
-static u32 mul_u32_u32_fx_q9(u32 a, u32 b)
+static inline u32 mul_u32_u32_fx_q9(u32 a, u32 b)
 {
 	return (u32)(((u64)a * b) >> ICE_ETH56G_MAC_CFG_FRAC_W);
 }
@@ -1608,10 +1544,8 @@ static u32 mul_u32_u32_fx_q9(u32 a, u32 b)
  * add_u32_u32_fx - Add two u32 fixed point values and discard overflow
  * @a: first value
  * @b: second value
- *
- * Return: result of addition
  */
-static u32 add_u32_u32_fx(u32 a, u32 b)
+static inline u32 add_u32_u32_fx(u32 a, u32 b)
 {
 	return lower_32_bits(((u64)a + b));
 }
@@ -1624,8 +1558,6 @@ static u32 add_u32_u32_fx(u32 a, u32 b)
  * @fc: FC-FEC enabled
  * @rs: RS-FEC enabled
  * @spd: link speed
- *
- * Return: calculated bitslip value
  */
 static u32 ice_ptp_calc_bitslip_eth56g(struct ice_hw *hw, u8 port, u32 bs,
 				       bool fc, bool rs,
@@ -1674,8 +1606,6 @@ static u32 ice_ptp_calc_bitslip_eth56g(struct ice_hw *hw, u8 port, u32 bs,
  * @ds: deskew multiplier
  * @rs: RS-FEC enabled
  * @spd: link speed
- *
- * Return: calculated deskew value
  */
 static u32 ice_ptp_calc_deskew_eth56g(struct ice_hw *hw, u8 port, u32 ds,
 				      bool rs, enum ice_eth56g_link_spd spd)
@@ -1715,10 +1645,6 @@ static u32 ice_ptp_calc_deskew_eth56g(struct ice_hw *hw, u8 port, u32 ds,
  * @cfg: structure to store output values
  * @fc: FC-FEC enabled
  * @rs: RS-FEC enabled
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_phy_set_offsets_eth56g(struct ice_hw *hw, u8 port,
 				      enum ice_eth56g_link_spd spd,
@@ -1769,24 +1695,22 @@ static int ice_phy_set_offsets_eth56g(struct ice_hw *hw, u8 port,
  * ice_phy_cfg_mac_eth56g - Configure MAC for PTP
  * @hw: Pointer to the HW struct
  * @port: Port to configure
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 static int ice_phy_cfg_mac_eth56g(struct ice_hw *hw, u8 port)
 {
 	const struct ice_eth56g_mac_reg_cfg *cfg;
 	enum ice_eth56g_link_spd spd;
 	struct ice_link_status *li;
+	struct ice_port_info *pi;
 	bool fc = false;
 	bool rs = false;
 	bool onestep;
 	u32 val;
 	int err;
 
+	pi = hw->port_info;
 	onestep = hw->ptp.phy.eth56g.onestep_ena;
-	li = &hw->port_info->phy.link_info;
+	li = &pi->phy.link_info;
 	spd = ice_phy_get_speed_eth56g(li);
 	if (!!(li->an_info & ICE_AQ_FEC_EN)) {
 		if (spd == ICE_ETH56G_LNK_SPD_10G) {
@@ -1848,11 +1772,8 @@ static int ice_phy_cfg_mac_eth56g(struct ice_hw *hw, u8 port)
  * @threshold: interrupt threshold
  *
  * Configure TX timestamp interrupt for the specified port
- *
- * Return:
- * * %0     - success
- * * %other - PHY read/write failed
  */
+
 int ice_phy_cfg_intr_eth56g(struct ice_hw *hw, u8 port, bool ena, u8 threshold)
 {
 	int err;
@@ -1870,7 +1791,8 @@ int ice_phy_cfg_intr_eth56g(struct ice_hw *hw, u8 port, bool ena, u8 threshold)
 		val &= ~PHY_TS_INT_CONFIG_ENA_M;
 	}
 
-	return ice_write_ptp_reg_eth56g(hw, port, PHY_REG_TS_INT_CONFIG, val);
+	err = ice_write_ptp_reg_eth56g(hw, port, PHY_REG_TS_INT_CONFIG, val);
+	return err;
 }
 
 /**
@@ -1882,10 +1804,6 @@ int ice_phy_cfg_intr_eth56g(struct ice_hw *hw, u8 port, bool ena, u8 threshold)
  *
  * Issue a ICE_PTP_READ_TIME timer command to simultaneously capture the PHY
  * and PHC timer values.
- *
- * Return:
- * * %0     - success
- * * %other - PHY read/write failed
  */
 static int ice_read_phy_and_phc_time_eth56g(struct ice_hw *hw, u8 port,
 					    u64 *phy_time, u64 *phc_time)
@@ -1948,11 +1866,6 @@ static int ice_read_phy_and_phc_time_eth56g(struct ice_hw *hw, u8 port,
  * difference to calculate an appropriate 2s complement addition to add
  * to the PHY timer in order to ensure it reads the same value as the
  * primary PHC timer.
- *
- * Return:
- * * %0     - success
- * * %-EBUSY- failed to acquire PTP semaphore
- * * %other - PHY read/write failed
  */
 static int ice_sync_phy_timer_eth56g(struct ice_hw *hw, u8 port)
 {
@@ -2000,7 +1913,8 @@ static int ice_sync_phy_timer_eth56g(struct ice_hw *hw, u8 port)
 
 	dev_info(ice_hw_to_dev(hw),
 		 "Port %u PHY time synced to PHC: 0x%016llX, 0x%016llX\n",
-		 port, phy_time, phc_time);
+		 port, (unsigned long long)phy_time,
+		 (unsigned long long)phc_time);
 
 err_unlock:
 	ice_ptp_unlock(hw);
@@ -2016,10 +1930,6 @@ err_unlock:
  * Stop the clock of a PHY port. This must be done as part of the flow to
  * re-calibrate Tx and Rx timestamping offsets whenever the clock time is
  * initialized or when link speed changes.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
 int ice_stop_phy_timer_eth56g(struct ice_hw *hw, u8 port, bool soft_reset)
 {
@@ -2047,9 +1957,6 @@ int ice_stop_phy_timer_eth56g(struct ice_hw *hw, u8 port, bool soft_reset)
  * re-calibrate Tx and Rx timestamping offsets whenever the clock time is
  * initialized or when link speed changes.
  *
- * Return:
- * * %0     - success
- * * %other - PHY read/write failed
  */
 int ice_start_phy_timer_eth56g(struct ice_hw *hw, u8 port)
 {
@@ -2122,10 +2029,6 @@ int ice_start_phy_timer_eth56g(struct ice_hw *hw, u8 port)
  *
  * Read the PHY Tx timestamp status mask indicating which ports have Tx
  * timestamps available.
- *
- * Return:
- * * %0     - success
- * * %other - failed to read from PHY
  */
 int ice_ptp_read_tx_hwtstamp_status_eth56g(struct ice_hw *hw, u32 *ts_status)
 {
@@ -2160,10 +2063,6 @@ int ice_ptp_read_tx_hwtstamp_status_eth56g(struct ice_hw *hw, u32 *ts_status)
  * Read the PHY_REG_TX_MEMORY_STATUS register indicating which timestamps in
  * the PHY are ready. A set bit means the corresponding timestamp is valid and
  * ready to be captured from the PHY timestamp block.
- *
- * Return:
- * * %0     - success
- * * %other - failed to read from PHY
  */
 static int ice_get_phy_tx_tstamp_ready_eth56g(struct ice_hw *hw, u8 port,
 					      u64 *tstamp_ready)
@@ -2171,7 +2070,7 @@ static int ice_get_phy_tx_tstamp_ready_eth56g(struct ice_hw *hw, u8 port,
 	int err;
 
 	err = ice_read_64b_ptp_reg_eth56g(hw, port, PHY_REG_TX_MEMORY_STATUS_L,
-					  tstamp_ready);
+					tstamp_ready);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to read TX_MEMORY_STATUS for port %u, err %d\n",
 			  port, err);
@@ -2182,13 +2081,40 @@ static int ice_get_phy_tx_tstamp_ready_eth56g(struct ice_hw *hw, u8 port,
 }
 
 /**
- * ice_ptp_init_phy_e825 - initialize PHY parameters
+ * ice_ptp_config_sfd_eth56g - Configure timestamping at/after SFD
+ * @hw: pointer to the HW struct
+ * @port: port number
+ * @sfd_ena: true to enable timestamping at beginning of SFD, false otherwise
+ *
+ * Configure timestamping to measure at the beginning/after SFD
+ * (start frame delimiter).
+ */
+static int ice_ptp_config_sfd_eth56g(struct ice_hw *hw, u8 port, bool sfd_ena)
+{
+	u32 val;
+	int err;
+
+	err = ice_read_mac_reg_eth56g(hw, port, PHY_MAC_XIF_MODE, &val);
+	if (err)
+		return err;
+
+	if (sfd_ena)
+		val |= PHY_MAC_XIF_TS_SFD_ENA_M;
+	else
+		val &= ~PHY_MAC_XIF_TS_SFD_ENA_M;
+
+	return ice_write_mac_reg_eth56g(hw, port, PHY_MAC_XIF_MODE, val);
+}
+
+/**
+ * ice_ptp_init_phy_e825c - initialize PHY parameters
  * @hw: pointer to the HW struct
  */
-static void ice_ptp_init_phy_e825(struct ice_hw *hw)
+static void ice_ptp_init_phy_e825c(struct ice_hw *hw)
 {
 	struct ice_ptp_hw *ptp = &hw->ptp;
 	struct ice_eth56g_params *params;
+	u32 val;
 
 	params = &ptp->phy.eth56g;
 	params->onestep_ena = false;
@@ -2197,11 +2123,14 @@ static void ice_ptp_init_phy_e825(struct ice_hw *hw)
 	params->num_phys = 2;
 	ptp->ports_per_phy = 4;
 	ptp->num_lports = params->num_phys * ptp->ports_per_phy;
+
+	val = rd32(hw, PF_SB_REM_DEV_CTL);
+	wr32(hw, PF_SB_REM_DEV_CTL, val | BIT(phy_0_peer) | BIT(cgu_peer));
 }
 
-/* E822 family functions
+/* E82X family functions
  *
- * The following functions operate on the E822 family of devices.
+ * The following functions operate on the E82X family of devices.
  */
 
 /**
@@ -2211,9 +2140,9 @@ static void ice_ptp_init_phy_e825(struct ice_hw *hw)
  * @port: the port to access
  * @offset: the register offset
  */
-static void ice_fill_phy_msg_e82x(struct ice_hw *hw,
-				  struct ice_sbq_msg_input *msg, u8 port,
-				  u16 offset)
+static void
+ice_fill_phy_msg_e82x(struct ice_hw *hw, struct ice_sbq_msg_input *msg, u8 port,
+		      u16 offset)
 {
 	int phy_port, quadtype;
 
@@ -2229,7 +2158,7 @@ static void ice_fill_phy_msg_e82x(struct ice_hw *hw,
 		msg->msg_addr_high = P_Q1_H(P_4_BASE + offset, phy_port);
 	}
 
-	msg->dest_dev = ice_sbq_dev_phy_0;
+	msg->dest_dev = phy_0;
 }
 
 /**
@@ -2339,11 +2268,13 @@ static bool ice_is_40b_phy_reg_e82x(u16 low_addr, u16 *high_addr)
  *
  * Read a PHY register for the given port over the device sideband queue.
  */
-static int
-ice_read_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 offset, u32 *val)
+int ice_read_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 offset, u32 *val)
 {
 	struct ice_sbq_msg_input msg = {0};
 	int err;
+
+	if (port >= hw->ptp.num_lports)
+		return -EINVAL;
 
 	ice_fill_phy_msg_e82x(hw, &msg, port, offset);
 	msg.opcode = ice_sbq_msg_rd;
@@ -2422,8 +2353,11 @@ ice_write_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 offset, u32 val)
 	struct ice_sbq_msg_input msg = {0};
 	int err;
 
+	if (port >= hw->ptp.num_lports)
+		return -EINVAL;
+
 	ice_fill_phy_msg_e82x(hw, &msg, port, offset);
-	msg.opcode = ice_sbq_msg_wr;
+	msg.opcode = ice_sbq_msg_wr_p;
 	msg.data = val;
 
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
@@ -2449,8 +2383,8 @@ ice_write_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 offset, u32 val)
 static int
 ice_write_40b_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 low_addr, u64 val)
 {
-	u32 low, high;
 	u16 high_addr;
+	u32 lo, hi;
 	int err;
 
 	/* Only operate on registers known to be split into a lower 8 bit
@@ -2461,17 +2395,18 @@ ice_write_40b_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 low_addr, u64 val)
 			  low_addr);
 		return -EINVAL;
 	}
-	low = FIELD_GET(P_REG_40B_LOW_M, val);
-	high = (u32)(val >> P_REG_40B_HIGH_S);
 
-	err = ice_write_phy_reg_e82x(hw, port, low_addr, low);
+	lo = FIELD_GET(PHY_40B_LOW_M, val);
+	hi = FIELD_GET(PHY_40B_HIGH_M, val);
+
+	err = ice_write_phy_reg_e82x(hw, port, low_addr, lo);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to write to low register 0x%08x\n, err %d",
 			  low_addr, err);
 		return err;
 	}
 
-	err = ice_write_phy_reg_e82x(hw, port, high_addr, high);
+	err = ice_write_phy_reg_e82x(hw, port, high_addr, hi);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to write to high register 0x%08x\n, err %d",
 			  high_addr, err);
@@ -2538,23 +2473,19 @@ ice_write_64b_phy_reg_e82x(struct ice_hw *hw, u8 port, u16 low_addr, u64 val)
  *
  * Fill a message buffer for accessing a register in a quad shared between
  * multiple PHYs.
- *
- * Return:
- * * %0       - OK
- * * %-EINVAL - invalid quad number
  */
-static int ice_fill_quad_msg_e82x(struct ice_hw *hw,
-				  struct ice_sbq_msg_input *msg, u8 quad,
-				  u16 offset)
+static int
+ice_fill_quad_msg_e82x(struct ice_hw *hw, struct ice_sbq_msg_input *msg,
+		       u8 quad, u16 offset)
 {
 	u32 addr;
 
 	if (quad >= ICE_GET_QUAD_NUM(hw->ptp.num_lports))
 		return -EINVAL;
 
-	msg->dest_dev = ice_sbq_dev_phy_0;
+	msg->dest_dev = phy_0;
 
-	if (!(quad % ICE_GET_QUAD_NUM(hw->ptp.ports_per_phy)))
+	if ((quad % ICE_GET_QUAD_NUM(hw->ptp.ports_per_phy)) == 0)
 		addr = Q_0_BASE + offset;
 	else
 		addr = Q_1_BASE + offset;
@@ -2575,8 +2506,7 @@ static int ice_fill_quad_msg_e82x(struct ice_hw *hw,
  * Read a quad register over the device sideband queue. Quad registers are
  * shared between multiple PHYs.
  */
-int
-ice_read_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 *val)
+int ice_read_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 *val)
 {
 	struct ice_sbq_msg_input msg = {0};
 	int err;
@@ -2609,8 +2539,7 @@ ice_read_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 *val)
  * Write a quad register over the device sideband queue. Quad registers are
  * shared between multiple PHYs.
  */
-int
-ice_write_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 val)
+int ice_write_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 val)
 {
 	struct ice_sbq_msg_input msg = {0};
 	int err;
@@ -2619,7 +2548,7 @@ ice_write_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 val)
 	if (err)
 		return err;
 
-	msg.opcode = ice_sbq_msg_wr;
+	msg.opcode = ice_sbq_msg_wr_p;
 	msg.data = val;
 
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
@@ -2640,7 +2569,7 @@ ice_write_quad_reg_e82x(struct ice_hw *hw, u8 quad, u16 offset, u32 val)
  * @tstamp: on return, the 40bit timestamp value
  *
  * Read a 40bit timestamp value out of the two associated registers in the
- * quad memory block that is shared between the internal PHYs of the E822
+ * quad memory block that is shared between the internal PHYs of the E82X
  * family of devices.
  */
 static int
@@ -2667,7 +2596,7 @@ ice_read_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx, u64 *tstamp)
 		return err;
 	}
 
-	/* For E822 based internal PHYs, the timestamp is reported with the
+	/* For E82X based internal PHYs, the timestamp is reported with the
 	 * lower 8 bits in the low register, and the upper 32 bits in the high
 	 * register.
 	 */
@@ -2684,11 +2613,11 @@ ice_read_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx, u64 *tstamp)
  * @idx: the timestamp index to reset
  *
  * Read the timestamp out of the quad to clear its timestamp status bit from
- * the PHY quad block that is shared between the internal PHYs of the E822
+ * the PHY quad block that is shared between the internal PHYs of the E82X
  * devices.
  *
  * Note that unlike E810, software cannot directly write to the quad memory
- * bank registers. E822 relies on the ice_get_phy_tx_tstamp_ready() function
+ * bank registers. E82X relies on the ice_get_phy_tx_tstamp_ready() function
  * to determine which timestamps are valid. Reading a timestamp auto-clears
  * the valid bit.
  *
@@ -2699,8 +2628,7 @@ ice_read_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx, u64 *tstamp)
  * This function should only be called on an idx whose bit is set according to
  * ice_get_phy_tx_tstamp_ready().
  */
-static int
-ice_clear_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx)
+static int ice_clear_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx)
 {
 	u64 unused_tstamp;
 	int err;
@@ -2721,7 +2649,7 @@ ice_clear_phy_tstamp_e82x(struct ice_hw *hw, u8 quad, u8 idx)
  * @quad: the quad to read from
  *
  * Clear all timestamps from the PHY quad block that is shared between the
- * internal PHYs on the E822 devices.
+ * internal PHYs on the E82X devices.
  */
 void ice_ptp_reset_ts_memory_quad_e82x(struct ice_hw *hw, u8 quad)
 {
@@ -2742,20 +2670,21 @@ static void ice_ptp_reset_ts_memory_e82x(struct ice_hw *hw)
 }
 
 /**
- * ice_ptp_set_vernier_wl - Set the window length for vernier calibration
- * @hw: pointer to the HW struct
+ * ice_ptp_init_phc_e82x - Perform E82X specific PHC initialization
+ * @hw: pointer to HW struct
  *
- * Set the window length used for the vernier port calibration process.
+ * Perform PHC initialization steps specific to E82X devices.
  */
-static int ice_ptp_set_vernier_wl(struct ice_hw *hw)
+static int ice_ptp_init_phc_e82x(struct ice_hw *hw)
 {
 	u8 port;
 
+	/* Set window length for all the ports */
 	for (port = 0; port < hw->ptp.num_lports; port++) {
 		int err;
 
 		err = ice_write_phy_reg_e82x(hw, port, P_REG_WL,
-					     PTP_VERNIER_WL);
+					     P_REG_WL_VERNIER);
 		if (err) {
 			ice_debug(hw, ICE_DBG_PTP, "Failed to set vernier window length for port %u, err %d\n",
 				  port, err);
@@ -2764,27 +2693,6 @@ static int ice_ptp_set_vernier_wl(struct ice_hw *hw)
 	}
 
 	return 0;
-}
-
-/**
- * ice_ptp_init_phc_e82x - Perform E822 specific PHC initialization
- * @hw: pointer to HW struct
- *
- * Perform PHC initialization steps specific to E822 devices.
- */
-static int ice_ptp_init_phc_e82x(struct ice_hw *hw)
-{
-	u32 val;
-
-	/* Enable reading switch and PHY registers over the sideband queue */
-#define PF_SB_REM_DEV_CTL_SWITCH_READ BIT(1)
-#define PF_SB_REM_DEV_CTL_PHY0 BIT(2)
-	val = rd32(hw, PF_SB_REM_DEV_CTL);
-	val |= (PF_SB_REM_DEV_CTL_SWITCH_READ | PF_SB_REM_DEV_CTL_PHY0);
-	wr32(hw, PF_SB_REM_DEV_CTL, val);
-
-	/* Set window length for all the ports */
-	return ice_ptp_set_vernier_wl(hw);
 }
 
 /**
@@ -2797,8 +2705,7 @@ static int ice_ptp_init_phc_e82x(struct ice_hw *hw)
  * command. The time value is the upper 32 bits of the PHY timer, usually in
  * units of nominal nanoseconds.
  */
-static int
-ice_ptp_prep_phy_time_e82x(struct ice_hw *hw, u32 time)
+static int ice_ptp_prep_phy_time_e82x(struct ice_hw *hw, u32 time)
 {
 	u64 phy_time;
 	u8 port;
@@ -2810,6 +2717,7 @@ ice_ptp_prep_phy_time_e82x(struct ice_hw *hw, u32 time)
 	phy_time = (u64)time << 32;
 
 	for (port = 0; port < hw->ptp.num_lports; port++) {
+
 		/* Tx case */
 		err = ice_write_64b_phy_reg_e82x(hw, port,
 						 P_REG_TX_TIMER_INC_PRE_L,
@@ -2849,8 +2757,7 @@ exit_err:
  *
  * Negative adjustments are supported using 2s complement arithmetic.
  */
-static int
-ice_ptp_prep_port_adj_e82x(struct ice_hw *hw, u8 port, s64 time)
+static int ice_ptp_prep_port_adj_e82x(struct ice_hw *hw, u8 port, s64 time)
 {
 	u32 l_time, u_time;
 	int err;
@@ -2897,8 +2804,7 @@ exit_err:
  * Tx and Rx port registers. The actual adjustment is completed by issuing an
  * ICE_PTP_ADJ_TIME or ICE_PTP_ADJ_TIME_AT_TIME sync command.
  */
-static int
-ice_ptp_prep_phy_adj_e82x(struct ice_hw *hw, s32 adj)
+static int ice_ptp_prep_phy_adj_e82x(struct ice_hw *hw, s32 adj)
 {
 	s64 cycles;
 	u8 port;
@@ -2932,8 +2838,7 @@ ice_ptp_prep_phy_adj_e82x(struct ice_hw *hw, s32 adj)
  * port's TIMETUS registers. The new increment value will be updated after
  * issuing an ICE_PTP_INIT_INCVAL command.
  */
-static int
-ice_ptp_prep_phy_incval_e82x(struct ice_hw *hw, u64 incval)
+static int ice_ptp_prep_phy_incval_e82x(struct ice_hw *hw, u64 incval)
 {
 	int err;
 	u8 port;
@@ -2955,7 +2860,7 @@ exit_err:
 }
 
 /**
- * ice_ptp_read_port_capture - Read a port's local time capture
+ * ice_ptp_read_port_capture_e82x - Read a port's local time capture
  * @hw: pointer to HW struct
  * @port: Port number to read
  * @tx_ts: on return, the Tx port time capture
@@ -2965,8 +2870,8 @@ exit_err:
  *
  * Note this has no equivalent for the E810 devices.
  */
-static int
-ice_ptp_read_port_capture(struct ice_hw *hw, u8 port, u64 *tx_ts, u64 *rx_ts)
+static int ice_ptp_read_port_capture_e82x(struct ice_hw *hw, u8 port,
+					  u64 *tx_ts, u64 *rx_ts)
 {
 	int err;
 
@@ -3005,13 +2910,10 @@ ice_ptp_read_port_capture(struct ice_hw *hw, u8 port, u64 *tx_ts, u64 *rx_ts)
  *
  * Note there is no equivalent of this operation on E810, as that device
  * always handles all external PHYs internally.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write to PHY
  */
-static int ice_ptp_write_port_cmd_e82x(struct ice_hw *hw, u8 port,
-				       enum ice_ptp_tmr_cmd cmd)
+static int
+ice_ptp_write_port_cmd_e82x(struct ice_hw *hw, u8 port,
+			    enum ice_ptp_tmr_cmd cmd)
 {
 	u32 val = ice_ptp_tmr_cmd_to_port_reg(hw, cmd);
 	int err;
@@ -3036,7 +2938,7 @@ static int ice_ptp_write_port_cmd_e82x(struct ice_hw *hw, u8 port,
 	return 0;
 }
 
-/* E822 Vernier calibration functions
+/* E82X Vernier calibration functions
  *
  * The following functions are used as part of the vernier calibration of
  * a port. This calibration increases the precision of the timestamps on the
@@ -3070,9 +2972,10 @@ ice_phy_get_speed_and_fec_e82x(struct ice_hw *hw, u8 port,
 	}
 
 	/* Determine the FEC algorithm */
-	fec = (enum ice_ptp_fec_mode)P_REG_LINK_SPEED_FEC_MODE(serdes);
+	fec = (enum ice_ptp_fec_mode)FIELD_GET(P_REG_LINK_SPEED_FEC_MODE_M,
+					       serdes);
 
-	serdes &= P_REG_LINK_SPEED_SERDES_M;
+	serdes = FIELD_GET(P_REG_LINK_SPEED_SERDES_M, serdes);
 
 	/* Determine the link speed */
 	if (fec == ICE_PTP_FEC_MODE_RS_FEC) {
@@ -3161,7 +3064,7 @@ static void ice_phy_cfg_lane_e82x(struct ice_hw *hw, u8 port)
 }
 
 /**
- * ice_phy_cfg_uix_e82x - Configure Serdes UI to TU conversion for E822
+ * ice_phy_cfg_uix_e82x - Configure Serdes UI to TU conversion for E82X
  * @hw: pointer to the HW structure
  * @port: the port to configure
  *
@@ -3211,7 +3114,7 @@ static int ice_phy_cfg_uix_e82x(struct ice_hw *hw, u8 port)
 	u64 cur_freq, clk_incval, tu_per_sec, uix;
 	int err;
 
-	cur_freq = ice_e82x_pll_freq(ice_e82x_time_ref(hw));
+	cur_freq = ice_e82x_pll_freq(hw->ptp.tspll_freq);
 	clk_incval = ice_ptp_read_src_incval(hw);
 
 	/* Calculate TUs per second divided by 256 */
@@ -3299,7 +3202,7 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 	if (err)
 		return err;
 
-	cur_freq = ice_e82x_pll_freq(ice_e82x_time_ref(hw));
+	cur_freq = ice_e82x_pll_freq(hw->ptp.tspll_freq);
 	clk_incval = ice_ptp_read_src_incval(hw);
 
 	/* Calculate TUs per cycle of the PHC clock */
@@ -3313,9 +3216,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 	 */
 
 	/* P_REG_PAR_TX_TUS */
-	if (e822_vernier[link_spd].tx_par_clk)
+	if (e82x_vernier[link_spd].tx_par_clk)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].tx_par_clk);
+				  e82x_vernier[link_spd].tx_par_clk);
 	else
 		phy_tus = 0;
 
@@ -3325,9 +3228,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_PAR_RX_TUS */
-	if (e822_vernier[link_spd].rx_par_clk)
+	if (e82x_vernier[link_spd].rx_par_clk)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].rx_par_clk);
+				  e82x_vernier[link_spd].rx_par_clk);
 	else
 		phy_tus = 0;
 
@@ -3337,9 +3240,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_PCS_TX_TUS */
-	if (e822_vernier[link_spd].tx_pcs_clk)
+	if (e82x_vernier[link_spd].tx_pcs_clk)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].tx_pcs_clk);
+				  e82x_vernier[link_spd].tx_pcs_clk);
 	else
 		phy_tus = 0;
 
@@ -3349,9 +3252,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_PCS_RX_TUS */
-	if (e822_vernier[link_spd].rx_pcs_clk)
+	if (e82x_vernier[link_spd].rx_pcs_clk)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].rx_pcs_clk);
+				  e82x_vernier[link_spd].rx_pcs_clk);
 	else
 		phy_tus = 0;
 
@@ -3361,9 +3264,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_DESK_PAR_TX_TUS */
-	if (e822_vernier[link_spd].tx_desk_rsgb_par)
+	if (e82x_vernier[link_spd].tx_desk_rsgb_par)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].tx_desk_rsgb_par);
+				  e82x_vernier[link_spd].tx_desk_rsgb_par);
 	else
 		phy_tus = 0;
 
@@ -3373,9 +3276,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_DESK_PAR_RX_TUS */
-	if (e822_vernier[link_spd].rx_desk_rsgb_par)
+	if (e82x_vernier[link_spd].rx_desk_rsgb_par)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].rx_desk_rsgb_par);
+				  e82x_vernier[link_spd].rx_desk_rsgb_par);
 	else
 		phy_tus = 0;
 
@@ -3385,9 +3288,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_DESK_PCS_TX_TUS */
-	if (e822_vernier[link_spd].tx_desk_rsgb_pcs)
+	if (e82x_vernier[link_spd].tx_desk_rsgb_pcs)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].tx_desk_rsgb_pcs);
+				  e82x_vernier[link_spd].tx_desk_rsgb_pcs);
 	else
 		phy_tus = 0;
 
@@ -3397,9 +3300,9 @@ static int ice_phy_cfg_parpcs_e82x(struct ice_hw *hw, u8 port)
 		return err;
 
 	/* P_REG_DESK_PCS_RX_TUS */
-	if (e822_vernier[link_spd].rx_desk_rsgb_pcs)
+	if (e82x_vernier[link_spd].rx_desk_rsgb_pcs)
 		phy_tus = div_u64(tu_per_sec,
-				  e822_vernier[link_spd].rx_desk_rsgb_pcs);
+				  e82x_vernier[link_spd].rx_desk_rsgb_pcs);
 	else
 		phy_tus = 0;
 
@@ -3419,7 +3322,7 @@ ice_calc_fixed_tx_offset_e82x(struct ice_hw *hw, enum ice_ptp_link_spd link_spd)
 {
 	u64 cur_freq, clk_incval, tu_per_sec, fixed_offset;
 
-	cur_freq = ice_e82x_pll_freq(ice_e82x_time_ref(hw));
+	cur_freq = ice_e82x_pll_freq(hw->ptp.tspll_freq);
 	clk_incval = ice_ptp_read_src_incval(hw);
 
 	/* Calculate TUs per second */
@@ -3432,7 +3335,7 @@ ice_calc_fixed_tx_offset_e82x(struct ice_hw *hw, enum ice_ptp_link_spd link_spd)
 	 * divisions by 1e4 first then by 1e7.
 	 */
 	fixed_offset = div_u64(tu_per_sec, 10000);
-	fixed_offset *= e822_vernier[link_spd].tx_fixed_delay;
+	fixed_offset *= e82x_vernier[link_spd].tx_fixed_delay;
 	fixed_offset = div_u64(fixed_offset, 10000000);
 
 	return fixed_offset;
@@ -3487,7 +3390,7 @@ int ice_phy_cfg_tx_offset_e82x(struct ice_hw *hw, u8 port)
 		return err;
 	}
 
-	if (!(reg & P_REG_TX_OV_STATUS_OV_M))
+	if (!FIELD_GET(P_REG_OV_STATUS_M, reg))
 		return -EBUSY;
 
 	err = ice_phy_get_speed_and_fec_e82x(hw, port, &link_spd, &fec_mode);
@@ -3520,8 +3423,7 @@ int ice_phy_cfg_tx_offset_e82x(struct ice_hw *hw, u8 port)
 	 */
 	if (link_spd == ICE_PTP_LNK_SPD_50G_RS ||
 	    link_spd == ICE_PTP_LNK_SPD_100G_RS) {
-		err = ice_read_64b_phy_reg_e82x(hw, port,
-						P_REG_PAR_TX_TIME_L,
+		err = ice_read_64b_phy_reg_e82x(hw, port, P_REG_PAR_TX_TIME_L,
 						&val);
 		if (err)
 			return err;
@@ -3542,8 +3444,8 @@ int ice_phy_cfg_tx_offset_e82x(struct ice_hw *hw, u8 port)
 	if (err)
 		return err;
 
-	dev_info(ice_hw_to_dev(hw), "Port=%d Tx vernier offset calibration complete\n",
-		 port);
+	dev_info(ice_hw_to_dev(hw),
+		 "Port=%d Tx vernier offset calibration complete\n", port);
 
 	return 0;
 }
@@ -3579,7 +3481,7 @@ ice_phy_calc_pmd_adj_e82x(struct ice_hw *hw, u8 port,
 
 	pmd_align = (u8)val;
 
-	cur_freq = ice_e82x_pll_freq(ice_e82x_time_ref(hw));
+	cur_freq = ice_e82x_pll_freq(hw->ptp.tspll_freq);
 	clk_incval = ice_ptp_read_src_incval(hw);
 
 	/* Calculate TUs per second */
@@ -3649,7 +3551,7 @@ ice_phy_calc_pmd_adj_e82x(struct ice_hw *hw, u8 port,
 	 */
 	adj = div_u64(tu_per_sec, 125);
 	adj *= mult;
-	adj = div_u64(adj, e822_vernier[link_spd].pmd_adj_divisor);
+	adj = div_u64(adj, e82x_vernier[link_spd].pmd_adj_divisor);
 
 	/* Finally, for 25G-RS and 50G-RS, a further adjustment for the Rx
 	 * cycle count is necessary.
@@ -3668,11 +3570,13 @@ ice_phy_calc_pmd_adj_e82x(struct ice_hw *hw, u8 port,
 
 		rx_cycle = val & P_REG_RX_40_TO_160_CNT_RXCYC_M;
 		if (rx_cycle) {
+			u32 adj_div = e82x_vernier[link_spd].pmd_adj_divisor;
+
 			mult = (4 - rx_cycle) * 40;
 
 			cycle_adj = div_u64(tu_per_sec, 125);
 			cycle_adj *= mult;
-			cycle_adj = div_u64(cycle_adj, e822_vernier[link_spd].pmd_adj_divisor);
+			cycle_adj = div_u64(cycle_adj, adj_div);
 
 			adj += cycle_adj;
 		}
@@ -3688,13 +3592,15 @@ ice_phy_calc_pmd_adj_e82x(struct ice_hw *hw, u8 port,
 			return err;
 		}
 
-		rx_cycle = val & P_REG_RX_80_TO_160_CNT_RXCYC_M;
+		rx_cycle = (u8)(val & P_REG_RX_80_TO_160_CNT_RXCYC_M);
 		if (rx_cycle) {
+			u32 adj_div = e82x_vernier[link_spd].pmd_adj_divisor;
+
 			mult = rx_cycle * 40;
 
 			cycle_adj = div_u64(tu_per_sec, 125);
 			cycle_adj *= mult;
-			cycle_adj = div_u64(cycle_adj, e822_vernier[link_spd].pmd_adj_divisor);
+			cycle_adj = div_u64(cycle_adj, adj_div);
 
 			adj += cycle_adj;
 		}
@@ -3718,7 +3624,7 @@ ice_calc_fixed_rx_offset_e82x(struct ice_hw *hw, enum ice_ptp_link_spd link_spd)
 {
 	u64 cur_freq, clk_incval, tu_per_sec, fixed_offset;
 
-	cur_freq = ice_e82x_pll_freq(ice_e82x_time_ref(hw));
+	cur_freq = ice_e82x_pll_freq(hw->ptp.tspll_freq);
 	clk_incval = ice_ptp_read_src_incval(hw);
 
 	/* Calculate TUs per second */
@@ -3731,7 +3637,7 @@ ice_calc_fixed_rx_offset_e82x(struct ice_hw *hw, enum ice_ptp_link_spd link_spd)
 	 * divisions by 1e4 first then by 1e7.
 	 */
 	fixed_offset = div_u64(tu_per_sec, 10000);
-	fixed_offset *= e822_vernier[link_spd].rx_fixed_delay;
+	fixed_offset *= e82x_vernier[link_spd].rx_fixed_delay;
 	fixed_offset = div_u64(fixed_offset, 10000000);
 
 	return fixed_offset;
@@ -3790,7 +3696,7 @@ int ice_phy_cfg_rx_offset_e82x(struct ice_hw *hw, u8 port)
 		return err;
 	}
 
-	if (!(reg & P_REG_RX_OV_STATUS_OV_M))
+	if (!FIELD_GET(P_REG_OV_STATUS_M, reg))
 		return -EBUSY;
 
 	err = ice_phy_get_speed_and_fec_e82x(hw, port, &link_spd, &fec_mode);
@@ -3852,8 +3758,8 @@ int ice_phy_cfg_rx_offset_e82x(struct ice_hw *hw, u8 port)
 	if (err)
 		return err;
 
-	dev_info(ice_hw_to_dev(hw), "Port=%d Rx vernier offset calibration complete\n",
-		 port);
+	dev_info(ice_hw_to_dev(hw),
+		 "Port=%d Rx vernier offset calibration complete\n", port);
 
 	return 0;
 }
@@ -3864,8 +3770,6 @@ int ice_phy_cfg_rx_offset_e82x(struct ice_hw *hw, u8 port)
  *
  * Clear PHY TX_/RX_OFFSET_READY registers, effectively marking all transmitted
  * and received timestamps as invalid.
- *
- * Return: 0 on success, other error codes when failed to write to PHY
  */
 int ice_ptp_clear_phy_offset_ready_e82x(struct ice_hw *hw)
 {
@@ -3902,9 +3806,8 @@ int ice_ptp_clear_phy_offset_ready_e82x(struct ice_hw *hw)
  * Issue a ICE_PTP_READ_TIME timer command to simultaneously capture the PHY
  * and PHC timer values.
  */
-static int
-ice_read_phy_and_phc_time_e82x(struct ice_hw *hw, u8 port, u64 *phy_time,
-			       u64 *phc_time)
+static int ice_read_phy_and_phc_time_e82x(struct ice_hw *hw, u8 port,
+					  u64 *phy_time, u64 *phc_time)
 {
 	u64 tx_time, rx_time;
 	u32 zo, lo;
@@ -3930,7 +3833,7 @@ ice_read_phy_and_phc_time_e82x(struct ice_hw *hw, u8 port, u64 *phy_time,
 	*phc_time = (u64)lo << 32 | zo;
 
 	/* Read the captured PHY time from the PHY shadow registers */
-	err = ice_ptp_read_port_capture(hw, port, &tx_time, &rx_time);
+	err = ice_ptp_read_port_capture_e82x(hw, port, &tx_time, &rx_time);
 	if (err)
 		return err;
 
@@ -4030,8 +3933,7 @@ err_unlock:
  * re-calibrate Tx and Rx timestamping offsets whenever the clock time is
  * initialized or when link speed changes.
  */
-int
-ice_stop_phy_timer_e82x(struct ice_hw *hw, u8 port, bool soft_reset)
+int ice_stop_phy_timer_e82x(struct ice_hw *hw, u8 port, bool soft_reset)
 {
 	int err;
 	u32 val;
@@ -4210,8 +4112,6 @@ ice_get_phy_tx_tstamp_ready_e82x(struct ice_hw *hw, u8 quad, u64 *tstamp_ready)
  * @threshold: interrupt threshold
  *
  * Configure TX timestamp interrupt for the specified quad
- *
- * Return: 0 on success, other error codes when failed to read/write quad
  */
 
 int ice_phy_cfg_intr_e82x(struct ice_hw *hw, u8 quad, bool ena, u8 threshold)
@@ -4219,18 +4119,25 @@ int ice_phy_cfg_intr_e82x(struct ice_hw *hw, u8 quad, bool ena, u8 threshold)
 	int err;
 	u32 val;
 
-	err = ice_read_quad_reg_e82x(hw, quad, Q_REG_TX_MEM_GBL_CFG, &val);
+	err = ice_read_quad_reg_e82x(hw, quad,
+				     Q_REG_TX_MEM_GBL_CFG,
+				     &val);
 	if (err)
 		return err;
 
-	val &= ~Q_REG_TX_MEM_GBL_CFG_INTR_ENA_M;
 	if (ena) {
 		val |= Q_REG_TX_MEM_GBL_CFG_INTR_ENA_M;
 		val &= ~Q_REG_TX_MEM_GBL_CFG_INTR_THR_M;
 		val |= FIELD_PREP(Q_REG_TX_MEM_GBL_CFG_INTR_THR_M, threshold);
+	} else {
+		val &= ~Q_REG_TX_MEM_GBL_CFG_INTR_ENA_M;
 	}
 
-	return ice_write_quad_reg_e82x(hw, quad, Q_REG_TX_MEM_GBL_CFG, val);
+	err = ice_write_quad_reg_e82x(hw, quad,
+				      Q_REG_TX_MEM_GBL_CFG,
+				      val);
+
+	return err;
 }
 
 /**
@@ -4265,7 +4172,7 @@ static int ice_read_phy_reg_e810(struct ice_hw *hw, u32 addr, u32 *val)
 	msg.msg_addr_low = lower_16_bits(addr);
 	msg.msg_addr_high = upper_16_bits(addr);
 	msg.opcode = ice_sbq_msg_rd;
-	msg.dest_dev = ice_sbq_dev_phy_0;
+	msg.dest_dev = phy_0;
 
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
 	if (err) {
@@ -4294,8 +4201,8 @@ static int ice_write_phy_reg_e810(struct ice_hw *hw, u32 addr, u32 val)
 
 	msg.msg_addr_low = lower_16_bits(addr);
 	msg.msg_addr_high = upper_16_bits(addr);
-	msg.opcode = ice_sbq_msg_wr;
-	msg.dest_dev = ice_sbq_dev_phy_0;
+	msg.opcode = ice_sbq_msg_wr_p;
+	msg.dest_dev = phy_0;
 	msg.data = val;
 
 	err = ice_sbq_rw_reg(hw, &msg, ICE_AQ_FLAG_RD);
@@ -4323,43 +4230,41 @@ static int
 ice_read_phy_tstamp_ll_e810(struct ice_hw *hw, u8 idx, u8 *hi, u32 *lo)
 {
 	struct ice_e810_params *params = &hw->ptp.phy.e810;
-	unsigned long flags;
 	u32 val;
 	int err;
 
-	spin_lock_irqsave(&params->atqbal_wq.lock, flags);
+	spin_lock_irq(&params->atqbal_wq.lock);
 
 	/* Wait for any pending in-progress low latency interrupt */
 	err = wait_event_interruptible_locked_irq(params->atqbal_wq,
 						  !(params->atqbal_flags &
 						    ATQBAL_FLAGS_INTR_IN_PROGRESS));
 	if (err) {
-		spin_unlock_irqrestore(&params->atqbal_wq.lock, flags);
+		spin_unlock_irq(&params->atqbal_wq.lock);
 		return err;
 	}
 
 	/* Write TS index to read to the PF register so the FW can read it */
-	val = FIELD_PREP(REG_LL_PROXY_H_TS_IDX, idx) | REG_LL_PROXY_H_EXEC;
-	wr32(hw, REG_LL_PROXY_H, val);
+	val = FIELD_PREP(ATQBAL_LL_TS_IDX, idx) | ATQBAL_LL_EXEC;
+	wr32(hw, PF_SB_ATQBAL, val);
 
 	/* Read the register repeatedly until the FW provides us the TS */
-	err = read_poll_timeout_atomic(rd32, val,
-				       !FIELD_GET(REG_LL_PROXY_H_EXEC, val), 10,
-				       REG_LL_PROXY_H_TIMEOUT_US, false, hw,
-				       REG_LL_PROXY_H);
+	err = rd32_poll_timeout_atomic(hw, PF_SB_ATQBAL, val,
+				       !FIELD_GET(ATQBAL_LL_EXEC, val),
+				       10, ATQBAL_LL_TIMEOUT_US);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to read PTP timestamp using low latency read\n");
-		spin_unlock_irqrestore(&params->atqbal_wq.lock, flags);
+		spin_unlock_irq(&params->atqbal_wq.lock);
 		return err;
 	}
 
 	/* High 8 bit value of the TS is on the bits 16:23 */
-	*hi = FIELD_GET(REG_LL_PROXY_H_TS_HIGH, val);
+	*hi = FIELD_GET(ATQBAL_LL_TS_HIGH, val);
 
 	/* Read the low 32 bit value and set the TS valid bit */
-	*lo = rd32(hw, REG_LL_PROXY_L) | TS_VALID;
+	*lo = rd32(hw, PF_SB_ATQBAH) | TS_VALID;
 
-	spin_unlock_irqrestore(&params->atqbal_wq.lock, flags);
+	spin_unlock_irq(&params->atqbal_wq.lock);
 
 	return 0;
 }
@@ -4488,8 +4393,6 @@ static int ice_clear_phy_tstamp_e810(struct ice_hw *hw, u8 lport, u8 idx)
  * @hw: pointer to HW struct
  *
  * Perform E810-specific PTP hardware clock initialization steps.
- *
- * Return: 0 on success, other error codes when failed to initialize TimeSync
  */
 static int ice_ptp_init_phc_e810(struct ice_hw *hw)
 {
@@ -4571,16 +4474,15 @@ static int ice_ptp_prep_phy_adj_ll_e810(struct ice_hw *hw, s32 adj)
 		return err;
 	}
 
-	wr32(hw, REG_LL_PROXY_L, adj);
-	val = FIELD_PREP(REG_LL_PROXY_H_PHY_TMR_CMD_M, REG_LL_PROXY_H_PHY_TMR_CMD_ADJ) |
-	      FIELD_PREP(REG_LL_PROXY_H_PHY_TMR_IDX_M, tmr_idx) | REG_LL_PROXY_H_EXEC;
-	wr32(hw, REG_LL_PROXY_H, val);
+	wr32(hw, PF_SB_ATQBAH, adj);
+	val = FIELD_PREP(ATQBAL_LL_PHY_TMR_CMD_M, ATQBAL_LL_PHY_TMR_CMD_ADJ) |
+	      FIELD_PREP(ATQBAL_LL_PHY_TMR_IDX_M, tmr_idx) | ATQBAL_LL_EXEC;
+	wr32(hw, PF_SB_ATQBAL, val);
 
 	/* Read the register repeatedly until the FW indicates completion */
-	err = read_poll_timeout_atomic(rd32, val,
-				       !FIELD_GET(REG_LL_PROXY_H_EXEC, val),
-				       10, REG_LL_PROXY_H_TIMEOUT_US, false, hw,
-				       REG_LL_PROXY_H);
+	err = rd32_poll_timeout_atomic(hw, PF_SB_ATQBAL, val,
+				       !FIELD_GET(ATQBAL_LL_EXEC, val),
+				       10, ATQBAL_LL_TIMEOUT_US);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to prepare PHY timer adjustment using low latency interface\n");
 		spin_unlock_irq(&params->atqbal_wq.lock);
@@ -4663,17 +4565,16 @@ static int ice_ptp_prep_phy_incval_ll_e810(struct ice_hw *hw, u64 incval)
 		return err;
 	}
 
-	wr32(hw, REG_LL_PROXY_L, lower_32_bits(incval));
-	val = FIELD_PREP(REG_LL_PROXY_H_PHY_TMR_CMD_M, REG_LL_PROXY_H_PHY_TMR_CMD_FREQ) |
-	      FIELD_PREP(REG_LL_PROXY_H_TS_HIGH, (u8)upper_32_bits(incval)) |
-	      FIELD_PREP(REG_LL_PROXY_H_PHY_TMR_IDX_M, tmr_idx) | REG_LL_PROXY_H_EXEC;
-	wr32(hw, REG_LL_PROXY_H, val);
+	wr32(hw, PF_SB_ATQBAH, lower_32_bits(incval));
+	val = FIELD_PREP(ATQBAL_LL_PHY_TMR_CMD_M, ATQBAL_LL_PHY_TMR_CMD_FREQ) |
+	      FIELD_PREP(ATQBAL_LL_TS_HIGH, (u8)upper_32_bits(incval)) |
+	      FIELD_PREP(ATQBAL_LL_PHY_TMR_IDX_M, tmr_idx) | ATQBAL_LL_EXEC;
+	wr32(hw, PF_SB_ATQBAL, val);
 
 	/* Read the register repeatedly until the FW indicates completion */
-	err = read_poll_timeout_atomic(rd32, val,
-				       !FIELD_GET(REG_LL_PROXY_H_EXEC, val),
-				       10, REG_LL_PROXY_H_TIMEOUT_US, false, hw,
-				       REG_LL_PROXY_H);
+	err = rd32_poll_timeout_atomic(hw, PF_SB_ATQBAL, val,
+				       !FIELD_GET(ATQBAL_LL_EXEC, val),
+				       10, ATQBAL_LL_TIMEOUT_US);
 	if (err) {
 		ice_debug(hw, ICE_DBG_PTP, "Failed to prepare PHY timer increment using low latency interface\n");
 		spin_unlock_irq(&params->atqbal_wq.lock);
@@ -4755,74 +4656,59 @@ ice_get_phy_tx_tstamp_ready_e810(struct ice_hw *hw, u8 port, u64 *tstamp_ready)
 	return 0;
 }
 
-/* E810 SMA functions
+/* SMA functions
  *
  * The following functions operate specifically on E810 hardware and are used
  * to access the extended GPIOs available.
  */
 
 /**
- * ice_read_sma_ctrl
+ * ice_write_pca9575_reg
  * @hw: pointer to the hw struct
- * @data: pointer to data to be read from the GPIO controller
+ * @offset: GPIO controller register offset
+ * @data: data to be written to the GPIO controller
  *
- * Read the SMA controller state. It is connected to pins 3-7 of Port 1 of the
- * PCA9575 expander, so only bits 3-7 in data are valid.
+ * Write the data to the GPIO controller register
  */
-int ice_read_sma_ctrl(struct ice_hw *hw, u8 *data)
+int ice_write_pca9575_reg(struct ice_hw *hw, u8 offset, u8 data)
 {
+	struct ice_aqc_link_topo_addr link_topo;
+	__le16 addr;
 	int status;
 	u16 handle;
-	u8 i;
+
+	memset(&link_topo, 0, sizeof(link_topo));
 
 	status = ice_get_pca9575_handle(hw, &handle);
 	if (status)
 		return status;
 
-	*data = 0;
+	link_topo.handle = cpu_to_le16(handle);
+	link_topo.topo_params.node_type_ctx =
+		(ICE_AQC_LINK_TOPO_NODE_CTX_PROVIDED <<
+		 ICE_AQC_LINK_TOPO_NODE_CTX_S);
 
-	for (i = ICE_SMA_MIN_BIT; i <= ICE_SMA_MAX_BIT; i++) {
-		bool pin;
+	addr = cpu_to_le16((u16)offset);
 
-		status = ice_aq_get_gpio(hw, handle, i + ICE_PCA9575_P1_OFFSET,
-					 &pin, NULL);
-		if (status)
-			break;
-		*data |= (u8)(!pin) << i;
-	}
-
-	return status;
+	return ice_aq_write_i2c(hw, link_topo, 0, addr, 1, &data, NULL);
 }
 
 /**
- * ice_write_sma_ctrl
+ * ice_is_pca9575_present
  * @hw: pointer to the hw struct
- * @data: data to be written to the GPIO controller
  *
- * Write the data to the SMA controller. It is connected to pins 3-7 of Port 1
- * of the PCA9575 expander, so only bits 3-7 in data are valid.
+ * Check if the SW IO expander is present in the netlist
  */
-int ice_write_sma_ctrl(struct ice_hw *hw, u8 data)
+bool ice_is_pca9575_present(struct ice_hw *hw)
 {
+	u16 handle = 0;
 	int status;
-	u16 handle;
-	u8 i;
 
 	status = ice_get_pca9575_handle(hw, &handle);
-	if (status)
-		return status;
+	if (!status && handle)
+		return true;
 
-	for (i = ICE_SMA_MIN_BIT; i <= ICE_SMA_MAX_BIT; i++) {
-		bool pin;
-
-		pin = !(data & (1 << i));
-		status = ice_aq_set_gpio(hw, handle, i + ICE_PCA9575_P1_OFFSET,
-					 pin, NULL);
-		if (status)
-			break;
-	}
-
-	return status;
+	return false;
 }
 
 /**
@@ -4909,7 +4795,7 @@ static void ice_ptp_init_phy_e810(struct ice_ptp_hw *ptp)
  *
  * Perform E830-specific PTP hardware clock initialization steps.
  */
-static void ice_ptp_init_phc_e830(const struct ice_hw *hw)
+static void ice_ptp_init_phc_e830(struct ice_hw *hw)
 {
 	ice_ptp_cfg_sync_delay(hw, ICE_E810_E830_SYNC_DELAY);
 }
@@ -4922,14 +4808,17 @@ static void ice_ptp_init_phc_e830(const struct ice_hw *hw)
  * Prepare the PHY port for a new increment value by programming the PHC
  * GLTSYN_INCVAL_L and GLTSYN_INCVAL_H registers. The actual change is
  * completed by FW automatically.
+ *
+ * Return: 0 on success
  */
-static void ice_ptp_write_direct_incval_e830(const struct ice_hw *hw,
-					     u64 incval)
+static int ice_ptp_write_direct_incval_e830(struct ice_hw *hw, u64 incval)
 {
 	u8 tmr_idx = hw->func_caps.ts_func_info.tmr_index_owned;
 
 	wr32(hw, GLTSYN_INCVAL_L(tmr_idx), lower_32_bits(incval));
 	wr32(hw, GLTSYN_INCVAL_H(tmr_idx), upper_32_bits(incval));
+
+	return 0;
 }
 
 /**
@@ -4943,15 +4832,18 @@ static void ice_ptp_write_direct_incval_e830(const struct ice_hw *hw,
  *
  * The time value is the upper 32 bits of the PHY timer, usually in units of
  * nominal nanoseconds.
+ *
+ * Return: 0 on success
  */
-static void ice_ptp_write_direct_phc_time_e830(const struct ice_hw *hw,
-					       u64 time)
+static int ice_ptp_write_direct_phc_time_e830(struct ice_hw *hw, u64 time)
 {
 	u8 tmr_idx = hw->func_caps.ts_func_info.tmr_index_owned;
 
 	wr32(hw, GLTSYN_TIME_0(tmr_idx), 0);
 	wr32(hw, GLTSYN_TIME_L(tmr_idx), lower_32_bits(time));
 	wr32(hw, GLTSYN_TIME_H(tmr_idx), upper_32_bits(time));
+
+	return 0;
 }
 
 /**
@@ -4979,9 +4871,10 @@ static int ice_ptp_port_cmd_e830(struct ice_hw *hw, enum ice_ptp_tmr_cmd cmd)
  *
  * Read a 40bit timestamp value out of the timestamp block of the external PHY
  * on the E830 device.
+ *
+ * Return: 0 on success
  */
-static void ice_read_phy_tstamp_e830(const struct ice_hw *hw, u8 idx,
-				     u64 *tstamp)
+static int ice_read_phy_tstamp_e830(struct ice_hw *hw, u8 idx, u64 *tstamp)
 {
 	u32 hi, lo;
 
@@ -4993,6 +4886,8 @@ static void ice_read_phy_tstamp_e830(const struct ice_hw *hw, u8 idx,
 	 */
 	*tstamp = FIELD_PREP(PHY_EXT_40B_HIGH_M, hi) |
 		  FIELD_PREP(PHY_EXT_40B_LOW_M, lo);
+
+	return 0;
 }
 
 /**
@@ -5000,13 +4895,17 @@ static void ice_read_phy_tstamp_e830(const struct ice_hw *hw, u8 idx,
  * @hw: pointer to the HW struct
  * @port: the PHY port to read
  * @tstamp_ready: contents of the Tx memory status register
+ *
+ * Return: 0 on success
  */
-static void ice_get_phy_tx_tstamp_ready_e830(const struct ice_hw *hw, u8 port,
-					     u64 *tstamp_ready)
+static int
+ice_get_phy_tx_tstamp_ready_e830(struct ice_hw *hw, u8 port, u64 *tstamp_ready)
 {
 	*tstamp_ready = rd32(hw, E830_PRTMAC_TS_TX_MEM_VALID_H);
 	*tstamp_ready <<= 32;
 	*tstamp_ready |= rd32(hw, E830_PRTMAC_TS_TX_MEM_VALID_L);
+
+	return 0;
 }
 
 /**
@@ -5019,10 +4918,592 @@ static void ice_ptp_init_phy_e830(struct ice_ptp_hw *ptp)
 	ptp->ports_per_phy = 4;
 }
 
+/* Clock Generation Unit functions for interacting with DPLL
+ *
+ * The following functions operate on hardware with a Clock Generation Unit
+ * and DPLL accessible over firmware.
+ */
+
+/**
+ * ice_is_unmanaged_cgu_in_netlist - check for unmanaged CGU presence
+ * @hw: pointer to the hw struct
+ *
+ * Check if the Clock Generation Unit (CGU) device is present in the netlist.
+ * Save the CGU part number in the hw structure for later use.
+ * Return:
+ * * true - cgu is present
+ * * false - cgu is not present
+ */
+bool ice_is_unmanaged_cgu_in_netlist(struct ice_hw *hw)
+{
+	if (!ice_find_netlist_node(hw, ICE_AQC_LINK_TOPO_NODE_TYPE_CLK_CTRL,
+				   ICE_AQC_LINK_TOPO_NODE_CTX_GLOBAL,
+				   ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL80640,
+				   NULL)) {
+		hw->ptp.cgu_part_number =
+			ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL80640;
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * ice_is_cgu_in_netlist - check for CGU presence
+ * @hw: pointer to the hw struct
+ *
+ * Check if the Clock Generation Unit (CGU) device is present in the netlist.
+ * Save the CGU part number in the hw structure for later use.
+ * Return:
+ * * true - cgu is present
+ * * false - cgu is not present
+ */
+bool ice_is_cgu_in_netlist(struct ice_hw *hw)
+{
+	if (!ice_find_netlist_node(hw, ICE_AQC_LINK_TOPO_NODE_TYPE_CLK_CTRL,
+				   ICE_AQC_LINK_TOPO_NODE_CTX_GLOBAL,
+				   ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032,
+				   NULL)) {
+		hw->ptp.cgu_part_number =
+			ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032;
+		return true;
+	} else if (!ice_find_netlist_node(hw,
+					  ICE_AQC_LINK_TOPO_NODE_TYPE_CLK_CTRL,
+					  ICE_AQC_LINK_TOPO_NODE_CTX_GLOBAL,
+					  ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384,
+					  NULL)) {
+		hw->ptp.cgu_part_number =
+			ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384;
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * ice_cgu_get_pin_desc_e823 - get pin description array
+ * @hw: pointer to the hw struct
+ * @input: if request is done against input or output pin
+ * @size: number of inputs/outputs
+ *
+ * Return: pointer to pin description array associated to given hw.
+ */
+static const struct ice_cgu_pin_desc *
+ice_cgu_get_pin_desc_e823(const struct ice_hw *hw, bool input, int *size)
+{
+	static const struct ice_cgu_pin_desc *t;
+
+	if (hw->ptp.cgu_part_number ==
+	    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032) {
+		if (input) {
+			t = ice_e823_zl_cgu_inputs;
+			*size = ARRAY_SIZE(ice_e823_zl_cgu_inputs);
+#if defined(CONFIG_DPLL)
+		} else {
+			t = ice_e823_zl_cgu_outputs;
+			*size = ARRAY_SIZE(ice_e823_zl_cgu_outputs);
+		}
+#else /* defined(CONFIG_DPLL) */
+		}
+#endif
+	} else if (hw->ptp.cgu_part_number ==
+		   ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384) {
+		if (input) {
+			t = ice_e823_si_cgu_inputs;
+			*size = ARRAY_SIZE(ice_e823_si_cgu_inputs);
+#if defined(CONFIG_DPLL)
+		} else {
+			t = ice_e823_si_cgu_outputs;
+			*size = ARRAY_SIZE(ice_e823_si_cgu_outputs);
+		}
+#else /* defined(CONFIG_DPLL) */
+	}
+#endif
+	} else {
+		t = NULL;
+		*size = 0;
+	}
+
+	return t;
+}
+
+/**
+ * ice_cgu_get_pin_desc - get pin description array
+ * @hw: pointer to the hw struct
+ * @input: if request is done against input or output pins
+ * @size: size of array returned by function
+ *
+ * Return: pointer to pin description array associated to given hw.
+ */
+static const struct ice_cgu_pin_desc *
+ice_cgu_get_pin_desc(const struct ice_hw *hw, bool input, int *size)
+{
+	const struct ice_cgu_pin_desc *t = NULL;
+
+	switch (hw->device_id) {
+#if defined(CONFIG_DPLL)
+	case ICE_DEV_ID_E810C_SFP:
+		if (input) {
+			t = ice_e810t_sfp_cgu_inputs;
+			*size = ARRAY_SIZE(ice_e810t_sfp_cgu_inputs);
+		} else {
+			t = ice_e810t_sfp_cgu_outputs;
+			*size = ARRAY_SIZE(ice_e810t_sfp_cgu_outputs);
+		}
+		break;
+	case ICE_DEV_ID_E810C_QSFP:
+		if (input) {
+			t = ice_e810t_qsfp_cgu_inputs;
+			*size = ARRAY_SIZE(ice_e810t_qsfp_cgu_inputs);
+		} else {
+			t = ice_e810t_qsfp_cgu_outputs;
+			*size = ARRAY_SIZE(ice_e810t_qsfp_cgu_outputs);
+		}
+		break;
+	case ICE_DEV_ID_E830_BACKPLANE:
+	case ICE_DEV_ID_E830_QSFP56:
+	case ICE_DEV_ID_E830_SFP:
+	case ICE_DEV_ID_E830C_BACKPLANE:
+	case ICE_DEV_ID_E830_L_BACKPLANE:
+	case ICE_DEV_ID_E830C_QSFP:
+	case ICE_DEV_ID_E830_L_QSFP:
+	case ICE_DEV_ID_E830C_SFP:
+	case ICE_DEV_ID_E830_L_SFP:
+		if (input) {
+			t = ice_e830_unmanaged_inputs;
+			*size = ARRAY_SIZE(ice_e830_unmanaged_inputs);
+		} else {
+			t = ice_e830_unmanaged_outputs;
+			*size = ARRAY_SIZE(ice_e830_unmanaged_outputs);
+		}
+		break;
+#else /* defined(CONFIG_DPLL) */
+	case ICE_DEV_ID_E810C_SFP:
+	case ICE_DEV_ID_E810C_QSFP:
+		if (input) {
+			t = ice_e810t_cgu_inputs;
+			*size = ARRAY_SIZE(ice_e810t_cgu_inputs);
+		}
+		break;
+#endif /* defined(CONFIG_DPLL) */
+	case ICE_DEV_ID_E823L_10G_BASE_T:
+	case ICE_DEV_ID_E823L_1GBE:
+	case ICE_DEV_ID_E823L_BACKPLANE:
+	case ICE_DEV_ID_E823L_QSFP:
+	case ICE_DEV_ID_E823L_SFP:
+	case ICE_DEV_ID_E823C_10G_BASE_T:
+	case ICE_DEV_ID_E823C_BACKPLANE:
+	case ICE_DEV_ID_E823C_QSFP:
+	case ICE_DEV_ID_E823C_SFP:
+	case ICE_DEV_ID_E823C_SGMII:
+		t = ice_cgu_get_pin_desc_e823(hw, input, size);
+		break;
+	default:
+		break;
+	}
+
+	return t;
+}
+
+#if defined(CONFIG_DPLL)
+/**
+ * ice_cgu_get_pin_num - get pin description array size
+ * @hw: pointer to the hw struct
+ * @input: if request is done against input or output pins
+ *
+ * Return: size of pin description array for given hw.
+ */
+int ice_cgu_get_pin_num(struct ice_hw *hw, bool input)
+{
+	const struct ice_cgu_pin_desc *t;
+	int size;
+
+	t = ice_cgu_get_pin_desc(hw, input, &size);
+	if (t)
+		return size;
+
+	return 0;
+}
+
+/**
+ * ice_cgu_get_pin_type - get pin's type
+ * @hw: pointer to the hw struct
+ * @pin: pin index
+ * @input: if request is done against input or output pin
+ *
+ * Return: type of a pin.
+ */
+enum dpll_pin_type
+ice_cgu_get_pin_type(const struct ice_hw *hw, u8 pin, bool input)
+{
+	const struct ice_cgu_pin_desc *t;
+	int t_size = 0;
+
+	t = ice_cgu_get_pin_desc(hw, input, &t_size);
+
+	if (!t)
+		return 0;
+
+	if (pin >= t_size)
+		return 0;
+
+	return t[pin].type;
+}
+
+/**
+ * ice_cgu_get_pin_freq_supp - get pin's supported frequency
+ * @hw: pointer to the hw struct
+ * @pin: pin index
+ * @input: if request is done against input or output pin
+ * @num: output number of supported frequencies
+ *
+ * Get frequency supported number and array of supported frequencies.
+ *
+ * Return: array of supported frequencies for given pin.
+ */
+struct dpll_pin_frequency *
+ice_cgu_get_pin_freq_supp(const struct ice_hw *hw, u8 pin, bool input, u8 *num)
+{
+	const struct ice_cgu_pin_desc *t;
+	int t_size = 0;
+
+	*num = 0;
+	t = ice_cgu_get_pin_desc(hw, input, &t_size);
+	if (!t)
+		return NULL;
+	if (pin >= t_size)
+		return NULL;
+	*num = t[pin].freq_supp_num;
+
+	return t[pin].freq_supp;
+}
+
+#endif /* defined(CONFIG_DPLL) */
+/**
+ * ice_cgu_get_pin_name - get pin's name
+ * @hw: pointer to the hw struct
+ * @pin: pin index
+ * @input: if request is done against input or output pin
+ *
+ * Return:
+ * * null terminated char array with name
+ * * NULL in case of failure
+ */
+const char *ice_cgu_get_pin_name(const struct ice_hw *hw, u8 pin, bool input)
+{
+	const struct ice_cgu_pin_desc *t;
+	int t_size = 0;
+
+	t = ice_cgu_get_pin_desc(hw, input, &t_size);
+
+	if (!t)
+		return NULL;
+
+#if !defined(CONFIG_DPLL)
+	if (hw->device_id == ICE_DEV_ID_E810C_SFP) {
+	/* Skip second PHY recovered clocks as they are not represented
+	 * in the netlist
+	 */
+		if (pin >= ZL_REF2P && pin < t_size)
+			pin += ICE_E810_RCLK_PINS_NUM;
+	}
+#endif /* !defined(CONFIG_DPLL) */
+	if (pin >= t_size)
+		return NULL;
+
+	return t[pin].name;
+}
+
+/**
+ * ice_cgu_state_to_name - get the name of CGU state
+ * @state: state of the CGU
+ *
+ * Return: name of CGU state
+ */
+const char *ice_cgu_state_to_name(enum dpll_lock_status state)
+{
+	switch (state) {
+	case DPLL_LOCK_STATUS_UNLOCKED:
+		return "freerun";
+	case DPLL_LOCK_STATUS_LOCKED:
+		return "locked";
+	case DPLL_LOCK_STATUS_LOCKED_HO_ACQ:
+		return "locked_ho_acq";
+	case DPLL_LOCK_STATUS_HOLDOVER:
+		return "holdover";
+	default:
+		return "invalid";
+	}
+}
+
+/**
+ * ice_get_dpll_ref_sw_status - returns dpll ref sw monitors from hardware
+ * @hw: pointer to the HW struct
+ * @dpll_idx: Index of internal DPLL unit
+ * @los: pointer to a buffer for returning state of los
+ * @scm: pointer to a buffer for returning state of scm
+ * @cfm: pointer to a buffer for returning state of cfm
+ * @gst: pointer to a buffer for returning state of gst
+ * @pfm: pointer to a buffer for returning state of pfm
+ * @esync: pointer to a buffer for returning state of esync
+ * This function will read the state of the DPLL(dpll_idx) switching monitors.
+ * Non-null 'los', 'scm', 'cfm', 'gst', 'pfm' and 'esync' buffer are used to
+ * retrieve current state of the DPLL switching monitors state.
+ *
+ */
+int
+ice_get_dpll_ref_sw_status(struct ice_hw *hw, u8 dpll_idx, u8 *los, u8 *scm,
+			   u8 *cfm, u8 *gst, u8 *pfm, u8 *esync)
+{
+	u8 ref_state, eec_mode, dpll_state, config;
+	s64 ph_offset;
+	int err;
+
+	if (dpll_idx >= ICE_CGU_DPLL_MAX)
+		return -EINVAL;
+	if (!los || !scm || !cfm || !gst || !pfm || !esync)
+		return -EINVAL;
+
+	err = ice_aq_get_cgu_dpll_status(hw, dpll_idx, &ref_state, &dpll_state,
+					 &config, &ph_offset, &eec_mode);
+	if (err)
+		return err;
+	*los = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_LOS);
+	*scm = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_SCM);
+	*cfm = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_CFM);
+	*gst = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_GST);
+	*pfm = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_PFM);
+	*esync = !!(ref_state & ICE_AQC_GET_CGU_DPLL_STATUS_REF_SW_ESYNC);
+
+	return 0;
+}
+
+/**
+ * ice_set_dpll_ref_sw_status
+ * @hw: pointer to the HW struct
+ * @dpll_idx: Index of internal DPLL unit
+ * @monitor: DPLL switching monitor type to be updated.
+ * @enable:  1:enable 0:disable.
+ * This function will enable/disablee the
+ * DPLL(dpll_idx) switching monitor (monitor).
+ *
+ */
+int
+ice_set_dpll_ref_sw_status(struct ice_hw *hw, u8 dpll_idx,
+			   u8 monitor, u8 enable)
+{
+	u8 ref_state, ref_state_update, eec_mode, config, dpll_state;
+	s64 ph_offset;
+	int err;
+
+	if (dpll_idx >= ICE_CGU_DPLL_MAX)
+		return -EINVAL;
+
+	err = ice_aq_get_cgu_dpll_status(hw, dpll_idx, &ref_state, &dpll_state,
+					 &config, &ph_offset, &eec_mode);
+	if (err)
+		return err;
+	if (!enable)
+		ref_state_update = ref_state & (~monitor);
+	else
+		ref_state_update = ref_state | monitor;
+
+	if (ref_state_update == ref_state)
+		return 0;
+
+	ice_aq_set_cgu_dpll_config(hw, dpll_idx, ref_state_update,
+				   config, eec_mode);
+
+	return 0;
+}
+
+/**
+ * ice_get_cgu_state - get the state of the DPLL
+ * @hw: pointer to the hw struct
+ * @dpll_idx: Index of internal DPLL unit
+ * @last_dpll_state: last known state of DPLL
+ * @pin: pointer to a buffer for returning currently active pin
+ * @ref_state: reference clock state
+ * @eec_mode: eec mode of the DPLL
+ * @phase_offset: pointer to a buffer for returning phase offset
+ * @dpll_state: state of the DPLL (output)
+ *
+ * This function will read the state of the DPLL(dpll_idx). Non-null
+ * 'pin', 'ref_state', 'eec_mode' and 'phase_offset' parameters are used to
+ * retrieve currently active pin, state, mode and phase_offset respectively.
+ *
+ * Return: state of the DPLL
+ */
+int ice_get_cgu_state(struct ice_hw *hw, u8 dpll_idx,
+		      enum dpll_lock_status last_dpll_state, u8 *pin,
+		      u8 *ref_state, u8 *eec_mode, s64 *phase_offset,
+		      enum dpll_lock_status *dpll_state)
+{
+	u8 hw_ref_state, hw_dpll_state, hw_eec_mode, hw_config;
+	s64 hw_phase_offset;
+	int status;
+
+	status = ice_aq_get_cgu_dpll_status(hw, dpll_idx, &hw_ref_state,
+					    &hw_dpll_state, &hw_config,
+					    &hw_phase_offset, &hw_eec_mode);
+	if (status)
+		return status;
+
+	if (pin)
+		/* current ref pin in dpll_state_refsel_status_X register */
+		*pin = FIELD_GET(ICE_AQC_GET_CGU_DPLL_CONFIG_CLK_REF_SEL,
+				 hw_config);
+	if (phase_offset)
+		*phase_offset = hw_phase_offset;
+	if (ref_state)
+		*ref_state = hw_ref_state;
+	if (eec_mode)
+		*eec_mode = hw_eec_mode;
+	if (!dpll_state)
+		return 0;
+
+	/* According to ZL DPLL documentation, once state reach LOCKED_HO_ACQ
+	 * it would never return to FREERUN. This aligns to ITU-T G.781
+	 * Recommendation. We cannot report HOLDOVER as HO memory is cleared
+	 * while switching to another reference.
+	 * Only for situations where previous state was either: "LOCKED without
+	 * HO_ACQ" or "HOLDOVER" we actually back to FREERUN.
+	 */
+	if (hw_dpll_state & ICE_AQC_GET_CGU_DPLL_STATUS_STATE_LOCK) {
+		if (hw_dpll_state & ICE_AQC_GET_CGU_DPLL_STATUS_STATE_HO_READY)
+			*dpll_state = DPLL_LOCK_STATUS_LOCKED_HO_ACQ;
+		else
+			*dpll_state = DPLL_LOCK_STATUS_LOCKED;
+	} else if (last_dpll_state == DPLL_LOCK_STATUS_LOCKED_HO_ACQ ||
+		   last_dpll_state == DPLL_LOCK_STATUS_HOLDOVER) {
+		*dpll_state = DPLL_LOCK_STATUS_HOLDOVER;
+	} else {
+		*dpll_state = DPLL_LOCK_STATUS_UNLOCKED;
+	}
+
+	return 0;
+}
+
+#if defined(CONFIG_DPLL)
+/**
+ * ice_get_cgu_rclk_pin_info - get info on available recovered clock pins
+ * @hw: pointer to the hw struct
+ * @base_idx: returns index of first recovered clock pin on device
+ * @pin_num: returns number of recovered clock pins available on device
+ *
+ * Based on hw provide caller info about recovery clock pins available on the
+ * board.
+ *
+ * Return:
+ * * 0 - success, information is valid
+ * * negative - failure, information is not valid
+ */
+int ice_get_cgu_rclk_pin_info(struct ice_hw *hw, u8 *base_idx, u8 *pin_num)
+{
+	u8 phy_idx;
+	int ret;
+
+	switch (hw->device_id) {
+	case ICE_DEV_ID_E810C_SFP:
+	case ICE_DEV_ID_E810C_QSFP:
+
+		ret = ice_get_pf_c827_idx(hw, &phy_idx);
+		if (ret)
+			return ret;
+		*base_idx = E810T_CGU_INPUT_C827(phy_idx, ICE_RCLKA_PIN);
+		*pin_num = ICE_E810_RCLK_PINS_NUM;
+		ret = 0;
+		break;
+	case ICE_DEV_ID_E823L_10G_BASE_T:
+	case ICE_DEV_ID_E823L_1GBE:
+	case ICE_DEV_ID_E823L_BACKPLANE:
+	case ICE_DEV_ID_E823L_QSFP:
+	case ICE_DEV_ID_E823L_SFP:
+	case ICE_DEV_ID_E823C_10G_BASE_T:
+	case ICE_DEV_ID_E823C_BACKPLANE:
+	case ICE_DEV_ID_E823C_QSFP:
+	case ICE_DEV_ID_E823C_SFP:
+	case ICE_DEV_ID_E823C_SGMII:
+		*pin_num = ICE_E822_RCLK_PINS_NUM;
+		ret = 0;
+		if (hw->ptp.cgu_part_number ==
+		    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032)
+			*base_idx = ZL_REF1P;
+		else if (hw->ptp.cgu_part_number ==
+			 ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384)
+			*base_idx = SI_REF1P;
+		else
+			ret = -ENODEV;
+
+		break;
+	default:
+		ret = -ENODEV;
+		break;
+	}
+
+	return ret;
+}
+
+/**
+ * ice_cgu_get_output_pin_state_caps - get output pin state capabilities
+ * @hw: pointer to the hw struct
+ * @pin_id: id of a pin
+ * @caps: capabilities to modify
+ *
+ * Return:
+ * * 0 - success, state capabilities were modified
+ * * negative - failure, capabilities were not modified
+ */
+int ice_cgu_get_output_pin_state_caps(struct ice_hw *hw, u8 pin_id,
+				      unsigned long *caps)
+{
+	bool can_change = true;
+
+	switch (hw->device_id) {
+	case ICE_DEV_ID_E810C_SFP:
+		if (pin_id == ZL_OUT2 || pin_id == ZL_OUT3)
+			can_change = false;
+		break;
+	case ICE_DEV_ID_E810C_QSFP:
+		if (pin_id == ZL_OUT2 || pin_id == ZL_OUT3 || pin_id == ZL_OUT4)
+			can_change = false;
+		break;
+	case ICE_DEV_ID_E823L_10G_BASE_T:
+	case ICE_DEV_ID_E823L_1GBE:
+	case ICE_DEV_ID_E823L_BACKPLANE:
+	case ICE_DEV_ID_E823L_QSFP:
+	case ICE_DEV_ID_E823L_SFP:
+	case ICE_DEV_ID_E823C_10G_BASE_T:
+	case ICE_DEV_ID_E823C_BACKPLANE:
+	case ICE_DEV_ID_E823C_QSFP:
+	case ICE_DEV_ID_E823C_SFP:
+	case ICE_DEV_ID_E823C_SGMII:
+		if (hw->ptp.cgu_part_number ==
+		    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032 &&
+		    pin_id == ZL_OUT2)
+			can_change = false;
+		else if (hw->ptp.cgu_part_number ==
+			 ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384 &&
+			 pin_id == SI_OUT1)
+			can_change = false;
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (can_change)
+		*caps |= DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE;
+	else
+		*caps &= ~DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE;
+
+	return 0;
+}
+
+#endif /* CONFIG_DPLL */
 /* Device agnostic functions
  *
- * The following functions implement shared behavior common to all devices,
- * possibly calling a device specific implementation where necessary.
+ * The following functions implement shared behavior common to both E82X
+ * and E810 devices, possibly calling a device specific implementation where
+ * necessary.
  */
 
 /**
@@ -5048,7 +5529,7 @@ bool ice_ptp_lock(struct ice_hw *hw)
 #define MAX_TRIES 15
 
 	for (i = 0; i < MAX_TRIES; i++) {
-		hw_lock = rd32(hw, PFTSYN_SEM + (PFTSYN_SEM_BYTES * hw->pf_id));
+		hw_lock = rd32(hw, PFTSYN_SEM);
 		hw_lock = hw_lock & PFTSYN_SEM_BUSY_M;
 		if (hw_lock) {
 			/* Somebody is holding the lock */
@@ -5071,7 +5552,7 @@ bool ice_ptp_lock(struct ice_hw *hw)
  */
 void ice_ptp_unlock(struct ice_hw *hw)
 {
-	wr32(hw, PFTSYN_SEM + (PFTSYN_SEM_BYTES * hw->pf_id), 0);
+	wr32(hw, PFTSYN_SEM, 0);
 }
 
 /**
@@ -5096,7 +5577,7 @@ void ice_ptp_init_hw(struct ice_hw *hw)
 		ice_ptp_init_phy_e82x(ptp);
 		break;
 	case ICE_MAC_GENERIC_3K_E825:
-		ice_ptp_init_phy_e825(hw);
+		ice_ptp_init_phy_e825c(hw);
 		break;
 	default:
 		return;
@@ -5112,11 +5593,6 @@ void ice_ptp_init_hw(struct ice_hw *hw)
  * Prepare one port for the upcoming timer sync command. Do not use this for
  * programming only a single port, instead use ice_ptp_one_port_cmd() to
  * ensure non-modified ports get properly initialized to ICE_PTP_NOP.
- *
- * Return:
- * * %0     - success
- *  %-EBUSY - PHY type not supported
- * * %other - failed to write port command
  */
 static int ice_ptp_write_port_cmd(struct ice_hw *hw, u8 port,
 				  enum ice_ptp_tmr_cmd cmd)
@@ -5140,10 +5616,6 @@ static int ice_ptp_write_port_cmd(struct ice_hw *hw, u8 port,
  * Prepare one port for executing a timer command, while preparing all other
  * ports to ICE_PTP_NOP. This allows executing a command on a single port
  * while ensuring all other ports do not execute stale commands.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write port command
  */
 int ice_ptp_one_port_cmd(struct ice_hw *hw, u8 configured_port,
 			 enum ice_ptp_tmr_cmd configured_cmd)
@@ -5151,16 +5623,15 @@ int ice_ptp_one_port_cmd(struct ice_hw *hw, u8 configured_port,
 	u32 port;
 
 	for (port = 0; port < hw->ptp.num_lports; port++) {
+		enum ice_ptp_tmr_cmd cmd;
 		int err;
 
 		/* Program the configured port with the configured command,
 		 * program all other ports with ICE_PTP_NOP.
 		 */
-		if (port == configured_port)
-			err = ice_ptp_write_port_cmd(hw, port, configured_cmd);
-		else
-			err = ice_ptp_write_port_cmd(hw, port, ICE_PTP_NOP);
+		cmd = port == configured_port ? configured_cmd : ICE_PTP_NOP;
 
+		err = ice_ptp_write_port_cmd(hw, port, cmd);
 		if (err)
 			return err;
 	}
@@ -5176,10 +5647,6 @@ int ice_ptp_one_port_cmd(struct ice_hw *hw, u8 configured_port,
  * Prepare all PHY ports on this device for the requested timer command. For
  * some families this can be done in one shot, but for other families each
  * port must be configured individually.
- *
- * Return:
- * * %0     - success
- * * %other - failed to write port command
  */
 static int ice_ptp_port_cmd(struct ice_hw *hw, enum ice_ptp_tmr_cmd cmd)
 {
@@ -5249,36 +5716,34 @@ static int ice_ptp_tmr_cmd(struct ice_hw *hw, enum ice_ptp_tmr_cmd cmd)
  * step process:
  *
  * 1) write the new init time to the source timer shadow registers
- * 2) write the new init time to the PHY timer shadow registers
+ * 2) write the new init time to the phy timer shadow registers
  * 3) issue an init_time timer command to synchronously switch both the source
  *    and port timers to the new init time value at the next clock cycle.
  */
 int ice_ptp_init_time(struct ice_hw *hw, u64 time)
 {
-	u8 tmr_idx;
 	int err;
+	u8 tmr_idx;
 
 	tmr_idx = hw->func_caps.ts_func_info.tmr_index_owned;
 
 	/* Source timers */
 	/* For E830 we don't need to use shadow registers, its automatic */
-	if (hw->mac_type == ICE_MAC_E830) {
-		ice_ptp_write_direct_phc_time_e830(hw, time);
-		return 0;
-	}
+	if (hw->mac_type == ICE_MAC_E830)
+		return ice_ptp_write_direct_phc_time_e830(hw, time);
 
 	wr32(hw, GLTSYN_SHTIME_L(tmr_idx), lower_32_bits(time));
 	wr32(hw, GLTSYN_SHTIME_H(tmr_idx), upper_32_bits(time));
 	wr32(hw, GLTSYN_SHTIME_0(tmr_idx), 0);
 
-	/* PHY timers */
+	/* PHY Clks */
 	/* Fill Rx and Tx ports and send msg to PHY */
 	switch (hw->mac_type) {
 	case ICE_MAC_E810:
-		err = ice_ptp_prep_phy_time_e810(hw, time & 0xFFFFFFFF);
+		err = ice_ptp_prep_phy_time_e810(hw, (u32)(time & 0xFFFFFFFF));
 		break;
 	case ICE_MAC_GENERIC:
-		err = ice_ptp_prep_phy_time_e82x(hw, time & 0xFFFFFFFF);
+		err = ice_ptp_prep_phy_time_e82x(hw, (u32)(time & 0xFFFFFFFF));
 		break;
 	case ICE_MAC_GENERIC_3K_E825:
 		err = ice_ptp_prep_phy_time_eth56g(hw,
@@ -5299,7 +5764,7 @@ int ice_ptp_init_time(struct ice_hw *hw, u64 time)
  * @hw: pointer to HW struct
  * @incval: Source timer increment value per clock cycle
  *
- * Program the PHC with a new increment value. This requires a three-step
+ * Program the timers with a new increment value. This requires a three-step
  * process:
  *
  * 1) Write the increment value to the source timer shadow registers
@@ -5310,16 +5775,14 @@ int ice_ptp_init_time(struct ice_hw *hw, u64 time)
  */
 int ice_ptp_write_incval(struct ice_hw *hw, u64 incval)
 {
-	u8 tmr_idx;
 	int err;
+	u8 tmr_idx;
 
 	tmr_idx = hw->func_caps.ts_func_info.tmr_index_owned;
 
 	/* For E830 we don't need to use shadow registers, its automatic */
-	if (hw->mac_type == ICE_MAC_E830) {
-		ice_ptp_write_direct_incval_e830(hw, incval);
-		return 0;
-	}
+	if (hw->mac_type == ICE_MAC_E830)
+		return ice_ptp_write_direct_incval_e830(hw, incval);
 
 	/* Shadow Adjust */
 	wr32(hw, GLTSYN_SHADJ_L(tmr_idx), lower_32_bits(incval));
@@ -5381,15 +5844,15 @@ int ice_ptp_write_incval_locked(struct ice_hw *hw, u64 incval)
  */
 int ice_ptp_adj_clock(struct ice_hw *hw, s32 adj)
 {
-	u8 tmr_idx;
 	int err;
+	u8 tmr_idx;
 
 	tmr_idx = hw->func_caps.ts_func_info.tmr_index_owned;
 
 	/* Write the desired clock adjustment into the GLTSYN_SHADJ register.
-	 * For an ICE_PTP_ADJ_TIME command, this set of registers represents
-	 * the value to add to the clock time. It supports subtraction by
-	 * interpreting the value as a 2's complement integer.
+	 * For an ICE_PTP_ADJ_TIME command, this set of registers represents the value
+	 * to add to the clock time. It supports subtraction by interpreting
+	 * the value as a 2's complement integer.
 	 */
 	wr32(hw, GLTSYN_SHADJ_L(tmr_idx), 0);
 	wr32(hw, GLTSYN_SHADJ_H(tmr_idx), adj);
@@ -5418,13 +5881,13 @@ int ice_ptp_adj_clock(struct ice_hw *hw, s32 adj)
 }
 
 /**
- * ice_read_phy_tstamp - Read a PHY timestamp from the timestamo block
+ * ice_read_phy_tstamp - Read a PHY timestamp from the timestamp block
  * @hw: pointer to the HW struct
- * @block: the block to read from
+ * @block: the block/port to read from
  * @idx: the timestamp index to read
  * @tstamp: on return, the 40bit timestamp value
  *
- * Read a 40bit timestamp value out of the timestamp block. For E822 devices,
+ * Read a 40bit timestamp value out of the timestamp block. For E82X devices,
  * the block is the quad to read from. For E810 devices, the block is the
  * logical port to read from.
  */
@@ -5434,8 +5897,7 @@ int ice_read_phy_tstamp(struct ice_hw *hw, u8 block, u8 idx, u64 *tstamp)
 	case ICE_MAC_E810:
 		return ice_read_phy_tstamp_e810(hw, block, idx, tstamp);
 	case ICE_MAC_E830:
-		ice_read_phy_tstamp_e830(hw, idx, tstamp);
-		return 0;
+		return ice_read_phy_tstamp_e830(hw, idx, tstamp);
 	case ICE_MAC_GENERIC:
 		return ice_read_phy_tstamp_e82x(hw, block, idx, tstamp);
 	case ICE_MAC_GENERIC_3K_E825:
@@ -5455,7 +5917,7 @@ int ice_read_phy_tstamp(struct ice_hw *hw, u8 block, u8 idx, u64 *tstamp)
  * returning it. This resets the memory status bit for the timestamp index
  * allowing it to be reused for another timestamp in the future.
  *
- * For E822 devices, the block number is the PHY quad to clear from. For E810
+ * For E82X devices, the block number is the PHY quad to clear from. For E810
  * devices, the block number is the logical port to clear from.
  *
  * This function must only be called on a timestamp index whose valid bit is
@@ -5473,51 +5935,6 @@ int ice_clear_phy_tstamp(struct ice_hw *hw, u8 block, u8 idx)
 	default:
 		return -EOPNOTSUPP;
 	}
-}
-
-/**
- * ice_get_pf_c827_idx - find and return the C827 index for the current pf
- * @hw: pointer to the hw struct
- * @idx: index of the found C827 PHY
- * Return:
- * * 0 - success
- * * negative - failure
- */
-static int ice_get_pf_c827_idx(struct ice_hw *hw, u8 *idx)
-{
-	struct ice_aqc_get_link_topo cmd;
-	u8 node_part_number;
-	u16 node_handle;
-	int status;
-	u8 ctx;
-
-	if (hw->mac_type != ICE_MAC_E810)
-		return -ENODEV;
-
-	if (hw->device_id != ICE_DEV_ID_E810C_QSFP) {
-		*idx = C827_0;
-		return 0;
-	}
-
-	memset(&cmd, 0, sizeof(cmd));
-
-	ctx = ICE_AQC_LINK_TOPO_NODE_TYPE_PHY << ICE_AQC_LINK_TOPO_NODE_TYPE_S;
-	ctx |= ICE_AQC_LINK_TOPO_NODE_CTX_PORT << ICE_AQC_LINK_TOPO_NODE_CTX_S;
-	cmd.addr.topo_params.node_type_ctx = ctx;
-
-	status = ice_aq_get_netlist_node(hw, &cmd, &node_part_number,
-					 &node_handle);
-	if (status || node_part_number != ICE_AQC_GET_LINK_TOPO_NODE_NR_C827)
-		return -ENOENT;
-
-	if (node_handle == E810C_QSFP_C827_0_HANDLE)
-		*idx = C827_0;
-	else if (node_handle == E810C_QSFP_C827_1_HANDLE)
-		*idx = C827_1;
-	else
-		return -EIO;
-
-	return 0;
 }
 
 /**
@@ -5552,7 +5969,7 @@ int ice_ptp_init_phc(struct ice_hw *hw)
 	/* Enable source clocks */
 	wr32(hw, GLTSYN_ENA(src_idx), GLTSYN_ENA_TSYN_ENA_M);
 
-	/* Clear event err indications for auxiliary pins */
+	/* Clear event status indications for auxiliary pins */
 	(void)rd32(hw, GLTSYN_STAT(src_idx));
 
 	switch (hw->mac_type) {
@@ -5564,6 +5981,7 @@ int ice_ptp_init_phc(struct ice_hw *hw)
 	case ICE_MAC_GENERIC:
 		return ice_ptp_init_phc_e82x(hw);
 	case ICE_MAC_GENERIC_3K_E825:
+		ice_ptp_init_phc_e825c(hw);
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -5588,381 +6006,54 @@ int ice_get_phy_tx_tstamp_ready(struct ice_hw *hw, u8 block, u64 *tstamp_ready)
 		return ice_get_phy_tx_tstamp_ready_e810(hw, block,
 							tstamp_ready);
 	case ICE_MAC_E830:
-		ice_get_phy_tx_tstamp_ready_e830(hw, block, tstamp_ready);
-		return 0;
+		return ice_get_phy_tx_tstamp_ready_e830(hw, block,
+							tstamp_ready);
 	case ICE_MAC_GENERIC:
 		return ice_get_phy_tx_tstamp_ready_e82x(hw, block,
 							tstamp_ready);
 	case ICE_MAC_GENERIC_3K_E825:
 		return ice_get_phy_tx_tstamp_ready_eth56g(hw, block,
 							  tstamp_ready);
+		break;
 	default:
 		return -EOPNOTSUPP;
 	}
 }
 
 /**
- * ice_cgu_get_pin_desc_e823 - get pin description array
- * @hw: pointer to the hw struct
- * @input: if request is done against input or output pin
- * @size: number of inputs/outputs
+ * ice_ptp_config_sfd - Configure timestamping at/after SFD
+ * @hw: pointer to the HW struct
+ * @sfd_ena: true to enable timestamping at beginning of SFD, false otherwise
  *
- * Return: pointer to pin description array associated to given hw.
+ * Configure timestamping to measure at the beginning/after SFD
+ * (start frame delimiter).
  */
-static const struct ice_cgu_pin_desc *
-ice_cgu_get_pin_desc_e823(struct ice_hw *hw, bool input, int *size)
+int ice_ptp_config_sfd(struct ice_hw *hw, bool sfd_ena)
 {
-	static const struct ice_cgu_pin_desc *t;
+	u8 port = hw->port_info->lport;
 
-	if (hw->cgu_part_number ==
-	    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032) {
-		if (input) {
-			t = ice_e823_zl_cgu_inputs;
-			*size = ARRAY_SIZE(ice_e823_zl_cgu_inputs);
-		} else {
-			t = ice_e823_zl_cgu_outputs;
-			*size = ARRAY_SIZE(ice_e823_zl_cgu_outputs);
-		}
-	} else if (hw->cgu_part_number ==
-		   ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384) {
-		if (input) {
-			t = ice_e823_si_cgu_inputs;
-			*size = ARRAY_SIZE(ice_e823_si_cgu_inputs);
-		} else {
-			t = ice_e823_si_cgu_outputs;
-			*size = ARRAY_SIZE(ice_e823_si_cgu_outputs);
-		}
-	} else {
-		t = NULL;
-		*size = 0;
-	}
-
-	return t;
-}
-
-/**
- * ice_cgu_get_pin_desc - get pin description array
- * @hw: pointer to the hw struct
- * @input: if request is done against input or output pins
- * @size: size of array returned by function
- *
- * Return: pointer to pin description array associated to given hw.
- */
-static const struct ice_cgu_pin_desc *
-ice_cgu_get_pin_desc(struct ice_hw *hw, bool input, int *size)
-{
-	const struct ice_cgu_pin_desc *t = NULL;
-
-	switch (hw->device_id) {
-	case ICE_DEV_ID_E810C_SFP:
-		if (input) {
-			t = ice_e810t_sfp_cgu_inputs;
-			*size = ARRAY_SIZE(ice_e810t_sfp_cgu_inputs);
-		} else {
-			t = ice_e810t_sfp_cgu_outputs;
-			*size = ARRAY_SIZE(ice_e810t_sfp_cgu_outputs);
-		}
-		break;
-	case ICE_DEV_ID_E810C_QSFP:
-		if (input) {
-			t = ice_e810t_qsfp_cgu_inputs;
-			*size = ARRAY_SIZE(ice_e810t_qsfp_cgu_inputs);
-		} else {
-			t = ice_e810t_qsfp_cgu_outputs;
-			*size = ARRAY_SIZE(ice_e810t_qsfp_cgu_outputs);
-		}
-		break;
-	case ICE_DEV_ID_E823L_10G_BASE_T:
-	case ICE_DEV_ID_E823L_1GBE:
-	case ICE_DEV_ID_E823L_BACKPLANE:
-	case ICE_DEV_ID_E823L_QSFP:
-	case ICE_DEV_ID_E823L_SFP:
-	case ICE_DEV_ID_E823C_10G_BASE_T:
-	case ICE_DEV_ID_E823C_BACKPLANE:
-	case ICE_DEV_ID_E823C_QSFP:
-	case ICE_DEV_ID_E823C_SFP:
-	case ICE_DEV_ID_E823C_SGMII:
-		t = ice_cgu_get_pin_desc_e823(hw, input, size);
-		break;
+	switch (hw->mac_type) {
+	case ICE_MAC_GENERIC_3K_E825:
+		return ice_ptp_config_sfd_eth56g(hw, port, sfd_ena);
 	default:
-		break;
+		return -EOPNOTSUPP;
 	}
-
-	return t;
 }
 
 /**
- * ice_cgu_get_num_pins - get pin description array size
- * @hw: pointer to the hw struct
- * @input: if request is done against input or output pins
+ * refsync_pin_id_valid
+ * @hw: pointer to the HW struct
+ * @id: pin index
  *
- * Return: size of pin description array for given hw.
+ * Checks whether DPLL's input pin can be configured to ref-sync pairing mode.
  */
-int ice_cgu_get_num_pins(struct ice_hw *hw, bool input)
+bool refsync_pin_id_valid(struct ice_hw *hw, u8 id)
 {
-	const struct ice_cgu_pin_desc *t;
-	int size;
+	/* refsync is allowed only on pins 1 or 5 for E810T */
+	if (ice_is_pf_c827(hw) && id != 1 &&
+	    id != 5)
+		return false;
 
-	t = ice_cgu_get_pin_desc(hw, input, &size);
-	if (t)
-		return size;
-
-	return 0;
+	return true;
 }
 
-/**
- * ice_cgu_get_pin_type - get pin's type
- * @hw: pointer to the hw struct
- * @pin: pin index
- * @input: if request is done against input or output pin
- *
- * Return: type of a pin.
- */
-enum dpll_pin_type ice_cgu_get_pin_type(struct ice_hw *hw, u8 pin, bool input)
-{
-	const struct ice_cgu_pin_desc *t;
-	int t_size;
-
-	t = ice_cgu_get_pin_desc(hw, input, &t_size);
-
-	if (!t)
-		return 0;
-
-	if (pin >= t_size)
-		return 0;
-
-	return t[pin].type;
-}
-
-/**
- * ice_cgu_get_pin_freq_supp - get pin's supported frequency
- * @hw: pointer to the hw struct
- * @pin: pin index
- * @input: if request is done against input or output pin
- * @num: output number of supported frequencies
- *
- * Get frequency supported number and array of supported frequencies.
- *
- * Return: array of supported frequencies for given pin.
- */
-struct dpll_pin_frequency *
-ice_cgu_get_pin_freq_supp(struct ice_hw *hw, u8 pin, bool input, u8 *num)
-{
-	const struct ice_cgu_pin_desc *t;
-	int t_size;
-
-	*num = 0;
-	t = ice_cgu_get_pin_desc(hw, input, &t_size);
-	if (!t)
-		return NULL;
-	if (pin >= t_size)
-		return NULL;
-	*num = t[pin].freq_supp_num;
-
-	return t[pin].freq_supp;
-}
-
-/**
- * ice_cgu_get_pin_name - get pin's name
- * @hw: pointer to the hw struct
- * @pin: pin index
- * @input: if request is done against input or output pin
- *
- * Return:
- * * null terminated char array with name
- * * NULL in case of failure
- */
-const char *ice_cgu_get_pin_name(struct ice_hw *hw, u8 pin, bool input)
-{
-	const struct ice_cgu_pin_desc *t;
-	int t_size;
-
-	t = ice_cgu_get_pin_desc(hw, input, &t_size);
-
-	if (!t)
-		return NULL;
-
-	if (pin >= t_size)
-		return NULL;
-
-	return t[pin].name;
-}
-
-/**
- * ice_get_cgu_state - get the state of the DPLL
- * @hw: pointer to the hw struct
- * @dpll_idx: Index of internal DPLL unit
- * @last_dpll_state: last known state of DPLL
- * @pin: pointer to a buffer for returning currently active pin
- * @ref_state: reference clock state
- * @eec_mode: eec mode of the DPLL
- * @phase_offset: pointer to a buffer for returning phase offset
- * @dpll_state: state of the DPLL (output)
- *
- * This function will read the state of the DPLL(dpll_idx). Non-null
- * 'pin', 'ref_state', 'eec_mode' and 'phase_offset' parameters are used to
- * retrieve currently active pin, state, mode and phase_offset respectively.
- *
- * Return: state of the DPLL
- */
-int ice_get_cgu_state(struct ice_hw *hw, u8 dpll_idx,
-		      enum dpll_lock_status last_dpll_state, u8 *pin,
-		      u8 *ref_state, u8 *eec_mode, s64 *phase_offset,
-		      enum dpll_lock_status *dpll_state)
-{
-	u8 hw_ref_state, hw_dpll_state, hw_eec_mode, hw_config;
-	s64 hw_phase_offset;
-	int status;
-
-	status = ice_aq_get_cgu_dpll_status(hw, dpll_idx, &hw_ref_state,
-					    &hw_dpll_state, &hw_config,
-					    &hw_phase_offset, &hw_eec_mode);
-	if (status)
-		return status;
-
-	if (pin)
-		/* current ref pin in dpll_state_refsel_status_X register */
-		*pin = hw_config & ICE_AQC_GET_CGU_DPLL_CONFIG_CLK_REF_SEL;
-	if (phase_offset)
-		*phase_offset = hw_phase_offset;
-	if (ref_state)
-		*ref_state = hw_ref_state;
-	if (eec_mode)
-		*eec_mode = hw_eec_mode;
-	if (!dpll_state)
-		return 0;
-
-	/* According to ZL DPLL documentation, once state reach LOCKED_HO_ACQ
-	 * it would never return to FREERUN. This aligns to ITU-T G.781
-	 * Recommendation. We cannot report HOLDOVER as HO memory is cleared
-	 * while switching to another reference.
-	 * Only for situations where previous state was either: "LOCKED without
-	 * HO_ACQ" or "HOLDOVER" we actually back to FREERUN.
-	 */
-	if (hw_dpll_state & ICE_AQC_GET_CGU_DPLL_STATUS_STATE_LOCK) {
-		if (hw_dpll_state & ICE_AQC_GET_CGU_DPLL_STATUS_STATE_HO_READY)
-			*dpll_state = DPLL_LOCK_STATUS_LOCKED_HO_ACQ;
-		else
-			*dpll_state = DPLL_LOCK_STATUS_LOCKED;
-	} else if (last_dpll_state == DPLL_LOCK_STATUS_LOCKED_HO_ACQ ||
-		   last_dpll_state == DPLL_LOCK_STATUS_HOLDOVER) {
-		*dpll_state = DPLL_LOCK_STATUS_HOLDOVER;
-	} else {
-		*dpll_state = DPLL_LOCK_STATUS_UNLOCKED;
-	}
-
-	return 0;
-}
-
-/**
- * ice_get_cgu_rclk_pin_info - get info on available recovered clock pins
- * @hw: pointer to the hw struct
- * @base_idx: returns index of first recovered clock pin on device
- * @pin_num: returns number of recovered clock pins available on device
- *
- * Based on hw provide caller info about recovery clock pins available on the
- * board.
- *
- * Return:
- * * 0 - success, information is valid
- * * negative - failure, information is not valid
- */
-int ice_get_cgu_rclk_pin_info(struct ice_hw *hw, u8 *base_idx, u8 *pin_num)
-{
-	u8 phy_idx;
-	int ret;
-
-	switch (hw->device_id) {
-	case ICE_DEV_ID_E810C_SFP:
-	case ICE_DEV_ID_E810C_QSFP:
-
-		ret = ice_get_pf_c827_idx(hw, &phy_idx);
-		if (ret)
-			return ret;
-		*base_idx = E810T_CGU_INPUT_C827(phy_idx, ICE_RCLKA_PIN);
-		*pin_num = ICE_E810_RCLK_PINS_NUM;
-		ret = 0;
-		break;
-	case ICE_DEV_ID_E823L_10G_BASE_T:
-	case ICE_DEV_ID_E823L_1GBE:
-	case ICE_DEV_ID_E823L_BACKPLANE:
-	case ICE_DEV_ID_E823L_QSFP:
-	case ICE_DEV_ID_E823L_SFP:
-	case ICE_DEV_ID_E823C_10G_BASE_T:
-	case ICE_DEV_ID_E823C_BACKPLANE:
-	case ICE_DEV_ID_E823C_QSFP:
-	case ICE_DEV_ID_E823C_SFP:
-	case ICE_DEV_ID_E823C_SGMII:
-		*pin_num = ICE_E82X_RCLK_PINS_NUM;
-		ret = 0;
-		if (hw->cgu_part_number ==
-		    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032)
-			*base_idx = ZL_REF1P;
-		else if (hw->cgu_part_number ==
-			 ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384)
-			*base_idx = SI_REF1P;
-		else
-			ret = -ENODEV;
-
-		break;
-	default:
-		ret = -ENODEV;
-		break;
-	}
-
-	return ret;
-}
-
-/**
- * ice_cgu_get_output_pin_state_caps - get output pin state capabilities
- * @hw: pointer to the hw struct
- * @pin_id: id of a pin
- * @caps: capabilities to modify
- *
- * Return:
- * * 0 - success, state capabilities were modified
- * * negative - failure, capabilities were not modified
- */
-int ice_cgu_get_output_pin_state_caps(struct ice_hw *hw, u8 pin_id,
-				      unsigned long *caps)
-{
-	bool can_change = true;
-
-	switch (hw->device_id) {
-	case ICE_DEV_ID_E810C_SFP:
-		if (pin_id == ZL_OUT2 || pin_id == ZL_OUT3)
-			can_change = false;
-		break;
-	case ICE_DEV_ID_E810C_QSFP:
-		if (pin_id == ZL_OUT2 || pin_id == ZL_OUT3 || pin_id == ZL_OUT4)
-			can_change = false;
-		break;
-	case ICE_DEV_ID_E823L_10G_BASE_T:
-	case ICE_DEV_ID_E823L_1GBE:
-	case ICE_DEV_ID_E823L_BACKPLANE:
-	case ICE_DEV_ID_E823L_QSFP:
-	case ICE_DEV_ID_E823L_SFP:
-	case ICE_DEV_ID_E823C_10G_BASE_T:
-	case ICE_DEV_ID_E823C_BACKPLANE:
-	case ICE_DEV_ID_E823C_QSFP:
-	case ICE_DEV_ID_E823C_SFP:
-	case ICE_DEV_ID_E823C_SGMII:
-		if (hw->cgu_part_number ==
-		    ICE_AQC_GET_LINK_TOPO_NODE_NR_ZL30632_80032 &&
-		    pin_id == ZL_OUT2)
-			can_change = false;
-		else if (hw->cgu_part_number ==
-			 ICE_AQC_GET_LINK_TOPO_NODE_NR_SI5383_5384 &&
-			 pin_id == SI_OUT1)
-			can_change = false;
-		break;
-	default:
-		return -EINVAL;
-	}
-	if (can_change)
-		*caps |= DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE;
-	else
-		*caps &= ~DPLL_PIN_CAPABILITIES_STATE_CAN_CHANGE;
-
-	return 0;
-}

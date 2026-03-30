@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2018, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice_common.h"
+#include "ice_hw_autogen.h"
 #include "ice_vf_mbx.h"
 
 /**
@@ -68,7 +69,7 @@ static const u32 ice_legacy_aq_to_vc_speed[] = {
 u32 ice_conv_link_speed_to_virtchnl(bool adv_link_support, u16 link_speed)
 {
 	/* convert a BIT() value into an array index */
-	u32 index = fls(link_speed) - 1;
+	u16 index = (u16)(fls(link_speed) - 1);
 
 	if (adv_link_support)
 		return ice_get_link_speed(index);
@@ -126,7 +127,7 @@ u32 ice_conv_link_speed_to_virtchnl(bool adv_link_support, u16 link_speed)
 #define ICE_IGNORE_MAX_MSG_CNT	0xFFFF
 
 /**
- * ice_mbx_reset_snapshot - Reset mailbox snapshot structure
+ * ice_mbx_reset_snapshot - Initialize mailbox snapshot structure
  * @snap: pointer to the mailbox snapshot
  */
 static void ice_mbx_reset_snapshot(struct ice_mbx_snapshot *snap)
@@ -219,8 +220,8 @@ ice_mbx_detect_malvf(struct ice_hw *hw, struct ice_mbx_vf_info *vf_info,
  * MBX_VF_IN_FLIGHT_MSGS_AT_PF_CNT when the driver replenishes
  * the buffers at the PF mailbox queue.
  */
-void ice_mbx_vf_dec_trig_e830(const struct ice_hw *hw,
-			      const struct ice_rq_event_info *event)
+void ice_mbx_vf_dec_trig_e830(struct ice_hw *hw,
+			      struct ice_rq_event_info *event)
 {
 	u16 vfid = le16_to_cpu(event->desc.retval);
 
@@ -235,7 +236,7 @@ void ice_mbx_vf_dec_trig_e830(const struct ice_hw *hw,
  * This function clears the counter MBX_VF_IN_FLIGHT_MSGS_AT_PF_CNT, and should
  * be called when a VF is created and on VF reset.
  */
-void ice_mbx_vf_clear_cnt_e830(const struct ice_hw *hw, u16 vf_id)
+void ice_mbx_vf_clear_cnt_e830(struct ice_hw *hw, u16 vf_id)
 {
 	u32 reg = rd32(hw, E830_MBX_VF_IN_FLIGHT_MSGS_AT_PF_CNT(vf_id));
 
@@ -273,8 +274,8 @@ ice_mbx_vf_state_handler(struct ice_hw *hw, struct ice_mbx_data *mbx_data,
 	struct ice_mbx_snap_buffer_data *snap_buf;
 	struct ice_ctl_q_info *cq = &hw->mailboxq;
 	enum ice_mbx_snapshot_state new_state;
-	bool is_malvf = false;
 	int status = 0;
+	bool is_malvf = false;
 
 	if (!report_malvf || !mbx_data || !vf_info)
 		return -EINVAL;

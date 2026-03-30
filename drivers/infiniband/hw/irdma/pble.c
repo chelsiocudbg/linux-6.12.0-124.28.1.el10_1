@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+/* Copyright (c) 2015 - 2023 Intel Corporation */
 #include "osdep.h"
 #include "hmc.h"
 #include "defs.h"
 #include "type.h"
 #include "protos.h"
+#include "virtchnl.h"
 #include "pble.h"
 
 static int add_pble_prm(struct irdma_hmc_pble_rsrc *pble_rsrc);
@@ -143,6 +144,7 @@ static int add_bp_pages(struct irdma_hmc_pble_rsrc *pble_rsrc,
 	struct irdma_hmc_sd_entry *sd_entry = info->sd_entry;
 	struct irdma_hmc_info *hmc_info = info->hmc_info;
 	struct irdma_chunk *chunk = info->chunk;
+	struct irdma_manage_pble_info pble_info;
 	int status = 0;
 	u32 rel_pd_idx = info->idx.rel_pd_idx;
 	u32 pd_idx = info->idx.pd_idx;
@@ -156,6 +158,15 @@ static int add_bp_pages(struct irdma_hmc_pble_rsrc *pble_rsrc,
 					  IRDMA_HMC_DIRECT_BP_SIZE);
 	if (status)
 		goto error;
+
+	if (dev->hw_attrs.uk_attrs.hw_rev < IRDMA_GEN_3 && !dev->privileged) {
+		status = irdma_vchnl_req_add_hmc_objs(
+			dev, IRDMA_HMC_IW_PBLE,
+			fpm_to_idx(pble_rsrc, pble_rsrc->next_fpm_addr),
+			(info->pages << PBLE_512_SHIFT));
+		if (status)
+			goto error;
+	}
 
 	addr = chunk->vaddr;
 	for (i = 0; i < info->pages; i++) {
@@ -173,6 +184,17 @@ static int add_bp_pages(struct irdma_hmc_pble_rsrc *pble_rsrc,
 		}
 	}
 
+	if (dev->hw_attrs.uk_attrs.hw_rev < IRDMA_GEN_3 && !dev->privileged) {
+		pble_info.first_pd_index = (u16)info->idx.rel_pd_idx;
+		pble_info.inv_pd_ent = false;
+		pble_info.pd_entry_cnt = PBLE_PER_PAGE;
+		pble_info.pd_pl_pba = sd_entry->u.pd_table.pd_page_addr.pa;
+		pble_info.sd_index = info->idx.sd_idx;
+
+		status = irdma_manage_pble_bp(dev, &pble_info);
+		if (status)
+			goto error;
+	}
 	chunk->fpm_addr = pble_rsrc->next_fpm_addr;
 	return 0;
 
@@ -193,8 +215,15 @@ static enum irdma_sd_entry_type irdma_get_type(struct irdma_sc_dev *dev,
 {
 	enum irdma_sd_entry_type sd_entry_type;
 
-	sd_entry_type = !idx->rel_pd_idx && pages == IRDMA_HMC_PD_CNT_IN_SD ?
-			IRDMA_SD_TYPE_DIRECT : IRDMA_SD_TYPE_PAGED;
+	if (dev->hw_attrs.uk_attrs.hw_rev >= IRDMA_GEN_3)
+		sd_entry_type = (!idx->rel_pd_idx &&
+				 pages == IRDMA_HMC_PD_CNT_IN_SD) ?
+				 IRDMA_SD_TYPE_DIRECT : IRDMA_SD_TYPE_PAGED;
+	else
+		sd_entry_type = (!idx->rel_pd_idx &&
+				 pages == IRDMA_HMC_PD_CNT_IN_SD &&
+				 dev->privileged) ?
+				 IRDMA_SD_TYPE_DIRECT : IRDMA_SD_TYPE_PAGED;
 	return sd_entry_type;
 }
 
@@ -262,14 +291,14 @@ static int add_pble_prm(struct irdma_hmc_pble_rsrc *pble_rsrc)
 	if (sd_entry_type == IRDMA_SD_TYPE_PAGED) {
 		ret_code = add_bp_pages(pble_rsrc, &info);
 		if (ret_code)
-			goto error;
+			goto err_bp_pages;
 		else
 			pble_rsrc->stats_paged_sds++;
 	}
 
 	ret_code = irdma_prm_add_pble_mem(&pble_rsrc->pinfo, chunk);
 	if (ret_code)
-		goto error;
+		goto err_bp_pages;
 
 	pble_rsrc->next_fpm_addr += chunk->size;
 	ibdev_dbg(to_ibdev(dev),
@@ -279,20 +308,22 @@ static int add_pble_prm(struct irdma_hmc_pble_rsrc *pble_rsrc)
 	sd_reg_val = (sd_entry_type == IRDMA_SD_TYPE_PAGED) ?
 			     sd_entry->u.pd_table.pd_page_addr.pa :
 			     sd_entry->u.bp.addr.pa;
-
-	if (!sd_entry->valid) {
-		ret_code = irdma_hmc_sd_one(dev, hmc_info->hmc_fn_id, sd_reg_val,
-					    idx->sd_idx, sd_entry->entry_type, true);
+	if ((dev->privileged && !sd_entry->valid) ||
+	    dev->hw_attrs.uk_attrs.hw_rev >= IRDMA_GEN_3) {
+		ret_code = irdma_hmc_sd_one(dev, hmc_info->hmc_fn_id,
+					    sd_reg_val, idx->sd_idx,
+					    sd_entry->entry_type, true);
 		if (ret_code)
 			goto error;
 	}
 
-	list_add(&chunk->list, &pble_rsrc->pinfo.clist);
 	sd_entry->valid = true;
+	list_add(&chunk->list, &pble_rsrc->pinfo.clist);
 	return 0;
 
 error:
 	bitmap_free(chunk->bitmapbuf);
+err_bp_pages:
 	kfree(chunk->chunkmem.va);
 
 	return ret_code;
@@ -474,7 +505,7 @@ int irdma_get_pble(struct irdma_hmc_pble_rsrc *pble_rsrc,
 
 		status = get_lvl1_lvl2_pble(pble_rsrc, palloc, lvl);
 		/* if level1_only, only go through it once */
-		if (!status || lvl)
+		if (!status || lvl == PBLE_LEVEL_1)
 			break;
 	}
 
@@ -498,12 +529,14 @@ exit:
 void irdma_free_pble(struct irdma_hmc_pble_rsrc *pble_rsrc,
 		     struct irdma_pble_alloc *palloc)
 {
-	pble_rsrc->freedpbles += palloc->total_cnt;
-
 	if (palloc->level == PBLE_LEVEL_2)
 		free_lvl2(pble_rsrc, palloc);
 	else
 		irdma_prm_return_pbles(&pble_rsrc->pinfo,
 				       &palloc->level1.chunkinfo);
+
+	mutex_lock(&pble_rsrc->pble_mutex_lock);
+	pble_rsrc->freedpbles += palloc->total_cnt;
 	pble_rsrc->stats_alloc_freed++;
+	mutex_unlock(&pble_rsrc->pble_mutex_lock);
 }

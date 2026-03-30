@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2019, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice.h"
 #include "ice_dcb.h"
@@ -15,6 +15,8 @@ static void ice_dcbnl_devreset(struct net_device *netdev)
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	while (ice_is_reset_in_progress(pf->state))
 		usleep_range(1000, 2000);
 
@@ -35,6 +37,8 @@ static int ice_dcbnl_getets(struct net_device *netdev, struct ieee_ets *ets)
 	struct ice_pf *pf;
 
 	pf = ice_netdev_to_pf(netdev);
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
 	dcbxcfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
 
 	ets->willing = dcbxcfg->etscfg.willing;
@@ -66,18 +70,27 @@ static int ice_dcbnl_setets(struct net_device *netdev, struct ieee_ets *ets)
 	int bwcfg = 0, bwrec = 0;
 	int err, i;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return -EINVAL;
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_IEEE))
 		return -EINVAL;
 
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return -EINVAL;
-	}
-
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
 	mutex_lock(&pf->tc_mutex);
+#ifdef NETIF_F_HW_TC
+	if (ice_is_adq_active(pf)) {
+		netdev_err(netdev, "can't set DCB configuration when ADQ is active\n");
+		err = ICE_DCB_NO_HW_CHG;
+		goto ets_out;
+	}
+#endif /* NETIF_F_HW_TC */
 
 	new_cfg->etscfg.willing = ets->willing;
 	new_cfg->etscfg.cbs = ets->cbs;
@@ -102,17 +115,26 @@ static int ice_dcbnl_setets(struct net_device *netdev, struct ieee_ets *ets)
 
 	new_cfg->etscfg.maxtcs = pf->hw.func_caps.common_cap.maxtc;
 
+	/* Not all TCs can have a BW of zero, FW requires at least one TC
+	 * with BW assigned, and sum of all has to be 100%.  Set TC0 to 100%
+	 */
 	if (!bwcfg)
 		new_cfg->etscfg.tcbwtable[0] = 100;
 
 	if (!bwrec)
 		new_cfg->etsrec.tcbwtable[0] = 100;
 
+	if (!ice_dcb_need_recfg(pf, &pf->hw.port_info->qos_cfg.local_dcbx_cfg,
+				new_cfg)) {
+		err = ICE_DCB_NO_HW_CHG;
+		goto ets_out;
+	}
+
 	err = ice_pf_dcb_cfg(pf, new_cfg, true);
 	/* return of zero indicates new cfg applied */
-	if (err == ICE_DCB_HW_CHG_RST)
+	if (!err)
 		ice_dcbnl_devreset(netdev);
-	if (err == ICE_DCB_NO_HW_CHG)
+	else if (err == ICE_DCB_NO_HW_CHG)
 		err = ICE_DCB_HW_CHG_RST;
 
 ets_out:
@@ -135,6 +157,8 @@ ice_dcbnl_getnumtcs(struct net_device *dev, int __always_unused tcid, u8 *num)
 
 	if (!test_bit(ICE_FLAG_DCB_CAPABLE, pf->flags))
 		return -EINVAL;
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
 
 	*num = pf->hw.func_caps.common_cap.maxtc;
 	return 0;
@@ -148,6 +172,8 @@ static u8 ice_dcbnl_getdcbx(struct net_device *netdev)
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return 0;
 	return pf->dcbx_cap;
 }
 
@@ -161,6 +187,13 @@ static u8 ice_dcbnl_setdcbx(struct net_device *netdev, u8 mode)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_qos_cfg *qos_cfg;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return 0;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return ICE_DCB_NO_HW_CHG;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
 	/* if FW LLDP agent is running, DCBNL not allowed to change mode */
 	if (test_bit(ICE_FLAG_FW_LLDP_AGENT, pf->flags))
 		return ICE_DCB_NO_HW_CHG;
@@ -175,11 +208,6 @@ static u8 ice_dcbnl_setdcbx(struct net_device *netdev, u8 mode)
 	if (mode == pf->dcbx_cap)
 		return ICE_DCB_NO_HW_CHG;
 
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return ICE_DCB_NO_HW_CHG;
-	}
-
 	qos_cfg = &pf->hw.port_info->qos_cfg;
 
 	/* DSCP configuration is not DCBx negotiated */
@@ -187,7 +215,6 @@ static u8 ice_dcbnl_setdcbx(struct net_device *netdev, u8 mode)
 		return ICE_DCB_NO_HW_CHG;
 
 	pf->dcbx_cap = mode;
-
 	if (mode & DCB_CAP_DCBX_VER_CEE)
 		qos_cfg->local_dcbx_cfg.dcbx_mode = ICE_DCBX_MODE_CEE;
 	else
@@ -208,6 +235,8 @@ static void ice_dcbnl_get_perm_hw_addr(struct net_device *netdev, u8 *perm_addr)
 	struct ice_port_info *pi = pf->hw.port_info;
 	int i, j;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	memset(perm_addr, 0xff, MAX_ADDR_LEN);
 
 	for (i = 0; i < netdev->addr_len; i++)
@@ -242,6 +271,8 @@ static int ice_dcbnl_getpfc(struct net_device *netdev, struct ieee_pfc *pfc)
 	struct ice_dcbx_cfg *dcbxcfg;
 	int i;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
 	dcbxcfg = &pi->qos_cfg.local_dcbx_cfg;
 	pfc->pfc_cap = dcbxcfg->pfc.pfccap;
 	pfc->pfc_en = dcbxcfg->pfc.pfcena;
@@ -267,16 +298,26 @@ static int ice_dcbnl_setpfc(struct net_device *netdev, struct ieee_pfc *pfc)
 	struct ice_dcbx_cfg *new_cfg;
 	int err;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return -EINVAL;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_IEEE))
 		return -EINVAL;
 
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return -EINVAL;
-	}
-
 	mutex_lock(&pf->tc_mutex);
+#ifdef NETIF_F_HW_TC
+	if (ice_is_adq_active(pf)) {
+		netdev_err(netdev, "can't set DCB configuration when ADQ is active\n");
+		err = ICE_DCB_NO_HW_CHG;
+		goto pfc_out;
+	}
+#endif /* NETIF_F_HW_TC */
 
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
@@ -287,11 +328,18 @@ static int ice_dcbnl_setpfc(struct net_device *netdev, struct ieee_pfc *pfc)
 
 	new_cfg->pfc.pfcena = pfc->pfc_en;
 
+	if (!ice_dcb_need_recfg(pf, &pf->hw.port_info->qos_cfg.local_dcbx_cfg,
+				new_cfg)) {
+		err = ICE_DCB_NO_HW_CHG;
+		goto pfc_out;
+	}
+
 	err = ice_pf_dcb_cfg(pf, new_cfg, true);
 	if (err == ICE_DCB_HW_CHG_RST)
 		ice_dcbnl_devreset(netdev);
 	if (err == ICE_DCB_NO_HW_CHG)
 		err = ICE_DCB_HW_CHG_RST;
+pfc_out:
 	mutex_unlock(&pf->tc_mutex);
 	return err;
 }
@@ -308,6 +356,8 @@ ice_dcbnl_get_pfc_cfg(struct net_device *netdev, int prio, u8 *setting)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_port_info *pi = pf->hw.port_info;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
@@ -331,17 +381,20 @@ static void ice_dcbnl_set_pfc_cfg(struct net_device *netdev, int prio, u8 set)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_dcbx_cfg *new_cfg;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
 
 	if (prio >= ICE_MAX_USER_PRIORITY)
 		return;
-
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return;
-	}
 
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
@@ -364,6 +417,8 @@ static u8 ice_dcbnl_getpfcstate(struct net_device *netdev)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_port_info *pi = pf->hw.port_info;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return 0;
 	/* Return enabled if any UP enabled for PFC */
 	if (pi->qos_cfg.local_dcbx_cfg.pfc.pfcena)
 		return 1;
@@ -395,14 +450,17 @@ static u8 ice_dcbnl_setstate(struct net_device *netdev, u8 state)
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return ICE_DCB_NO_HW_CHG;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return ICE_DCB_NO_HW_CHG;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return ICE_DCB_NO_HW_CHG;
-
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return ICE_DCB_NO_HW_CHG;
-	}
 
 	/* Nothing to do */
 	if (!!state == test_bit(ICE_FLAG_DCB_ENA, pf->flags))
@@ -438,6 +496,8 @@ ice_dcbnl_get_pg_tc_cfg_tx(struct net_device *netdev, int prio,
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_port_info *pi = pf->hw.port_info;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
@@ -469,17 +529,20 @@ ice_dcbnl_set_pg_tc_cfg_tx(struct net_device *netdev, int tc,
 	struct ice_dcbx_cfg *new_cfg;
 	int i;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
 
 	if (tc >= ICE_MAX_TRAFFIC_CLASS)
 		return;
-
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return;
-	}
 
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
@@ -504,6 +567,8 @@ ice_dcbnl_get_pg_bwg_cfg_tx(struct net_device *netdev, int pgid, u8 *bw_pct)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_port_info *pi = pf->hw.port_info;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
@@ -528,17 +593,20 @@ ice_dcbnl_set_pg_bwg_cfg_tx(struct net_device *netdev, int pgid, u8 bw_pct)
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_dcbx_cfg *new_cfg;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
 
 	if (pgid >= ICE_MAX_TRAFFIC_CLASS)
 		return;
-
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return;
-	}
 
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
@@ -563,6 +631,8 @@ ice_dcbnl_get_pg_tc_cfg_rx(struct net_device *netdev, int prio,
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct ice_port_info *pi = pf->hw.port_info;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
@@ -609,6 +679,8 @@ ice_dcbnl_get_pg_bwg_cfg_rx(struct net_device *netdev, int __always_unused pgid,
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return;
@@ -643,6 +715,8 @@ static u8 ice_dcbnl_get_cap(struct net_device *netdev, int capid, u8 *cap)
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return ICE_DCB_NO_HW_CHG;
 	if (!(test_bit(ICE_FLAG_DCB_CAPABLE, pf->flags)))
 		return ICE_DCB_NO_HW_CHG;
 
@@ -687,7 +761,11 @@ static u8 ice_dcbnl_get_cap(struct net_device *netdev, int capid, u8 *cap)
  * @idtype: the App selector
  * @id: the App ethtype or port number
  */
+#ifdef HAVE_DCBNL_OPS_SETAPP_RETURN_INT
 static int ice_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+#else
+static u8 ice_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
+#endif /* HAVE_DCBNL_OPS_SETAPP_RETURN_INT */
 {
 	struct ice_pf *pf = ice_netdev_to_pf(netdev);
 	struct dcb_app app = {
@@ -695,6 +773,12 @@ static int ice_dcbnl_getapp(struct net_device *netdev, u8 idtype, u16 id)
 				.protocol = id,
 			     };
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+#ifdef HAVE_DCBNL_OPS_SETAPP_RETURN_INT
+		return -EBUSY;
+#else
+		return ICE_DCB_NO_HW_CHG;
+#endif /* HAVE_DCBNL_OPS_SETAPP_RETURN_INT */
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return -EINVAL;
@@ -738,6 +822,14 @@ static int ice_dcbnl_setapp(struct net_device *netdev, struct dcb_app *app)
 	u8 max_tc;
 	int ret;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return -EINVAL;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	/* ONLY DSCP APP TLVs have operational significance */
 	if (app->selector != IEEE_8021QAZ_APP_SEL_DSCP)
 		return -EINVAL;
@@ -754,14 +846,16 @@ static int ice_dcbnl_setapp(struct net_device *netdev, struct dcb_app *app)
 	if (!ice_is_feature_supported(pf, ICE_F_DSCP))
 		return -EOPNOTSUPP;
 
+#ifdef NETIF_F_HW_TC
+	if (ice_is_adq_active(pf)) {
+		netdev_err(netdev,
+			   "can't set DCB configuration when ADQ is active\n");
+		return ICE_DCB_NO_HW_CHG;
+	}
+#endif /* NETIF_F_HW_TC */
 	if (app->protocol >= ICE_DSCP_NUM_VAL) {
 		netdev_err(netdev, "DSCP value 0x%04X out of range\n",
 			   app->protocol);
-		return -EINVAL;
-	}
-
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
 		return -EINVAL;
 	}
 
@@ -845,6 +939,12 @@ static int ice_dcbnl_setapp(struct net_device *netdev, struct dcb_app *app)
 	new_cfg->dscp_map[app->protocol] = app->priority;
 	new_cfg->app[new_cfg->numapps++] = new_app;
 
+	if (!ice_dcb_need_recfg(pf, &pf->hw.port_info->qos_cfg.local_dcbx_cfg,
+				new_cfg)) {
+		ret = ICE_DCB_NO_HW_CHG;
+		goto setapp_out;
+	}
+
 	ret = ice_pf_dcb_cfg(pf, new_cfg, true);
 	/* return of zero indicates new cfg applied */
 	if (ret == ICE_DCB_HW_CHG_RST)
@@ -871,17 +971,27 @@ static int ice_dcbnl_delapp(struct net_device *netdev, struct dcb_app *app)
 	unsigned int i, j;
 	int ret = 0;
 
-	if (pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) {
-		netdev_err(netdev, "can't delete DSCP netlink app when FW DCB agent is active\n");
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return -EBUSY;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
 		return -EINVAL;
-	}
 
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
+	if (pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) {
+		netdev_dbg(netdev, "can't delete DSCP netlink app when FW DCB agent is active\n");
 		return -EINVAL;
 	}
 
 	mutex_lock(&pf->tc_mutex);
+#ifdef NETIF_F_HW_TC
+	if (ice_is_adq_active(pf)) {
+		netdev_err(netdev, "can't set DCB configuration when ADQ is active\n");
+		ret = ICE_DCB_NO_HW_CHG;
+		goto delapp_out;
+	}
+#endif /* NETIF_F_HW_TC */
 	old_cfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
 
 	ret = dcb_ieee_delapp(netdev, app);
@@ -933,6 +1043,7 @@ static int ice_dcbnl_delapp(struct net_device *netdev, struct dcb_app *app)
 	 */
 	if (bitmap_empty(new_cfg->dscp_mapped, ICE_DSCP_NUM_VAL) &&
 	    new_cfg->pfc_mode == ICE_QOS_MODE_DSCP) {
+
 		ret = ice_aq_set_pfc_mode(&pf->hw,
 					  ICE_AQC_PFC_VLAN_BASED_PFC,
 					  NULL);
@@ -978,21 +1089,38 @@ static u8 ice_dcbnl_cee_set_all(struct net_device *netdev)
 	struct ice_dcbx_cfg *new_cfg;
 	int err;
 
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return ICE_DCB_NO_HW_CHG;
+#ifdef HAVE_NETDEV_UPPER_INFO
+	if (pf->lag && pf->lag->bonded)
+		return ICE_DCB_NO_HW_CHG;
+
+#endif /* HAVE_NETDEV_UPPER_INFO */
+
 	if ((pf->dcbx_cap & DCB_CAP_DCBX_LLD_MANAGED) ||
 	    !(pf->dcbx_cap & DCB_CAP_DCBX_VER_CEE))
 		return ICE_DCB_NO_HW_CHG;
 
-	if (pf->lag && pf->lag->bonded) {
-		netdev_err(netdev, "DCB changes not allowed when in a bond\n");
-		return ICE_DCB_NO_HW_CHG;
-	}
-
 	new_cfg = &pf->hw.port_info->qos_cfg.desired_dcbx_cfg;
 
 	mutex_lock(&pf->tc_mutex);
+#ifdef NETIF_F_HW_TC
+	if (ice_is_adq_active(pf)) {
+		netdev_err(netdev, "can't set DCB configuration when ADQ is active\n");
+		err = ICE_DCB_NO_HW_CHG;
+		goto out;
+	}
+#endif /* NETIF_F_HW_TC */
+
+	if (!ice_dcb_need_recfg(pf, &pf->hw.port_info->qos_cfg.local_dcbx_cfg,
+				new_cfg)) {
+		err = ICE_DCB_NO_HW_CHG;
+		goto out;
+	}
 
 	err = ice_pf_dcb_cfg(pf, new_cfg, true);
 
+out:
 	mutex_unlock(&pf->tc_mutex);
 	return (err != ICE_DCB_HW_CHG_RST) ? ICE_DCB_NO_HW_CHG : err;
 }
@@ -1048,6 +1176,8 @@ void ice_dcbnl_set_all(struct ice_vsi *vsi)
 		return;
 
 	pf = ice_netdev_to_pf(netdev);
+	if (test_bit(ICE_SHUTTING_DOWN, pf->state))
+		return;
 	pi = pf->hw.port_info;
 
 	/* SW DCB taken care of by SW Default Config */
@@ -1074,8 +1204,10 @@ void ice_dcbnl_set_all(struct ice_vsi *vsi)
 			dcb_ieee_setapp(netdev, &sapp);
 		}
 	}
+#ifdef HAVE_DCBNL_IEEE_DELAPP
 	/* Notify user-space of the changes */
 	dcbnl_ieee_notify(netdev, RTM_SETDCB, DCB_CMD_IEEE_SET, 0, 0);
+#endif /* HAVE_DCBNL_IEEE_DELAPP */
 }
 
 /**

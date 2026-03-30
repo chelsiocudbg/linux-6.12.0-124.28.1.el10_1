@@ -91,6 +91,61 @@ struct mlx5_ib_dev *mlx5_ib_get_ibdev_from_mpi(struct mlx5_ib_multiport_info *mp
 	return dev;
 }
 
+/* SVC mem func declaration */
+static void svc_setup_func_ptr(void);
+static void * svc_default_kmalloc( size_t size, int flag, void* qp_ptr);
+static void svc_default_kfree(void *ptr, void* qp_ptr);
+static void * svc_default_dma_zalloc(struct device *dev, size_t size, dma_addr_t *dma_handle, int flag, void* qp_ptr);
+static void svc_default_dma_free(struct device *dev, size_t size, void * ptr, dma_addr_t dma_handle, void* qp_ptr);
+
+void *(*svc_kmalloc)(size_t size,int flags, void* qp_ptr);
+void (*svc_kfree)(void *ptr, void* qp_ptr);
+void *(*svc_dma_zalloc)(struct device *dev, size_t size, dma_addr_t* dma_handle, int flag, void* qp_ptr);
+void (*svc_dma_free)(struct device *dev, size_t size, void *ptr, dma_addr_t dma_handle, void* qp_ptr);
+
+static void svc_setup_func_ptr(void)
+{
+    svc_kmalloc = &svc_default_kmalloc;
+    svc_kfree = &svc_default_kfree;
+    svc_dma_zalloc = &svc_default_dma_zalloc;
+    svc_dma_free = &svc_default_dma_free;
+
+    return;
+}
+
+static void * svc_default_kmalloc( size_t size, int flag, void* qp_ptr)
+{
+    return kmalloc(size, GFP_KERNEL );
+}
+static void svc_default_kfree(void *ptr, void* qp_ptr)
+{
+    kfree(ptr);
+}
+
+static void * svc_default_dma_zalloc(struct device *dev, size_t size, dma_addr_t *dma_handle, int flag, void* qp_ptr)
+{
+    return dma_alloc_coherent(dev, size, dma_handle, flag);
+}
+
+static void svc_default_dma_free(struct device *dev, size_t size, void *ptr, dma_addr_t dma_handle, void* qp_ptr)
+{
+    dma_free_coherent(dev, size, ptr, dma_handle);
+}
+
+int setup_svc_mem_alloc_mlx( void *(*svc_iser_kmalloc)(size_t,int,void*),
+                            void(*svc_iser_kfree)(void *,void*),
+                            void *(*svc_iser_dma_zalloc)(struct device*, size_t,dma_addr_t*,int,void*),
+                            void (*svc_iser_dma_free)(struct device*,size_t,void*, dma_addr_t,void*))
+{
+    svc_kmalloc = svc_iser_kmalloc;
+    svc_kfree   = svc_iser_kfree;
+    svc_dma_zalloc = svc_iser_dma_zalloc;
+    svc_dma_free = svc_iser_dma_free;
+
+    return 1;
+}
+EXPORT_SYMBOL_GPL(setup_svc_mem_alloc_mlx);
+
 static enum rdma_link_layer
 mlx5_port_type_cap_to_rdma_ll(int port_type_cap)
 {
@@ -4989,6 +5044,9 @@ static int __init mlx5_ib_init(void)
 {
 	int ret;
 
+ 	/* Initialize function pointers to default functions */
+        svc_setup_func_ptr();
+ 
 	xlt_emergency_page = (void *)__get_free_page(GFP_KERNEL);
 	if (!xlt_emergency_page)
 		return -ENOMEM;

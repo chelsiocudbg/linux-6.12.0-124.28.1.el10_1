@@ -1,12 +1,21 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2018-2019, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
+#include "kcompat.h"
+#ifdef HAVE_LINUX_UNALIGNED_HEADER
 #include <linux/unaligned.h>
+#else /* HAVE_LINUX_UNALIGNED_HEADER */
+#include <asm/unaligned.h>
+#endif /* !HAVE_LINUX_UNALIGNED_HEADER */
 #include <linux/uuid.h>
 #include <linux/crc32.h>
+#if IS_ENABLED(CONFIG_PLDMFW)
 #include <linux/pldmfw.h>
+#else
+#include "kcompat_pldmfw.h"
+#endif
+
 #include "ice.h"
-#include "ice_lib.h"
 #include "ice_fw_update.h"
 
 struct ice_fwu_priv {
@@ -121,14 +130,11 @@ ice_check_component_response(struct ice_pf *pf, u16 id, u8 response, u8 code,
 		/* firmware indicated this update is good to proceed */
 		return 0;
 	case ICE_AQ_NVM_PASS_COMP_CAN_MAY_BE_UPDATEABLE:
-		dev_warn(dev, "firmware recommends not updating %s, as it may result in a downgrade. continuing anyways\n", component);
+		dev_warn(dev, "firmware recommends not updating %s, as it may result in a downgrade. Continuing anyways\n",
+			 component);
 		return 0;
 	case ICE_AQ_NVM_PASS_COMP_CAN_NOT_BE_UPDATED:
 		dev_info(dev, "firmware has rejected updating %s\n", component);
-		break;
-	case ICE_AQ_NVM_PASS_COMP_PARTIAL_CHECK:
-		if (ice_is_recovery_mode(&pf->hw))
-			return 0;
 		break;
 	}
 
@@ -247,7 +253,7 @@ ice_send_component_table(struct pldmfw *context, struct pldmfw_component *compon
 	comp_tbl->cvs_len = component->version_len;
 	memcpy(comp_tbl->cvs, component->version_string, component->version_len);
 
-	dev_dbg(dev, "Sending component table to firmware:\n");
+	dev_dbg(dev, "Sending component table to firmware\n");
 
 	status = ice_nvm_pass_component_tbl(hw, (u8 *)comp_tbl, length,
 					    transfer_flag, &comp_response,
@@ -326,8 +332,9 @@ int ice_write_one_nvm_block(struct ice_pf *pf, u16 module, u32 offset,
 	 */
 	err = ice_aq_wait_for_event(pf, &task, 15 * HZ);
 	if (err) {
-		dev_err(dev, "Timed out while trying to flash module 0x%02x with block of size %u at offset %u, err %d\n",
-			module, block_size, offset, err);
+		ice_dev_err_errno(dev, err,
+				  "Timed out while trying to flash module 0x%02x with block of size %u at offset %u",
+				  module, block_size, offset);
 		NL_SET_ERR_MSG_MOD(extack, "Timed out waiting for firmware");
 		return -EIO;
 	}
@@ -369,8 +376,8 @@ int ice_write_one_nvm_block(struct ice_pf *pf, u16 module, u32 offset,
 	 */
 	if (reset_level && last_cmd && module == ICE_SR_1ST_NVM_BANK_PTR) {
 		if (hw->dev_caps.common_cap.pcie_reset_avoidance) {
-			*reset_level = desc->params.nvm.cmd_flags &
-				       ICE_AQC_NVM_RESET_LVL_M;
+			*reset_level = (desc->params.nvm.cmd_flags &
+					ICE_AQC_NVM_RESET_LVL_M);
 			dev_dbg(dev, "Firmware reported required reset level as %u\n",
 				*reset_level);
 		} else {
@@ -414,6 +421,7 @@ ice_write_nvm_module(struct ice_pf *pf, u16 module, const char *component,
 
 	dev_dbg(dev, "Beginning write of flash component '%s', module 0x%02x\n", component, module);
 
+	ice_block_ptp_workthreads_global(pf, true);
 	devlink = priv_to_devlink(pf);
 
 	devlink_flash_update_status_notify(devlink, "Flashing",
@@ -590,7 +598,8 @@ ice_switch_flash_banks(struct ice_pf *pf, u8 activate_flags,
 	 */
 	if (emp_reset_available) {
 		if (hw->dev_caps.common_cap.reset_restrict_support) {
-			*emp_reset_available = response_flags & ICE_AQC_NVM_EMPR_ENA;
+			*emp_reset_available =
+				response_flags & ICE_AQC_NVM_EMPR_ENA;
 			dev_dbg(dev, "Firmware indicated that EMP reset is %s\n",
 				*emp_reset_available ?
 				"available" : "not available");
@@ -602,8 +611,8 @@ ice_switch_flash_banks(struct ice_pf *pf, u8 activate_flags,
 
 	err = ice_aq_wait_for_event(pf, &task, 30 * HZ);
 	if (err) {
-		dev_err(dev, "Timed out waiting for firmware to switch active flash banks, err %d\n",
-			err);
+		ice_dev_err_errno(dev, err,
+				  "Timed out waiting for firmware to switch active flash banks");
 		NL_SET_ERR_MSG_MOD(extack, "Timed out waiting for firmware");
 		return err;
 	}
@@ -743,11 +752,12 @@ static int ice_finalize_update(struct pldmfw *context)
 	return 0;
 }
 
+/* these are u32 so that we can store PCI_ANY_ID */
 struct ice_pldm_pci_record_id {
-	u32 vendor;
-	u32 device;
-	u32 subsystem_vendor;
-	u32 subsystem_device;
+	int vendor;
+	int device;
+	int subsystem_vendor;
+	int subsystem_device;
 };
 
 /**
@@ -764,8 +774,8 @@ struct ice_pldm_pci_record_id {
  *
  * Returns: true if the device matches the record, false otherwise.
  */
-static bool
-ice_op_pci_match_record(struct pldmfw *context, struct pldmfw_record *record)
+static bool ice_op_pci_match_record(struct pldmfw *context,
+				    struct pldmfw_record *record)
 {
 	struct pci_dev *pdev = to_pci_dev(context->dev);
 	struct ice_pldm_pci_record_id id = {
@@ -805,7 +815,7 @@ ice_op_pci_match_record(struct pldmfw *context, struct pldmfw_record *record)
 		 * device or vendor.
 		 */
 		if (value)
-			*ptr = value;
+			*ptr = (int)value;
 		else
 			*ptr = PCI_ANY_ID;
 	}
@@ -814,13 +824,11 @@ ice_op_pci_match_record(struct pldmfw *context, struct pldmfw_record *record)
 	if ((id.vendor == PCI_ANY_ID || id.vendor == pdev->vendor) &&
 	    (id.device == PCI_ANY_ID || id.device == pdev->device ||
 	    id.device == ICE_DEV_ID_E822_SI_DFLT) &&
-	    (id.subsystem_vendor == PCI_ANY_ID ||
-	    id.subsystem_vendor == pdev->subsystem_vendor) &&
-	    (id.subsystem_device == PCI_ANY_ID ||
-	    id.subsystem_device == pdev->subsystem_device))
+	    (id.subsystem_vendor == PCI_ANY_ID || id.subsystem_vendor == pdev->subsystem_vendor) &&
+	    (id.subsystem_device == PCI_ANY_ID || id.subsystem_device == pdev->subsystem_device))
 		return true;
-
-	return false;
+	else
+		return false;
 }
 
 static const struct pldmfw_ops ice_fwu_ops_e810 = {
@@ -912,7 +920,6 @@ ice_cancel_pending_update(struct ice_pf *pf, const char *component,
 			  struct netlink_ext_ack *extack)
 {
 	struct devlink *devlink = priv_to_devlink(pf);
-	struct device *dev = ice_pf_to_dev(pf);
 	struct ice_hw *hw = &pf->hw;
 	u8 pending;
 	int err;
@@ -948,7 +955,7 @@ ice_cancel_pending_update(struct ice_pf *pf, const char *component,
 
 	err = ice_acquire_nvm(hw, ICE_RES_WRITE);
 	if (err) {
-		dev_err(dev, "Failed to acquire device flash lock, err %d aq_err %s\n",
+		dev_err(ice_pf_to_dev(pf), "Failed to acquire device flash lock, err %d aq_err %s\n",
 			err, ice_aq_str(hw->adminq.sq_last_status));
 		NL_SET_ERR_MSG_MOD(extack, "Failed to acquire device flash lock");
 		return err;
@@ -968,7 +975,7 @@ ice_cancel_pending_update(struct ice_pf *pf, const char *component,
 }
 
 /**
- * ice_devlink_flash_update - Write a firmware image to the device
+ * ice_flash_pldm_image - Write a PLDM-formatted firmware image to the device
  * @devlink: pointer to devlink associated with the device to update
  * @params: devlink flash update parameters
  * @extack: netlink extended ACK structure
@@ -983,45 +990,60 @@ ice_cancel_pending_update(struct ice_pf *pf, const char *component,
  *
  * Returns: zero on success or a negative error code on failure.
  */
-int ice_devlink_flash_update(struct devlink *devlink,
-			     struct devlink_flash_update_params *params,
-			     struct netlink_ext_ack *extack)
+int ice_flash_pldm_image(struct devlink *devlink,
+			 struct devlink_flash_update_params *params,
+			 struct netlink_ext_ack *extack)
 {
 	struct ice_pf *pf = devlink_priv(devlink);
 	struct device *dev = ice_pf_to_dev(pf);
 	struct ice_hw *hw = &pf->hw;
+#ifndef HAVE_DEVLINK_FLASH_UPDATE_PARAMS_FW
+	const struct firmware *fw;
+#endif
 	struct ice_fwu_priv priv;
+#ifdef HAVE_DEVLINK_FLASH_UPDATE_PARAMS_OVERWRITE_MASK
+	u32 overwrite_mask = params->overwrite_mask;
+#else
+	u32 overwrite_mask = 0;
+#endif
 	u8 preservation;
 	int err;
 
-	if (!params->overwrite_mask) {
+	if (ice_get_fw_mode(hw) == ICE_FW_MODE_REC) {
+		/* The devlink flash update process does not currently support
+		 * updating when in recovery mode.
+		 */
+		NL_SET_ERR_MSG_MOD(extack, "Device firmware is in recovery mode. Unable to perform flash update.");
+		return -EOPNOTSUPP;
+	}
+
+	switch (overwrite_mask) {
+	case 0:
 		/* preserve all settings and identifiers */
 		preservation = ICE_AQC_NVM_PRESERVE_ALL;
-	} else if (params->overwrite_mask == DEVLINK_FLASH_OVERWRITE_SETTINGS) {
-		/* overwrite settings, but preserve the vital device identifiers */
+		break;
+	case DEVLINK_FLASH_OVERWRITE_SETTINGS:
+		/* overwrite settings, but preserve vital information such as
+		 * device identifiers.
+		 */
 		preservation = ICE_AQC_NVM_PRESERVE_SELECTED;
-	} else if (params->overwrite_mask == (DEVLINK_FLASH_OVERWRITE_SETTINGS |
-					      DEVLINK_FLASH_OVERWRITE_IDENTIFIERS)) {
+		break;
+	case (DEVLINK_FLASH_OVERWRITE_SETTINGS |
+	      DEVLINK_FLASH_OVERWRITE_IDENTIFIERS):
 		/* overwrite both settings and identifiers, preserve nothing */
 		preservation = ICE_AQC_NVM_NO_PRESERVATION;
-	} else {
+		break;
+	default:
 		NL_SET_ERR_MSG_MOD(extack, "Requested overwrite mask is not supported");
 		return -EOPNOTSUPP;
 	}
 
-	if (!hw->dev_caps.common_cap.nvm_unified_update && !ice_is_recovery_mode(hw)) {
+	if (!hw->dev_caps.common_cap.nvm_unified_update) {
 		NL_SET_ERR_MSG_MOD(extack, "Current firmware does not support unified update");
 		return -EOPNOTSUPP;
 	}
 
 	memset(&priv, 0, sizeof(priv));
-
-	if (params->component && strcmp(params->component, "fw.mgmt") == 0) {
-		priv.context.mode = PLDMFW_UPDATE_MODE_SINGLE_COMPONENT;
-		priv.context.component_identifier = NVM_COMP_ID_NVM;
-	} else if (params->component) {
-		return -EOPNOTSUPP;
-	}
 
 	/* the E822 device needs a slightly different ops */
 	if (hw->mac_type == ICE_MAC_GENERIC)
@@ -1047,7 +1069,20 @@ int ice_devlink_flash_update(struct devlink *devlink,
 		return err;
 	}
 
+#ifdef HAVE_DEVLINK_FLASH_UPDATE_PARAMS_FW
 	err = pldmfw_flash_image(&priv.context, params->fw);
+#else
+	err = request_firmware(&fw, params->file_name, dev);
+	if (err) {
+		NL_SET_ERR_MSG_MOD(extack, "Unable to read file from disk");
+		ice_release_nvm(hw);
+		return err;
+	}
+
+	err = pldmfw_flash_image(&priv.context, fw);
+
+	release_firmware(fw);
+#endif
 	if (err == -ENOENT) {
 		dev_err(dev, "Firmware image has no record matching this device\n");
 		NL_SET_ERR_MSG_MOD(extack, "Firmware image has no record matching this device");

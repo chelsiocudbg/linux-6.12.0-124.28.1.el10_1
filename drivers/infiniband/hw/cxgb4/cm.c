@@ -150,6 +150,7 @@ static DEFINE_SPINLOCK(timeout_lock);
 static void deref_cm_id(struct c4iw_ep_common *epc)
 {
 	epc->cm_id->rem_ref(epc->cm_id);
+	epc->cm_id->provider_data = NULL;
 	epc->cm_id = NULL;
 	set_bit(CM_ID_DEREFED, &epc->history);
 }
@@ -223,6 +224,8 @@ int c4iw_ofld_send(struct c4iw_rdev *rdev, struct sk_buff *skb)
 
 	if (c4iw_fatal_error(rdev)) {
 		kfree_skb(skb);
+        complete(&rdev->pbl_compl);
+        complete(&rdev->rqt_compl);
 		pr_err("%s - device in error state - dropping\n", __func__);
 		return -EIO;
 	}
@@ -402,8 +405,9 @@ void _c4iw_free_ep(struct kref *kref)
 					(const u32 *)&sin6->sin6_addr.s6_addr,
 					1);
 		}
-		cxgb4_remove_tid(ep->com.dev->rdev.lldi.tids, 0, ep->hwtid,
-				 ep->com.local_addr.ss_family);
+		if (ep->hwtid != -1)
+			cxgb4_remove_tid(ep->com.dev->rdev.lldi.tids, 0, ep->hwtid,
+			                 ep->com.local_addr.ss_family);
 		dst_release(ep->dst);
 		cxgb4_l2t_release(ep->l2t);
 		kfree_skb(ep->mpa_skb);
@@ -3101,6 +3105,8 @@ int c4iw_reject_cr(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len)
 	mutex_lock(&ep->com.mutex);
 	if (ep->com.state != MPA_REQ_RCVD) {
 		mutex_unlock(&ep->com.mutex);
+		if (cm_id->provider_data)
+			cm_id->provider_data = NULL;
 		c4iw_put_ep(&ep->com);
 		return -ECONNRESET;
 	}
@@ -3113,6 +3119,8 @@ int c4iw_reject_cr(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len)
 
 	stop_ep_timer(ep);
 	c4iw_ep_disconnect(ep, abort != 0, GFP_KERNEL);
+	if (cm_id->provider_data)
+		cm_id->provider_data = NULL;
 	c4iw_put_ep(&ep->com);
 	return 0;
 }
@@ -3228,6 +3236,8 @@ err_out:
 	mutex_unlock(&ep->com.mutex);
 	if (abort)
 		c4iw_ep_disconnect(ep, 1, GFP_KERNEL);
+	if (cm_id->provider_data)
+		cm_id->provider_data = NULL;
 	c4iw_put_ep(&ep->com);
 	return err;
 }
@@ -3339,6 +3349,7 @@ int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 	if (peer2peer && ep->ord == 0)
 		ep->ord = 1;
 
+	ep->hwtid = -1;
 	ep->com.cm_id = cm_id;
 	ref_cm_id(&ep->com);
 	cm_id->provider_data = ep;

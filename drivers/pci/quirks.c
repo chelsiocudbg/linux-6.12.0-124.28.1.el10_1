@@ -36,6 +36,7 @@
 #include <linux/switchtec.h>
 #include "pci.h"
 
+__attribute__((unused))
 static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
 {
 	unsigned long count;
@@ -98,6 +99,8 @@ static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
  */
 int pcie_failed_link_retrain(struct pci_dev *dev)
 {
+	return false;
+#if 0
 	static const struct pci_device_id ids[] = {
 		{ PCI_VDEVICE(ASMEDIA, 0x2824) }, /* ASMedia ASM2824 */
 		{}
@@ -142,6 +145,7 @@ int pcie_failed_link_retrain(struct pci_dev *dev)
 	}
 
 	return ret;
+#endif
 }
 
 static ktime_t fixup_debug_start(struct pci_dev *dev,

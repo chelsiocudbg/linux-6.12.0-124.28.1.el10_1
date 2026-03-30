@@ -1,7 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
-/* Copyright (c) 2016 - 2021 Intel Corporation */
-#include <linux/etherdevice.h>
-
+// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+/* Copyright (c) 2016 - 2023 Intel Corporation */
 #include "osdep.h"
 #include "hmc.h"
 #include "defs.h"
@@ -27,7 +25,9 @@ int irdma_sc_access_ah(struct irdma_sc_cqp *cqp, struct irdma_ah_info *info,
 	if (!wqe)
 		return -ENOMEM;
 
-	set_64bit_val(wqe, 0, ether_addr_to_u64(info->mac_addr) << 16);
+	set_64bit_val(wqe, 0,
+		      FIELD_PREP(IRDMAQPC_MACADDRESS, ether_addr_to_u64(info->mac_addr)));
+
 	qw1 = FIELD_PREP(IRDMA_UDA_CQPSQ_MAV_PDINDEXLO, info->pd_idx) |
 	      FIELD_PREP(IRDMA_UDA_CQPSQ_MAV_TC, info->tc_tos) |
 	      FIELD_PREP(IRDMA_UDAQPC_VLANTAG, info->vlan_tag);
@@ -263,3 +263,4 @@ int irdma_sc_del_mcast_grp(struct irdma_mcast_grp_info *ctx,
 
 	return -EINVAL;
 }
+

@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2015 - 2021 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2015 - 2024 Intel Corporation */
 #ifndef IRDMA_VERBS_H
 #define IRDMA_VERBS_H
 
@@ -9,22 +9,55 @@
 #define IRDMA_PKEY_TBL_SZ		1
 #define IRDMA_DEFAULT_PKEY		0xFFFF
 
+#define IRDMA_QPS_PER_PUSH_PAGE 16
+#define IRDMA_PUSH_WIN_SIZE 256
+
+#define IRDMA_SHADOW_PGCNT		1
+
+#define iwdev_to_idev(iwdev)	(&(iwdev)->rf->sc_dev)
+
 struct irdma_ucontext {
 	struct ib_ucontext ibucontext;
 	struct irdma_device *iwdev;
+#ifdef RDMA_MMAP_DB_SUPPORT
 	struct rdma_user_mmap_entry *db_mmap_entry;
+#else
+	struct irdma_user_mmap_entry *db_mmap_entry;
+	DECLARE_HASHTABLE(mmap_hash_tbl, 6);
+	spinlock_t mmap_tbl_lock; /* protect mmap hash table entries */
+#endif
 	struct list_head cq_reg_mem_list;
 	spinlock_t cq_reg_mem_list_lock; /* protect CQ memory list */
 	struct list_head qp_reg_mem_list;
 	spinlock_t qp_reg_mem_list_lock; /* protect QP memory list */
+	struct list_head srq_reg_mem_list;
+	spinlock_t srq_reg_mem_list_lock; /* protect SRQ memory list */
+#ifdef CONFIG_DEBUG_FS
+	struct list_head uctx_list;
+#endif
+	/* FIXME: Move to kcompat ideally. Used < 4.20.0 for old diassasscoaite flow */
+	struct list_head vma_list;
+	struct mutex vma_list_mutex; /* protect the vma_list */
 	int abi_ver;
-	u8 legacy_mode : 1;
-	u8 use_raw_attrs : 1;
+	bool legacy_mode:1;
+	bool use_raw_attrs:1;
+};
+
+struct irdma_hw_push_page {
+	DECLARE_BITMAP(push_offset_bmap, IRDMA_QPS_PER_PUSH_PAGE);
+	u32 push_idx;
+};
+
+struct irdma_qs_push_pages {
+	u16 qs_handle;
+	struct irdma_hw_push_page push_page[IRDMA_MAX_PUSH_PAGES_QSET];
 };
 
 struct irdma_pd {
 	struct ib_pd ibpd;
 	struct irdma_sc_pd sc_pd;
+	struct mutex push_alloc_mutex; /* protect push page alloc within a PD*/
+	struct irdma_qs_push_pages qs_pages[IRDMA_MAX_QSETS];
 };
 
 union irdma_sockaddr {
@@ -49,7 +82,7 @@ struct irdma_ah {
 	union ib_gid dgid;
 	struct hlist_node list;
 	refcount_t refcnt;
-	struct irdma_ah *parent_ah; /* AH from cached list */
+	struct irdma_ah *parent_ah;	/* AH from cached list */
 };
 
 struct irdma_hmc_pble {
@@ -65,10 +98,16 @@ struct irdma_cq_mr {
 	bool split;
 };
 
+struct irdma_srq_mr {
+	struct irdma_hmc_pble srq_pbl;
+	dma_addr_t shadow;
+};
+
 struct irdma_qp_mr {
 	struct irdma_hmc_pble sq_pbl;
 	struct irdma_hmc_pble rq_pbl;
 	dma_addr_t shadow;
+	dma_addr_t rq_pa;
 	struct page *sq_page;
 };
 
@@ -85,6 +124,7 @@ struct irdma_pbl {
 	union {
 		struct irdma_qp_mr qp_mr;
 		struct irdma_cq_mr cq_mr;
+		struct irdma_srq_mr srq_mr;
 	};
 
 	bool pbl_allocated:1;
@@ -103,13 +143,34 @@ struct irdma_mr {
 	int access;
 	u8 is_hwreg;
 	u16 type;
+	bool dma_mr:1;
 	u32 page_cnt;
 	u64 page_size;
+	u64 page_msk;
 	u32 npages;
 	u32 stag;
 	u64 len;
 	u64 pgaddrmem[IRDMA_MAX_SAVED_PHY_PGADDR];
+#ifdef CONFIG_DEBUG_FS
+	u64 level0_pa;
+#endif
 	struct irdma_pbl iwpbl;
+};
+
+struct irdma_srq {
+	struct ib_srq ibsrq;
+	struct irdma_sc_srq sc_srq __aligned(64);
+	struct irdma_dma_mem kmem;
+	struct completion free_srq;
+	u64 *srq_wrid_mem;
+	refcount_t refcnt;
+	spinlock_t lock; /* for poll srq */
+	struct irdma_pbl *iwpbl;
+	struct ib_sge *sg_list;
+	u16 srq_head;
+	u32 srq_num;
+	u32 max_wr;
+	bool user_mode:1;
 };
 
 struct irdma_cq {
@@ -145,6 +206,15 @@ struct disconn_work {
 	struct irdma_qp *iwqp;
 };
 
+struct if_notify_work {
+	struct work_struct work;
+	struct irdma_device *iwdev;
+	u32 ipaddr[4];
+	u16 vlan_id;
+	bool ipv4:1;
+	bool ifup:1;
+};
+
 struct iw_cm_id;
 
 struct irdma_qp_kmode {
@@ -160,8 +230,13 @@ struct irdma_qp {
 	struct irdma_cq *iwscq;
 	struct irdma_cq *iwrcq;
 	struct irdma_pd *iwpd;
+#ifdef RDMA_MMAP_DB_SUPPORT
 	struct rdma_user_mmap_entry *push_wqe_mmap_entry;
 	struct rdma_user_mmap_entry *push_db_mmap_entry;
+#else
+	struct irdma_user_mmap_entry *push_wqe_mmap_entry;
+	struct irdma_user_mmap_entry *push_db_mmap_entry;
+#endif
 	struct irdma_qp_host_ctx_info ctx_info;
 	union {
 		struct irdma_iwarp_offload_info iwarp_info;
@@ -192,29 +267,30 @@ struct irdma_qp {
 	void *pbl_vbase;
 	dma_addr_t pbl_pbase;
 	struct page *page;
-	u8 active_conn : 1;
-	u8 user_mode : 1;
-	u8 hte_added : 1;
-	u8 flush_issued : 1;
-	u8 sig_all : 1;
-	u8 pau_mode : 1;
-	u8 suspend_pending : 1;
-	u8 rsvd : 1;
 	u8 iwarp_state;
+	atomic_t flush_issued;
 	u16 term_sq_flush_code;
 	u16 term_rq_flush_code;
 	u8 hw_iwarp_state;
 	u8 hw_tcp_state;
+	u8 ae_src;
 	struct irdma_qp_kmode kqp;
 	struct irdma_dma_mem host_ctx;
 	struct timer_list terminate_timer;
 	struct irdma_pbl *iwpbl;
+	struct ib_sge *sg_list;
 	struct irdma_dma_mem q2_ctx_mem;
 	struct irdma_dma_mem ietf_mem;
 	struct completion free_qp;
 	wait_queue_head_t waitq;
 	wait_queue_head_t mod_qp_waitq;
 	u8 rts_ae_rcvd;
+	bool active_conn:1;
+	bool user_mode:1;
+	bool hte_added:1;
+	bool sig_all:1;
+	bool pau_mode:1;
+	bool suspend_pending:1;
 };
 
 enum irdma_mmap_flag {
@@ -223,7 +299,13 @@ enum irdma_mmap_flag {
 };
 
 struct irdma_user_mmap_entry {
+#ifdef RDMA_MMAP_DB_SUPPORT
 	struct rdma_user_mmap_entry rdma_entry;
+#else
+	struct irdma_ucontext *ucontext;
+	struct hlist_node hlist;
+	u64 pgoff_key; /* Used to compute offset (in bytes) returned to user libc's mmap */
+#endif
 	u64 bar_offset;
 	u8 mmap_flag;
 };
@@ -241,6 +323,8 @@ static inline u16 irdma_fw_minor_ver(struct irdma_sc_dev *dev)
 static inline void set_ib_wc_op_sq(struct irdma_cq_poll_info *cq_poll_info,
 				   struct ib_wc *entry)
 {
+	struct irdma_sc_qp *qp;
+
 	switch (cq_poll_info->op_type) {
 	case IRDMA_OP_TYPE_RDMA_WRITE:
 	case IRDMA_OP_TYPE_RDMA_WRITE_SOL:
@@ -259,11 +343,33 @@ static inline void set_ib_wc_op_sq(struct irdma_cq_poll_info *cq_poll_info,
 	case IRDMA_OP_TYPE_FAST_REG_NSMR:
 		entry->opcode = IB_WC_REG_MR;
 		break;
+	case IRDMA_OP_TYPE_ATOMIC_COMPARE_AND_SWAP:
+		entry->opcode = IB_WC_COMP_SWAP;
+		break;
+	case IRDMA_OP_TYPE_ATOMIC_FETCH_AND_ADD:
+		entry->opcode = IB_WC_FETCH_ADD;
+		break;
 	case IRDMA_OP_TYPE_INV_STAG:
 		entry->opcode = IB_WC_LOCAL_INV;
 		break;
 	default:
+		qp = cq_poll_info->qp_handle;
+		ibdev_err(to_ibdev(qp->dev), "Invalid opcode = %d in CQE\n",
+			  cq_poll_info->op_type);
 		entry->status = IB_WC_GENERAL_ERR;
+	}
+}
+
+static inline void set_ib_wc_op_rq_gen_3(struct irdma_cq_poll_info *cq_poll_info,
+					 struct ib_wc *entry)
+{
+	switch (cq_poll_info->op_type) {
+	case IRDMA_OP_TYPE_RDMA_WRITE:
+	case IRDMA_OP_TYPE_RDMA_WRITE_SOL:
+		entry->opcode = IB_WC_RECV_RDMA_WITH_IMM;
+		break;
+	default:
+		entry->opcode = IB_WC_RECV;
 	}
 }
 
@@ -276,11 +382,10 @@ static inline void set_ib_wc_op_rq(struct irdma_cq_poll_info *cq_poll_info,
 	 */
 	if (!send_imm_support) {
 		entry->opcode = cq_poll_info->imm_valid ?
-					IB_WC_RECV_RDMA_WITH_IMM :
-					IB_WC_RECV;
+				IB_WC_RECV_RDMA_WITH_IMM :
+				IB_WC_RECV;
 		return;
 	}
-
 	switch (cq_poll_info->op_type) {
 	case IB_OPCODE_RDMA_WRITE_ONLY_WITH_IMMEDIATE:
 	case IB_OPCODE_RDMA_WRITE_LAST_WITH_IMMEDIATE:
@@ -291,12 +396,68 @@ static inline void set_ib_wc_op_rq(struct irdma_cq_poll_info *cq_poll_info,
 	}
 }
 
-void irdma_mcast_mac(u32 *ip_addr, u8 *mac, bool ipv4);
+/**
+ * irdma_mcast_mac_v4 - Get the multicast MAC for an IP address
+ * @ip_addr: IPv4 address
+ * @mac: pointer to result MAC address
+ *
+ */
+static inline void irdma_mcast_mac_v4(u32 *ip_addr, u8 *mac)
+{
+	u8 *ip = (u8 *)ip_addr;
+	unsigned char mac4[ETH_ALEN] = {0x01, 0x00, 0x5E, ip[2] & 0x7F, ip[1],
+					ip[0]};
+
+	ether_addr_copy(mac, mac4);
+}
+
+/**
+ * irdma_mcast_mac_v6 - Get the multicast MAC for an IP address
+ * @ip_addr: IPv6 address
+ * @mac: pointer to result MAC address
+ *
+ */
+static inline void irdma_mcast_mac_v6(u32 *ip_addr, u8 *mac)
+{
+	u8 *ip = (u8 *)ip_addr;
+	unsigned char mac6[ETH_ALEN] = {0x33, 0x33, ip[3], ip[2], ip[1], ip[0]};
+
+	ether_addr_copy(mac, mac6);
+}
+
+#ifdef ALLOC_HW_STATS_STRUCT_V2
+extern const struct rdma_stat_desc irdma_hw_stat_descs[];
+
+#endif /* ALLOC_HW_STATS_STRUCT_V2 */
+#ifdef RDMA_MMAP_DB_SUPPORT
+struct rdma_user_mmap_entry*
+irdma_user_mmap_entry_insert(struct irdma_ucontext *ucontext, u64 bar_offset,
+			     enum irdma_mmap_flag mmap_flag, u64 *mmap_offset);
+#else
+struct irdma_user_mmap_entry *
+irdma_user_mmap_entry_add_hash(struct irdma_ucontext *ucontext, u64 bar_offset,
+			       enum irdma_mmap_flag mmap_flag, u64 *mmap_offset);
+void irdma_user_mmap_entry_del_hash(struct irdma_user_mmap_entry *entry);
+#endif /* RDMA_MMAP_DB_SUPPORT */
+#ifndef SET_BEST_PAGE_SZ_V1
+struct irdma_mr *irdma_alloc_iwmr(struct ib_umem *region,
+				  struct ib_pd *pd, u64 virt,
+				  enum irdma_memreg_type reg_type);
+#else
+struct irdma_mr *irdma_alloc_iwmr(struct ib_umem *region,
+				  struct ib_pd *pd, u64 virt, u64 start,
+				  enum irdma_memreg_type reg_type);
+#endif /* !SET_BEST_PAGE_SZ_V1 */
+void irdma_free_iwmr(struct irdma_mr *iwmr);
+int irdma_reg_user_mr_type_mem(struct irdma_mr *iwmr, int access,
+			       bool create_stag);
 int irdma_ib_register_device(struct irdma_device *iwdev);
 void irdma_ib_unregister_device(struct irdma_device *iwdev);
-void irdma_ib_dealloc_device(struct ib_device *ibdev);
 void irdma_ib_qp_event(struct irdma_qp *iwqp, enum irdma_qp_event_type event);
 void irdma_generate_flush_completions(struct irdma_qp *iwqp);
 void irdma_remove_cmpls_list(struct irdma_cq *iwcq);
 int irdma_generated_cmpls(struct irdma_cq *iwcq, struct irdma_cq_poll_info *cq_poll_info);
+void irdma_sched_qp_flush_work(struct irdma_qp *iwqp);
+void irdma_flush_worker(struct work_struct *work);
+int irdma_hw_alloc_mw(struct irdma_device *iwdev, struct irdma_mr *iwmr);
 #endif /* IRDMA_VERBS_H */

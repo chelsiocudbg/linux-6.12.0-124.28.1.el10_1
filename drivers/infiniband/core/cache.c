@@ -687,12 +687,13 @@ rdma_find_gid_by_port(struct ib_device *ib_dev,
 {
 	int local_index;
 	struct ib_gid_table *table;
-	unsigned long mask = GID_ATTR_FIND_MASK_GID |
-			     GID_ATTR_FIND_MASK_GID_TYPE;
+	unsigned long mask = GID_ATTR_FIND_MASK_GID_TYPE;
 	struct ib_gid_attr val = {.ndev = ndev, .gid_type = gid_type};
-	const struct ib_gid_attr *attr;
+	const struct ib_gid_attr *attr = NULL;
 	unsigned long flags;
 
+	if (gid)
+		mask |= GID_ATTR_FIND_MASK_GID;
 	if (!rdma_is_port_valid(ib_dev, port))
 		return ERR_PTR(-ENOENT);
 
@@ -704,8 +705,10 @@ rdma_find_gid_by_port(struct ib_device *ib_dev,
 	read_lock_irqsave(&table->rwlock, flags);
 	local_index = find_gid(table, gid, &val, false, mask, NULL);
 	if (local_index >= 0) {
-		get_gid_entry(table->data_vec[local_index]);
-		attr = &table->data_vec[local_index]->attr;
+		if (gid) {
+			get_gid_entry(table->data_vec[local_index]);
+			attr = &table->data_vec[local_index]->attr;
+		}
 		read_unlock_irqrestore(&table->rwlock, flags);
 		return attr;
 	}
@@ -1419,7 +1422,7 @@ static int config_non_roce_gid_cache(struct ib_device *device,
 			goto err;
 		}
 
-		if (rdma_protocol_iwarp(device, port)) {
+		if (false && rdma_protocol_iwarp(device, port)) {
 			struct net_device *ndev;
 
 			ndev = ib_device_get_netdev(device, port);

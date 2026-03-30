@@ -465,11 +465,6 @@ alloc_begin_fd_uobject(const struct uverbs_api_object *obj,
 
 	fd_type =
 		container_of(obj->type_attrs, struct uverbs_obj_fd_type, type);
-	if (WARN_ON(fd_type->fops->release != &uverbs_uobject_fd_release &&
-		    fd_type->fops->release != &uverbs_async_event_release)) {
-		ret = ERR_PTR(-EINVAL);
-		goto err_fd;
-	}
 
 	new_fd = get_unused_fd_flags(O_CLOEXEC);
 	if (new_fd < 0) {

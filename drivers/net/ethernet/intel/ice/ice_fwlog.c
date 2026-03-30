@@ -1,12 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2022, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
-#include <linux/vmalloc.h>
-#include "ice.h"
+#include "ice_osdep.h"
 #include "ice_common.h"
 #include "ice_fwlog.h"
+#include "ice.h"
+#include <linux/vmalloc.h>
 
-bool ice_fwlog_ring_full(struct ice_fwlog_ring *rings)
+bool ice_fwlog_ring_full(const struct ice_fwlog_ring *rings)
 {
 	u16 head, tail;
 
@@ -21,7 +22,7 @@ bool ice_fwlog_ring_full(struct ice_fwlog_ring *rings)
 	return false;
 }
 
-bool ice_fwlog_ring_empty(struct ice_fwlog_ring *rings)
+bool ice_fwlog_ring_empty(const struct ice_fwlog_ring *rings)
 {
 	return rings->head == rings->tail;
 }
@@ -132,7 +133,6 @@ void ice_fwlog_realloc_rings(struct ice_hw *hw, int index)
  */
 int ice_fwlog_init(struct ice_hw *hw)
 {
-	/* only support fw log commands on PF 0 */
 	if (hw->bus.func)
 		return -EINVAL;
 
@@ -188,8 +188,6 @@ void ice_fwlog_deinit(struct ice_hw *hw)
 	if (hw->bus.func)
 		return;
 
-	ice_debugfs_pf_deinit(hw->back);
-
 	/* make sure FW logging is disabled to not put the FW in a weird state
 	 * for the next driver load
 	 */
@@ -221,7 +219,7 @@ void ice_fwlog_deinit(struct ice_hw *hw)
  * This will always return false if called before ice_init_hw(), so it must be
  * called after ice_init_hw().
  */
-bool ice_fwlog_supported(struct ice_hw *hw)
+bool ice_fwlog_supported(const struct ice_hw *hw)
 {
 	return hw->fwlog_supported;
 }
@@ -349,7 +347,7 @@ static int ice_aq_fwlog_get(struct ice_hw *hw, struct ice_fwlog_cfg *cfg)
 	if (cmd->cmd_flags & ICE_AQC_FW_LOG_QUERY_REGISTERED)
 		cfg->options |= ICE_FWLOG_OPTION_IS_REGISTERED;
 
-	fw_modules = (struct ice_aqc_fw_log_cfg_resp *)buf;
+	fw_modules = buf;
 
 	for (i = 0; i < module_id_cnt; i++) {
 		struct ice_aqc_fw_log_cfg_resp *fw_module = &fw_modules[i];

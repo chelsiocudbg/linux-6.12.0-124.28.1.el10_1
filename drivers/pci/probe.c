@@ -2431,7 +2431,7 @@ static bool pci_bus_wait_rrs(struct pci_bus *bus, int devfn, u32 *l,
 	 * valid Vendor ID or we time out.
 	 */
 	while (pci_bus_rrs_vendor_id(*l)) {
-		if (delay > timeout) {
+		if (delay > 2 ) {
 			pr_warn("pci %04x:%02x:%02x.%d: not ready after %dms; giving up\n",
 				pci_domain_nr(bus), bus->number,
 				PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1);

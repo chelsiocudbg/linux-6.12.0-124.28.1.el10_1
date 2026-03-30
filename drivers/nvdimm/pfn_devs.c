@@ -691,12 +691,11 @@ static int __nvdimm_setup_pfn(struct nd_pfn *nd_pfn, struct dev_pagemap *pgmap)
 	u32 reserve = nd_info_block_reserve();
 	struct nd_namespace_common *ndns = nd_pfn->ndns;
 	struct nd_namespace_io *nsio = to_nd_namespace_io(&ndns->dev);
-	resource_size_t base = nsio->res.start + start_pad;
-	resource_size_t end = nsio->res.end - end_trunc;
+	int rc = setup_pgmap_resource(nsio, start_pad, end_trunc, pgmap);
 	struct vmem_altmap __altmap = {
-		.base_pfn = init_altmap_base(base),
-		.reserve = init_altmap_reserve(base),
-		.end_pfn = PHYS_PFN(end),
+                .base_pfn = init_altmap_base(nsio->res.start + start_pad),
+                .reserve = init_altmap_reserve(nsio->res.start + start_pad),
+                .end_pfn = PHYS_PFN((nsio->res.end - end_trunc)),
 	};
 
 	*range = (struct range) {
@@ -704,6 +703,9 @@ static int __nvdimm_setup_pfn(struct nd_pfn *nd_pfn, struct dev_pagemap *pgmap)
 		.end = nsio->res.end - end_trunc,
 	};
 	pgmap->nr_range = 1;
+	if (rc)
+                return rc;
+
 	if (nd_pfn->mode == PFN_MODE_RAM) {
 		if (offset < reserve)
 			return -EINVAL;
@@ -716,6 +718,7 @@ static int __nvdimm_setup_pfn(struct nd_pfn *nd_pfn, struct dev_pagemap *pgmap)
 					le64_to_cpu(nd_pfn->pfn_sb->npfns),
 					nd_pfn->npfns);
 		memcpy(altmap, &__altmap, sizeof(*altmap));
+		pr_warn_once("setup_pfn altmap %lx\n", altmap->base_pfn);
 		altmap->free = PHYS_PFN(offset - reserve);
 		altmap->alloc = 0;
 		pgmap->flags |= PGMAP_ALTMAP_VALID;
@@ -738,7 +741,9 @@ static int nd_pfn_init(struct nd_pfn *nd_pfn)
 	const char *sig;
 	u64 checksum;
 	int rc;
+        unsigned long struct_page_size = sizeof(struct page);
 
+        struct_page_size = ALIGN(struct_page_size, 64);
 	pfn_sb = devm_kmalloc(&nd_pfn->dev, sizeof(*pfn_sb), GFP_KERNEL);
 	if (!pfn_sb)
 		return -ENOMEM;
@@ -810,7 +815,8 @@ static int nd_pfn_init(struct nd_pfn *nd_pfn)
 				return -EINVAL;
 			}
 		}
-		offset = ALIGN(start + SZ_8K + page_map_size, align) - start;
+                offset = ALIGN(start + SZ_8K + struct_page_size * npfns, align)
+			- start;
 	} else if (nd_pfn->mode == PFN_MODE_RAM)
 		offset = ALIGN(start + SZ_8K, align) - start;
 	else
@@ -834,10 +840,7 @@ static int nd_pfn_init(struct nd_pfn *nd_pfn)
 	pfn_sb->version_minor = cpu_to_le16(4);
 	pfn_sb->end_trunc = cpu_to_le32(end_trunc);
 	pfn_sb->align = cpu_to_le32(nd_pfn->align);
-	if (sizeof(struct page) > MAX_STRUCT_PAGE_SIZE && page_struct_override)
-		pfn_sb->page_struct_size = cpu_to_le16(sizeof(struct page));
-	else
-		pfn_sb->page_struct_size = cpu_to_le16(MAX_STRUCT_PAGE_SIZE);
+        pfn_sb->page_struct_size = cpu_to_le16(struct_page_size);
 	pfn_sb->page_size = cpu_to_le32(PAGE_SIZE);
 	checksum = nd_sb_checksum((struct nd_gen_sb *) pfn_sb);
 	pfn_sb->checksum = cpu_to_le64(checksum);
@@ -867,4 +870,5 @@ int nvdimm_setup_pfn(struct nd_pfn *nd_pfn, struct dev_pagemap *pgmap)
 	/* we need a valid pfn_sb before we can init a dev_pagemap */
 	return __nvdimm_setup_pfn(nd_pfn, pgmap);
 }
+
 EXPORT_SYMBOL_GPL(nvdimm_setup_pfn);

@@ -1,12 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2019-2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #ifndef _ICE_TC_LIB_H_
 #define _ICE_TC_LIB_H_
 
-#include <linux/bits.h>
-#include <net/pfcp.h>
-
+#ifdef HAVE_TC_SETUP_CLSFLOWER
 #define ICE_TC_FLWR_FIELD_DST_MAC		BIT(0)
 #define ICE_TC_FLWR_FIELD_SRC_MAC		BIT(1)
 #define ICE_TC_FLWR_FIELD_VLAN			BIT(2)
@@ -25,29 +23,63 @@
 #define ICE_TC_FLWR_FIELD_ENC_SRC_L4_PORT	BIT(15)
 #define ICE_TC_FLWR_FIELD_ENC_DST_MAC		BIT(16)
 #define ICE_TC_FLWR_FIELD_ETH_TYPE_ID		BIT(17)
-#define ICE_TC_FLWR_FIELD_GTP_OPTS		BIT(18)
-#define ICE_TC_FLWR_FIELD_CVLAN			BIT(19)
-#define ICE_TC_FLWR_FIELD_PPPOE_SESSID		BIT(20)
-#define ICE_TC_FLWR_FIELD_PPP_PROTO		BIT(21)
-#define ICE_TC_FLWR_FIELD_IP_TOS		BIT(22)
-#define ICE_TC_FLWR_FIELD_IP_TTL		BIT(23)
-#define ICE_TC_FLWR_FIELD_ENC_IP_TOS		BIT(24)
-#define ICE_TC_FLWR_FIELD_ENC_IP_TTL		BIT(25)
+#ifdef HAVE_GTP_SUPPORT
+#define ICE_TC_FLWR_FIELD_ENC_OPTS		BIT(18)
+#endif /* HAVE_GTP_SUPPORT */
+#ifdef HAVE_FLOW_DISSECTOR_KEY_IP
+#define ICE_TC_FLWR_FIELD_IP_TOS		BIT(19)
+#define ICE_TC_FLWR_FIELD_IP_TTL		BIT(20)
+#endif /* HAVE_FLOW_DISSECTOR_KEY_IP */
+#ifdef HAVE_FLOW_DISSECTOR_KEY_ENC_IP
+#define ICE_TC_FLWR_FIELD_ENC_IP_TOS		BIT(21)
+#define ICE_TC_FLWR_FIELD_ENC_IP_TTL		BIT(22)
+#endif /* HAVE_FLOW_DISSECTOR_KEY_ENC_IP */
+#define ICE_TC_FLWR_FIELD_PPPOE_SESSID		BIT(23)
+#define ICE_TC_FLWR_FIELD_PPP_PROTO		BIT(24)
+#define ICE_TC_FLWR_FIELD_CVLAN			BIT(25)
+#ifdef HAVE_FLOW_DISSECTOR_KEY_L2TPV3
 #define ICE_TC_FLWR_FIELD_L2TPV3_SESSID		BIT(26)
+#endif /* HAVE_FLOW_DISSECTOR_KEY_L2TPV3 */
 #define ICE_TC_FLWR_FIELD_VLAN_PRIO		BIT(27)
+#ifdef HAVE_FLOW_DISSECTOR_KEY_CVLAN
 #define ICE_TC_FLWR_FIELD_CVLAN_PRIO		BIT(28)
+#endif /* HAVE_FLOW_DISSECTOR_KEY_CVLAN  */
+#ifdef HAVE_TCF_VLAN_TPID
 #define ICE_TC_FLWR_FIELD_VLAN_TPID		BIT(29)
-#define ICE_TC_FLWR_FIELD_PFCP_OPTS		BIT(30)
+#endif /* HAVE_TCF_VLAN_TPID */
+#define ICE_TC_FLWR_FIELD_IP_PROTO		BIT(30)
+#define ICE_TC_FLWR_FIELD_ICMP			BIT(31)
 
-#define ICE_TC_FLOWER_MASK_32   0xFFFFFFFF
+/* TC flower supported filter match */
+#define ICE_TC_FLWR_FLTR_FLAGS_DST_MAC		ICE_TC_FLWR_FIELD_DST_MAC
+#define ICE_TC_FLWR_FLTR_FLAGS_VLAN		ICE_TC_FLWR_FIELD_VLAN
+#define ICE_TC_FLWR_FLTR_FLAGS_DST_MAC_VLAN	(ICE_TC_FLWR_FIELD_DST_MAC | \
+						 ICE_TC_FLWR_FIELD_VLAN)
+#define ICE_TC_FLWR_FLTR_FLAGS_IPV4_DST_PORT	(ICE_TC_FLWR_FIELD_DEST_IPV4 | \
+						 ICE_TC_FLWR_FIELD_DEST_L4_PORT)
+#define ICE_TC_FLWR_FLTR_FLAGS_IPV4_SRC_PORT	(ICE_TC_FLWR_FIELD_DEST_IPV4 | \
+						 ICE_TC_FLWR_FIELD_SRC_L4_PORT)
+#define ICE_TC_FLWR_FLTR_FLAGS_IPV6_DST_PORT	(ICE_TC_FLWR_FIELD_DEST_IPV6 | \
+						 ICE_TC_FLWR_FIELD_DEST_L4_PORT)
+#define ICE_TC_FLWR_FLTR_FLAGS_IPV6_SRC_PORT	(ICE_TC_FLWR_FIELD_DEST_IPV6 | \
+						 ICE_TC_FLWR_FIELD_SRC_L4_PORT)
 
-#define ICE_IPV6_HDR_TC_MASK 0xFF00000
+#define ICE_TC_FLOWER_MASK_32	0xFFFFFFFF
+#define ICE_TC_FLOWER_MASK_16	0xFFFF
+#define ICE_TC_FLOWER_VNI_MAX	0xFFFFFFU
 
+#if defined(HAVE_FLOW_DISSECTOR_KEY_IP) || defined(HAVE_FLOW_DISSECTOR_KEY_ENC_IP)
+#define ICE_IPV6_HDR_TC_OFFSET 20
+#define ICE_IPV6_HDR_TC_MASK GENMASK(27, 20)
+#endif /* HAVE_FLOW_DISSECTOR_KEY_IP || HAVE_FLOW_DISSECTOR_KEY_ENC_IP */
+
+#ifdef HAVE_TC_INDIR_BLOCK
 struct ice_indr_block_priv {
 	struct net_device *netdev;
 	struct ice_netdev_priv *np;
 	struct list_head list;
 };
+#endif /* HAVE_TC_INDIR_BLOCK */
 
 struct ice_tc_flower_action {
 	/* forward action specific params */
@@ -57,11 +89,11 @@ struct ice_tc_flower_action {
 			u32 rsvd;
 		} tc;
 		struct {
-			u16 queue; /* forward to queue */
-			/* To add filter in HW, absolute queue number in global
-			 * space of queues (between 0...N) is needed
+			u32 queue; /* forward to queue */
+			/* to add filter in HW, it needs absolute queue number
+			 * in global space of queues (between 0...N)
 			 */
-			u16 hw_queue;
+			u32 hw_queue;
 		} q;
 	} fwd;
 	enum ice_sw_fwd_act_type fltr_act;
@@ -69,8 +101,10 @@ struct ice_tc_flower_action {
 
 struct ice_tc_vlan_hdr {
 	__be16 vlan_id; /* Only last 12 bits valid */
-	__be16 vlan_prio; /* Only last 3 bits valid (valid values: 0..7) */
+	__be16 vlan_prio; /* Only first 3 bits valid (valid values: 0..7) */
+#ifdef HAVE_TCF_VLAN_TPID
 	__be16 vlan_tpid;
+#endif /* HAVE_TCF_VLAN_TPID */
 };
 
 struct ice_tc_pppoe_hdr {
@@ -107,8 +141,15 @@ struct ice_tc_l3_hdr {
 	u8 ttl;
 };
 
+#ifdef HAVE_FLOW_DISSECTOR_KEY_L2TPV3
 struct ice_tc_l2tpv3_hdr {
 	__be32 session_id;
+};
+#endif /* HAVE_FLOW_DISSECTOR_KEY_L2TPV3 */
+
+struct ice_tc_icmp_hdr {
+	u8 type;
+	u8 code;
 };
 
 struct ice_tc_l4_hdr {
@@ -123,7 +164,11 @@ struct ice_tc_flower_lyr_2_4_hdrs {
 	struct ice_tc_vlan_hdr vlan_hdr;
 	struct ice_tc_vlan_hdr cvlan_hdr;
 	struct ice_tc_pppoe_hdr pppoe_hdr;
+#ifdef HAVE_FLOW_DISSECTOR_KEY_L2TPV3
 	struct ice_tc_l2tpv3_hdr l2tpv3_hdr;
+#endif /* HAVE_FLOW_DISSECTOR_KEY_L2TPV3 */
+	struct ice_tc_icmp_hdr icmp_key;
+	struct ice_tc_icmp_hdr icmp_mask;
 	/* L3 (IPv4[6]) layer fields with their mask */
 	struct ice_tc_l3_hdr l3_key;
 	struct ice_tc_l3_hdr l3_mask;
@@ -163,11 +208,12 @@ struct ice_tc_flower_fltr {
 	struct ice_tc_flower_lyr_2_4_hdrs inner_headers;
 	struct ice_vsi *src_vsi;
 	__be32 tenant_id;
+#ifdef HAVE_GTP_SUPPORT
 	struct gtp_pdu_session_info gtp_pdu_info_keys;
 	struct gtp_pdu_session_info gtp_pdu_info_masks;
-	struct pfcp_metadata pfcp_meta_keys;
-	struct pfcp_metadata pfcp_meta_masks;
+#endif /* HAVE_GTP_SUPPORT */
 	u32 flags;
+#define ICE_TC_FLWR_TNL_TYPE_NONE        0xff
 	u8 tunnel_type;
 	struct ice_tc_flower_action	action;
 
@@ -182,7 +228,7 @@ struct ice_tc_flower_fltr {
  * @f: Pointer to tc-flower filter
  *
  * Criteria to determine of given filter is valid channel filter
- * or not is based on its destination.
+ * or not is based on its "destination".
  * For forward to VSI action, if destination is valid hw_tc (aka tc_class)
  * and in supported range of TCs for ADQ, then return true.
  * For forward to queue, as long as dest_vsi is valid and it is of type
@@ -193,10 +239,10 @@ struct ice_tc_flower_fltr {
 static inline bool ice_is_chnl_fltr(struct ice_tc_flower_fltr *f)
 {
 	if (f->action.fltr_act == ICE_FWD_TO_VSI)
-		return f->action.fwd.tc.tc_class >= ICE_CHNL_START_TC &&
-		       f->action.fwd.tc.tc_class < ICE_CHNL_MAX_TC;
+		return (f->action.fwd.tc.tc_class >= ICE_CHNL_START_TC &&
+			f->action.fwd.tc.tc_class < ICE_CHNL_MAX_TC);
 	else if (f->action.fltr_act == ICE_FWD_TO_Q)
-		return f->dest_vsi && f->dest_vsi->type == ICE_VSI_CHNL;
+		return (f->dest_vsi && f->dest_vsi->type == ICE_VSI_CHNL);
 
 	return false;
 }
@@ -209,24 +255,29 @@ static inline int ice_chnl_dmac_fltr_cnt(struct ice_pf *pf)
 {
 	return pf->num_dmac_chnl_fltrs;
 }
-
-struct ice_vsi *ice_locate_vsi_using_queue(struct ice_vsi *vsi, int queue);
+int
+ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
+			   struct ice_tc_flower_fltr *tc_fltr);
+struct ice_vsi *
+ice_locate_vsi_using_queue(struct ice_vsi *vsi, int queue);
+#if defined(HAVE_TCF_MIRRED_DEV) || defined(HAVE_TC_FLOW_RULE_INFRASTRUCTURE)
+int
+ice_tc_tun_get_type(struct net_device *tunnel_dev,
+		    struct flow_rule *rule);
+#endif /* HAVE_TCF_MIRRED_DEC || HAVE_TC_FLOW_RULE_INFRASTRUCTURE */
 int
 ice_add_cls_flower(struct net_device *netdev, struct ice_vsi *vsi,
 		   struct flow_cls_offload *cls_flower);
 int
 ice_del_cls_flower(struct ice_vsi *vsi, struct flow_cls_offload *cls_flower);
 void ice_replay_tc_fltrs(struct ice_pf *pf);
-bool ice_is_tunnel_supported(struct net_device *dev);
+int ice_rem_adv_rule_by_fltr(struct ice_hw *hw,
+			     const struct ice_tc_flower_fltr *fltr);
+#endif /* HAVE_TC_SETUP_CLSFLOWER */
 
 static inline bool ice_is_forward_action(enum ice_sw_fwd_act_type fltr_act)
 {
-	switch (fltr_act) {
-	case ICE_FWD_TO_VSI:
-	case ICE_FWD_TO_Q:
-		return true;
-	default:
-		return false;
-	}
+	return fltr_act == ICE_FWD_TO_VSI || fltr_act == ICE_FWD_TO_Q;
 }
+
 #endif /* _ICE_TC_LIB_H_ */

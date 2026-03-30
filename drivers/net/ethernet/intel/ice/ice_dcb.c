@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright (c) 2019, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #include "ice_common.h"
 #include "ice_sched.h"
@@ -18,7 +18,7 @@
  *
  * Requests the complete LLDP MIB (entire packet). (0x0A00)
  */
-static int
+int
 ice_aq_get_lldp_mib(struct ice_hw *hw, u8 bridge_type, u8 mib_type, void *buf,
 		    u16 buf_size, u16 *local_len, u16 *remote_len,
 		    struct ice_sq_cd *cd)
@@ -77,6 +77,106 @@ ice_aq_cfg_lldp_mib_change(struct ice_hw *hw, bool ena_update,
 					   ICE_AQ_LLDP_MIB_PENDING_ENABLE);
 
 	return ice_aq_send_cmd(hw, &desc, NULL, 0, cd);
+}
+
+/**
+ * ice_aq_add_delete_lldp_tlv
+ * @hw: pointer to the HW struct
+ * @bridge_type: type of bridge
+ * @add_lldp_tlv: add (true) or delete (false) TLV
+ * @buf: buffer with TLV to add or delete
+ * @buf_size: length of the buffer
+ * @tlv_len: length of the TLV to be added/deleted
+ * @mib_len: length of the LLDP MIB returned in response
+ * @cd: pointer to command details structure or NULL
+ *
+ * (Add tlv)
+ * Add the specified TLV to LLDP Local MIB for the given bridge type,
+ * it is responsibility of the caller to make sure that the TLV is not
+ * already present in the LLDPDU.
+ * In return firmware will write the complete LLDP MIB with the newly
+ * added TLV in the response buffer. (0x0A02)
+ *
+ * (Delete tlv)
+ * Delete the specified TLV from LLDP Local MIB for the given bridge type.
+ * The firmware places the entire LLDP MIB in the response buffer. (0x0A04)
+ */
+int
+ice_aq_add_delete_lldp_tlv(struct ice_hw *hw, u8 bridge_type, bool add_lldp_tlv,
+			   void *buf, u16 buf_size, u16 tlv_len, u16 *mib_len,
+			   struct ice_sq_cd *cd)
+{
+	struct ice_aqc_lldp_add_delete_tlv *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	if (tlv_len == 0)
+		return -EINVAL;
+
+	cmd = &desc.params.lldp_add_delete_tlv;
+
+	if (add_lldp_tlv)
+		ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_lldp_add_tlv);
+	else
+		ice_fill_dflt_direct_cmd_desc(&desc,
+					      ice_aqc_opc_lldp_delete_tlv);
+
+	desc.flags |= cpu_to_le16((u16)(ICE_AQ_FLAG_RD));
+
+	cmd->type = FIELD_PREP(ICE_AQ_LLDP_BRID_TYPE_M, bridge_type);
+	cmd->len = cpu_to_le16(tlv_len);
+
+	status = ice_aq_send_cmd(hw, &desc, buf, buf_size, cd);
+	if (!status && mib_len)
+		*mib_len = le16_to_cpu(desc.datalen);
+
+	return status;
+}
+
+/**
+ * ice_aq_update_lldp_tlv
+ * @hw: pointer to the HW struct
+ * @bridge_type: type of bridge
+ * @buf: buffer with TLV to update
+ * @buf_size: size of the buffer holding original and updated TLVs
+ * @old_len: Length of the Original TLV
+ * @new_len: Length of the Updated TLV
+ * @offset: offset of the updated TLV in the buff
+ * @mib_len: length of the returned LLDP MIB
+ * @cd: pointer to command details structure or NULL
+ *
+ * Update the specified TLV to the LLDP Local MIB for the given bridge type.
+ * Firmware will place the complete LLDP MIB in response buffer with the
+ * updated TLV. (0x0A03)
+ */
+int
+ice_aq_update_lldp_tlv(struct ice_hw *hw, u8 bridge_type, void *buf,
+		       u16 buf_size, u16 old_len, u16 new_len, u16 offset,
+		       u16 *mib_len, struct ice_sq_cd *cd)
+{
+	struct ice_aqc_lldp_update_tlv *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	cmd = &desc.params.lldp_update_tlv;
+
+	if (offset == 0 || old_len == 0 || new_len == 0)
+		return -EINVAL;
+
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_lldp_update_tlv);
+
+	desc.flags |= cpu_to_le16((u16)(ICE_AQ_FLAG_RD));
+
+	cmd->type = FIELD_PREP(ICE_AQ_LLDP_BRID_TYPE_M, bridge_type);
+	cmd->old_len = cpu_to_le16(old_len);
+	cmd->new_offset = cpu_to_le16(offset);
+	cmd->new_len = cpu_to_le16(new_len);
+
+	status = ice_aq_send_cmd(hw, &desc, buf, buf_size, cd);
+	if (!status && mib_len)
+		*mib_len = le16_to_cpu(desc.datalen);
+
+	return status;
 }
 
 /**
@@ -221,6 +321,8 @@ ice_parse_ieee_etscfg_tlv(struct ice_lldp_org_tlv *tlv,
 	etscfg->willing = FIELD_GET(ICE_IEEE_ETS_WILLING_M, buf[0]);
 	etscfg->cbs = FIELD_GET(ICE_IEEE_ETS_CBS_M, buf[0]);
 	etscfg->maxtcs = FIELD_GET(ICE_IEEE_ETS_MAXTC_M, buf[0]);
+	if (etscfg->maxtcs == ICE_DCB_MAXTC_ENCODE)
+		etscfg->maxtcs = ICE_DCB_MAXTC;
 
 	/* Begin parsing at Priority Assignment Table (offset 1 in buf) */
 	ice_parse_ieee_ets_common_tlv(&buf[1], etscfg);
@@ -642,7 +744,7 @@ ice_aq_get_dcb_cfg(struct ice_hw *hw, u8 mib_type, u8 bridgetype,
 	int ret;
 
 	/* Allocate the LLDPDU */
-	lldpmib = devm_kzalloc(ice_hw_to_dev(hw), ICE_LLDPDU_SIZE, GFP_KERNEL);
+	lldpmib = kzalloc(ICE_LLDPDU_SIZE, GFP_KERNEL);
 	if (!lldpmib)
 		return -ENOMEM;
 
@@ -653,9 +755,45 @@ ice_aq_get_dcb_cfg(struct ice_hw *hw, u8 mib_type, u8 bridgetype,
 		/* Parse LLDP MIB to get DCB configuration */
 		ret = ice_lldp_to_dcb_cfg(lldpmib, dcbcfg);
 
-	devm_kfree(ice_hw_to_dev(hw), lldpmib);
+	kfree(lldpmib);
 
 	return ret;
+}
+
+/**
+ * ice_aq_dcb_ignore_pfc - Ignore PFC for given TCs
+ * @hw: pointer to the HW struct
+ * @tcmap: TC map for request/release any ignore PFC condition
+ * @request: request (true) or release (false) ignore PFC condition
+ * @tcmap_ret: return TCs for which PFC is currently ignored
+ * @cd: pointer to command details structure or NULL
+ *
+ * This sends out request/release to ignore PFC condition for a TC.
+ * It will return the TCs for which PFC is currently ignored. (0x0301)
+ */
+int
+ice_aq_dcb_ignore_pfc(struct ice_hw *hw, u8 tcmap, bool request, u8 *tcmap_ret,
+		      struct ice_sq_cd *cd)
+{
+	struct ice_aqc_pfc_ignore *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	cmd = &desc.params.pfc_ignore;
+
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_pfc_ignore);
+
+	if (request)
+		cmd->cmd_flags = ICE_AQC_PFC_IGNORE_SET;
+
+	cmd->tc_bitmap = tcmap;
+
+	status = ice_aq_send_cmd(hw, &desc, NULL, 0, cd);
+
+	if (!status && tcmap_ret)
+		*tcmap_ret = cmd->tc_bitmap;
+
+	return status;
 }
 
 /**
@@ -677,8 +815,8 @@ ice_aq_start_stop_dcbx(struct ice_hw *hw, bool start_dcbx_agent,
 		       bool *dcbx_agent_status, struct ice_sq_cd *cd)
 {
 	struct ice_aqc_lldp_stop_start_specific_agent *cmd;
+	enum ice_adminq_opc opcode;
 	struct ice_aq_desc desc;
-	u16 opcode;
 	int status;
 
 	cmd = &desc.params.lldp_agent_ctrl;
@@ -722,15 +860,44 @@ ice_aq_get_cee_dcb_cfg(struct ice_hw *hw,
 }
 
 /**
+ * ice_aq_query_pfc_mode - Query PFC mode
+ * @hw: pointer to the HW struct
+ * @pfcmode_ret: Return PFC mode
+ * @cd: pointer to command details structure or NULL
+ *
+ * This will return an indication if DSCP-based PFC or VLAN-based PFC
+ * is enabled. (0x0302)
+ */
+int
+ice_aq_query_pfc_mode(struct ice_hw *hw, u8 *pfcmode_ret, struct ice_sq_cd *cd)
+{
+	struct ice_aqc_set_query_pfc_mode *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	cmd = &desc.params.set_query_pfc_mode;
+
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_query_pfc_mode);
+
+	status = ice_aq_send_cmd(hw, &desc, NULL, 0, cd);
+
+	if (!status)
+		*pfcmode_ret = cmd->pfc_mode;
+
+	return status;
+}
+
+/**
  * ice_aq_set_pfc_mode - Set PFC mode
  * @hw: pointer to the HW struct
  * @pfc_mode: value of PFC mode to set
  * @cd: pointer to command details structure or NULL
  *
- * This AQ call configures the PFC mode to DSCP-based PFC mode or
- * VLAN-based PFC (0x0303)
+ * This AQ call configures the PFC mdoe to DSCP-based PFC mode or VLAN
+ * -based PFC (0x0303)
  */
-int ice_aq_set_pfc_mode(struct ice_hw *hw, u8 pfc_mode, struct ice_sq_cd *cd)
+int
+ice_aq_set_pfc_mode(struct ice_hw *hw, u8 pfc_mode, struct ice_sq_cd *cd)
 {
 	struct ice_aqc_set_query_pfc_mode *cmd;
 	struct ice_aq_desc desc;
@@ -758,6 +925,33 @@ int ice_aq_set_pfc_mode(struct ice_hw *hw, u8 pfc_mode, struct ice_sq_cd *cd)
 		return -EOPNOTSUPP;
 
 	return 0;
+}
+
+/**
+ * ice_aq_set_dcb_parameters - Set DCB parameters
+ * @hw: pointer to the HW struct
+ * @dcb_enable: True if DCB configuration needs to be applied
+ * @cd: pointer to command details structure or NULL
+ *
+ * This AQ command will tell FW if it will apply or not apply the default DCB
+ * configuration when link up (0x0306).
+ */
+int
+ice_aq_set_dcb_parameters(struct ice_hw *hw, bool dcb_enable,
+			  struct ice_sq_cd *cd)
+{
+	struct ice_aqc_set_dcb_params *cmd;
+	struct ice_aq_desc desc;
+
+	cmd = &desc.params.set_dcb_params;
+
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_set_dcb_params);
+
+	cmd->valid_flags = ICE_AQC_LINK_UP_DCB_CFG_VALID;
+	if (dcb_enable)
+		cmd->cmd_flags = ICE_AQC_LINK_UP_DCB_CFG;
+
+	return ice_aq_send_cmd(hw, &desc, NULL, 0, cd);
 }
 
 /**
@@ -888,7 +1082,8 @@ ice_cee_to_dcb_cfg(struct ice_aqc_get_cee_dcb_cfg_resp *cee_cfg,
  *
  * Get IEEE or CEE mode DCB configuration from the Firmware
  */
-static int ice_get_ieee_or_cee_dcb_cfg(struct ice_port_info *pi, u8 dcbx_mode)
+static int
+ice_get_ieee_or_cee_dcb_cfg(struct ice_port_info *pi, u8 dcbx_mode)
 {
 	struct ice_dcbx_cfg *dcbx_cfg = NULL;
 	int ret;
@@ -1505,7 +1700,7 @@ int ice_set_dcb_cfg(struct ice_port_info *pi)
 	/* update the HW local config */
 	dcbcfg = &pi->qos_cfg.local_dcbx_cfg;
 	/* Allocate the LLDPDU */
-	lldpmib = devm_kzalloc(ice_hw_to_dev(hw), ICE_LLDPDU_SIZE, GFP_KERNEL);
+	lldpmib = kzalloc(ICE_LLDPDU_SIZE, GFP_KERNEL);
 	if (!lldpmib)
 		return -ENOMEM;
 
@@ -1517,7 +1712,7 @@ int ice_set_dcb_cfg(struct ice_port_info *pi)
 	ret = ice_aq_set_lldp_mib(hw, mib_type, (void *)lldpmib, miblen,
 				  NULL);
 
-	devm_kfree(ice_hw_to_dev(hw), lldpmib);
+	kfree(lldpmib);
 
 	return ret;
 }
@@ -1544,7 +1739,8 @@ ice_aq_query_port_ets(struct ice_port_info *pi,
 		return -EINVAL;
 	cmd = &desc.params.port_ets;
 	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_query_port_ets);
-	cmd->port_teid = pi->root->info.node_teid;
+	if (pi->root)
+		cmd->port_teid = pi->root->info.node_teid;
 
 	status = ice_aq_send_cmd(pi->hw, &desc, buf, buf_size, cd);
 	return status;
@@ -1604,7 +1800,7 @@ ice_update_port_tc_tree_cfg(struct ice_port_info *pi,
 		/* new TC */
 		status = ice_sched_query_elem(pi->hw, teid2, &elem);
 		if (!status)
-			status = ice_sched_add_node(pi, 1, &elem, NULL);
+			status = ice_sched_add_node(pi, 1, &elem, NULL, 0);
 		if (status)
 			break;
 		/* update the TC number */

@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
-/* Copyright (c) 2015 - 2019 Intel Corporation */
+/* SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB */
+/* Copyright (c) 2015 - 2023 Intel Corporation */
 #ifndef IRDMA_PBLE_H
 #define IRDMA_PBLE_H
 
@@ -66,6 +66,14 @@ struct irdma_add_page_info {
 	u32 pages;
 };
 
+struct irdma_manage_pble_info {
+	u32 sd_index;
+	u16 first_pd_index;
+	u16 pd_entry_cnt;
+	u8 inv_pd_ent;
+	u64 pd_pl_pba;
+};
+
 struct irdma_chunk {
 	struct list_head list;
 	struct irdma_dma_info dmainfo;
@@ -128,5 +136,6 @@ void irdma_pble_release_lock(struct irdma_hmc_pble_rsrc *pble_rsrc,
 			     unsigned long *flags);
 void irdma_pble_free_paged_mem(struct irdma_chunk *chunk);
 int irdma_pble_get_paged_mem(struct irdma_chunk *chunk, u32 pg_cnt);
-void irdma_prm_rem_bitmapmem(struct irdma_hw *hw, struct irdma_chunk *chunk);
+int irdma_manage_pble_bp(struct irdma_sc_dev *dev,
+			 struct irdma_manage_pble_info *info);
 #endif /* IRDMA_PBLE_H */

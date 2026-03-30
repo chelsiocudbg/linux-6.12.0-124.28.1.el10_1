@@ -85,6 +85,8 @@ static inline u16 mlx5e_calc_min_inline(enum mlx5_inline_modes mode,
 		break;
 	case MLX5_INLINE_MODE_IP:
 		hlen = mlx5e_skb_l3_header_offset(skb);
+				if (unlikely(hlen < ETH_HLEN + sizeof(struct iphdr)))
+					hlen = MLX5E_MIN_INLINE + sizeof(struct ipv6hdr);
 		break;
 	case MLX5_INLINE_MODE_L2:
 	default:

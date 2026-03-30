@@ -353,6 +353,20 @@ unwind:
 }
 
 static void
+stop_sge_rxqs_uld(struct adapter *adap, unsigned int uld_type)
+{
+	struct sge_uld_rxq_info *rxq_info = adap->sge.uld_rxq_info[uld_type];
+	unsigned int idx;
+
+	for_each_uldrxq(rxq_info, idx)
+		t4_iq_stop(adap, adap->mbox, adap->pf, 0, FW_IQ_TYPE_FL_INT_CAP,
+			   rxq_info->uldrxq[idx].rspq.cntxt_id,
+			   rxq_info->uldrxq[idx].fl.size ?
+			   rxq_info->uldrxq[idx].fl.cntxt_id : 0xffff,
+			   0xffff);
+}
+
+static void
 free_msix_queue_irqs_uld(struct adapter *adap, unsigned int uld_type)
 {
 	struct sge_uld_rxq_info *rxq_info = adap->sge.uld_rxq_info[uld_type];
@@ -556,6 +570,7 @@ void t4_uld_mem_free(struct adapter *adap)
 	kfree(s->uld_txq_info);
 	kfree(s->uld_rxq_info);
 	kfree(adap->uld);
+	adap->uld = NULL;
 }
 
 /* This function should be called with uld_mutex taken. */
@@ -565,6 +580,8 @@ static void cxgb4_shutdown_uld_adapter(struct adapter *adap, enum cxgb4_uld type
 		adap->uld[type].handle = NULL;
 		adap->uld[type].add = NULL;
 		release_sge_txq_uld(adap, type);
+
+		stop_sge_rxqs_uld(adap, type);
 
 		if (adap->flags & CXGB4_FULL_INIT_DONE)
 			quiesce_rx_uld(adap, type);
@@ -582,6 +599,9 @@ void t4_uld_clean_up(struct adapter *adap)
 	unsigned int i;
 
 	if (!is_uld(adap))
+		return;
+
+	if (!is_uld(adap) || !adap->uld)
 		return;
 
 	mutex_lock(&uld_mutex);

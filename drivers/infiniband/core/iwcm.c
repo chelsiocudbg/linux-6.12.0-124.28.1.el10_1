@@ -212,9 +212,12 @@ static void free_cm_id(struct iwcm_id_private *cm_id_priv)
  */
 static bool iwcm_deref_id(struct iwcm_id_private *cm_id_priv)
 {
+	unsigned long flags;
 	if (refcount_dec_and_test(&cm_id_priv->refcount)) {
+	        spin_lock_irqsave(&cm_id_priv->lock, flags);
 		BUG_ON(!list_empty(&cm_id_priv->work_list));
 		free_cm_id(cm_id_priv);
+	        spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 		return true;
 	}
 
@@ -368,6 +371,7 @@ EXPORT_SYMBOL(iw_cm_disconnect);
 /*
  * CM_ID <-- DESTROYING
  *
+ * Clean up all resources associated with the connection.
  * Clean up all resources associated with the connection.
  */
 static void destroy_cm_id(struct iw_cm_id *cm_id)
@@ -1021,13 +1025,16 @@ static void cm_work_handler(struct work_struct *_work)
 	struct iw_cm_event levent;
 	struct iwcm_id_private *cm_id_priv = work->cm_id;
 	unsigned long flags;
+	int empty;
 	int ret = 0;
 
 	spin_lock_irqsave(&cm_id_priv->lock, flags);
-	while (!list_empty(&cm_id_priv->work_list)) {
+	empty = list_empty(&cm_id_priv->work_list);
+	while (!empty) {
 		work = list_first_entry(&cm_id_priv->work_list,
 					struct iwcm_work, list);
 		list_del_init(&work->list);
+		empty = list_empty(&cm_id_priv->work_list);
 		levent = work->event;
 		put_work(work);
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
@@ -1035,12 +1042,15 @@ static void cm_work_handler(struct work_struct *_work)
 		if (!test_bit(IWCM_F_DROP_EVENTS, &cm_id_priv->flags)) {
 			ret = process_event(cm_id_priv, &levent);
 			if (ret) {
+				pr_info("SVC RDMA: cm_work handler when process return 1 cm id address %llx\n", (unsigned long long)&cm_id_priv->id);
 				destroy_cm_id(&cm_id_priv->id);
 				WARN_ON_ONCE(iwcm_deref_id(cm_id_priv));
 			}
 		} else
 			pr_debug("dropping event %d\n", levent.event);
 		if (iwcm_deref_id(cm_id_priv))
+			return;
+		if (empty)
 			return;
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
 	}
@@ -1094,8 +1104,12 @@ static int cm_event_handler(struct iw_cm_id *cm_id,
 	}
 
 	refcount_inc(&cm_id_priv->refcount);
-	list_add_tail(&work->list, &cm_id_priv->work_list);
-	queue_work(iwcm_wq, &work->work);
+	if (list_empty(&cm_id_priv->work_list)) {
+		list_add_tail(&work->list, &cm_id_priv->work_list);
+		queue_work(iwcm_wq, &work->work);
+	} else {
+		list_add_tail(&work->list, &cm_id_priv->work_list);
+	}
 out:
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 	return ret;

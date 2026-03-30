@@ -16,6 +16,7 @@
 #include <linux/mutex.h>
 #include <linux/efi.h>
 #include <linux/vmalloc.h>
+#include <asm/io.h>
 
 #define NO_FURTHER_WRITE_ACTION -1
 

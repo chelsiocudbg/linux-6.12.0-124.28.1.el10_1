@@ -1288,7 +1288,7 @@ static int cudbg_memory_read(struct cudbg_init *pdbg_init, int win,
 	struct adapter *adap = pdbg_init->adap;
 	u32 pos, offset, resid;
 	u32 *res_buf;
-	u64 *buf;
+	u256 *buf;
 	int ret;
 
 	/* Argument sanity checks ...
@@ -1296,10 +1296,10 @@ static int cudbg_memory_read(struct cudbg_init *pdbg_init, int win,
 	if (addr & 0x3 || (uintptr_t)hbuf & 0x3)
 		return -EINVAL;
 
-	buf = (u64 *)hbuf;
+	buf = (u256 *)hbuf;
 
 	/* Try to do 64-bit reads.  Residual will be handled later. */
-	resid = len & 0x7;
+	resid = len & 0x1f;
 	len -= resid;
 
 	ret = t4_memory_rw_init(adap, win, mtype, &memoffset, &mem_base,
@@ -1318,12 +1318,15 @@ static int cudbg_memory_read(struct cudbg_init *pdbg_init, int win,
 	 */
 	t4_memory_update_win(adap, win, pos | win_pf);
 
+  	if (cxgb4_has_avx())
+               kernel_fpu_begin();
+
 	/* Transfer data from the adapter */
 	while (len > 0) {
-		*buf++ = le64_to_cpu((__force __le64)
-				     t4_read_reg64(adap, mem_base + offset));
-		offset += sizeof(u64);
-		len -= sizeof(u64);
+                *buf++ = le256_to_cpu((__force __le256)
+                                      readqq(adap->regs + mem_base + offset));
+                offset += sizeof(u256);
+                len -= sizeof(u256);
 
 		/* If we've reached the end of our current window aperture,
 		 * move the PCI-E Memory Window on to the next.
@@ -1334,6 +1337,9 @@ static int cudbg_memory_read(struct cudbg_init *pdbg_init, int win,
 			t4_memory_update_win(adap, win, pos | win_pf);
 		}
 	}
+
+        if (cxgb4_has_avx())
+                kernel_fpu_end();
 
 	res_buf = (u32 *)buf;
 	/* Read residual in 32-bit multiples */

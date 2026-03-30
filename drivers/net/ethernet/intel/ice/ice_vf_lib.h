@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2018-2021, Intel Corporation. */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #ifndef _ICE_VF_LIB_H_
 #define _ICE_VF_LIB_H_
@@ -8,26 +8,35 @@
 #include <linux/hashtable.h>
 #include <linux/bitmap.h>
 #include <linux/mutex.h>
+#include <linux/kref.h>
 #include <linux/pci.h>
+#include <linux/if_ether.h>
+#if IS_ENABLED(CONFIG_NET_DEVLINK)
 #include <net/devlink.h>
-#include <linux/avf/virtchnl.h>
+#endif /* CONFIG_NET_DEVLINK */
+#include "virtchnl.h"
 #include "ice_type.h"
 #include "ice_flow.h"
 #include "ice_virtchnl_fdir.h"
+#include "ice_virtchnl_fsub.h"
+#include "ice_dcf.h"
 #include "ice_vsi_vlan_ops.h"
 
-#define ICE_MAX_SRIOV_VFS		256
-
 /* VF resource constraints */
-#define ICE_MAX_RSS_QS_PER_VF	16
+#define ICE_MAX_QS_PER_VF	256
+/* Maximum number of queue pairs to configure by default for a VF */
+#define ICE_MAX_DFLT_QS_PER_VF         16
+
+#define ICE_VFR_WAIT_COUNT 100
 
 struct ice_pf;
 struct ice_vf;
 struct ice_virtchnl_ops;
 
 /* VF capabilities */
-enum ice_virtchnl_cap {
-	ICE_VIRTCHNL_VF_CAP_PRIVILEGE = 0,
+enum ice_vf_cap {
+	ICE_VF_CAP_TRUSTED = 0,
+	ICE_VF_CAP_NBITS
 };
 
 /* Specific VF states */
@@ -38,6 +47,8 @@ enum ice_vf_states {
 	ICE_VF_STATE_DIS,
 	ICE_VF_STATE_MC_PROMISC,
 	ICE_VF_STATE_UC_PROMISC,
+	ICE_VF_STATE_REPLAY_VC,
+	ICE_VF_STATE_IN_RESET,		/* VF reset in progress*/
 	ICE_VF_STATES_NBITS
 };
 
@@ -53,17 +64,75 @@ struct ice_mdd_vf_events {
 	u16 last_printed;
 };
 
+#define ICE_HASH_IP_CTX_IP		0
+#define ICE_HASH_IP_CTX_IP_ESP		1
+#define ICE_HASH_IP_CTX_IP_UDP_ESP	2
+#define ICE_HASH_IP_CTX_IP_AH		3
+#define ICE_HASH_IP_CTX_IP_L2TPV3	4
+#define ICE_HASH_IP_CTX_IP_PFCP		5
+#define ICE_HASH_IP_CTX_IP_UDP		6
+#define ICE_HASH_IP_CTX_IP_TCP		7
+#define ICE_HASH_IP_CTX_IP_SCTP		8
+#define ICE_HASH_IP_CTX_MAX		9
+
+struct ice_vf_hash_ip_ctx {
+	struct ice_rss_hash_cfg ctx[ICE_HASH_IP_CTX_MAX];
+};
+
+#define ICE_HASH_GTPU_CTX_EH_IP		0
+#define ICE_HASH_GTPU_CTX_EH_IP_UDP	1
+#define ICE_HASH_GTPU_CTX_EH_IP_TCP	2
+#define ICE_HASH_GTPU_CTX_UP_IP		3
+#define ICE_HASH_GTPU_CTX_UP_IP_UDP	4
+#define ICE_HASH_GTPU_CTX_UP_IP_TCP	5
+#define ICE_HASH_GTPU_CTX_DW_IP		6
+#define ICE_HASH_GTPU_CTX_DW_IP_UDP	7
+#define ICE_HASH_GTPU_CTX_DW_IP_TCP	8
+#define ICE_HASH_GTPU_CTX_MAX		9
+
+struct ice_vf_hash_gtpu_ctx {
+	struct ice_rss_hash_cfg ctx[ICE_HASH_GTPU_CTX_MAX];
+};
+
+struct ice_vf_hash_ctx {
+	struct ice_vf_hash_ip_ctx v4;
+	struct ice_vf_hash_ip_ctx v6;
+	struct ice_vf_hash_gtpu_ctx ipv4;
+	struct ice_vf_hash_gtpu_ctx ipv6;
+};
+
+/* In ADQ, max 4 VSI's can be allocated per VF including primary VF VSI.
+ * These variables are used to store indices, ID's and number of queues
+ * for each VSI including that of primary VF VSI. Each Traffic class is
+ * termed as channel and each channel can in-turn have 4 queues which
+ * means max 16 queues overall per VF.
+ */
+struct ice_channel_vf {
+	u16 vsi_idx; /* index in PF struct for all channel VSIs */
+	u16 vsi_num; /* HW (absolute) index of this VSI */
+	u16 num_qps; /* number of queue pairs requested by user */
+	u16 offset;
+	u64 max_tx_rate; /* Tx rate limiting for channels */
+};
+
+/* The VF VLAN information controlled by DCF */
+struct ice_dcf_vlan_info {
+	struct ice_vlan outer_port_vlan;
+	u16 outer_stripping_tpid;
+	u8 outer_stripping_ena:1;
+	u8 applying:1;
+};
+
 /* Structure to store fdir fv entry */
 struct ice_fdir_prof_info {
 	struct ice_parser_profile prof;
 	u64 fdir_active_cnt;
 };
 
-struct ice_vf_qs_bw {
-	u32 committed;
-	u32 peak;
-	u16 queue_id;
-	u8 tc;
+/* Structure to store RSS field vector entry */
+struct ice_rss_prof_info {
+	struct ice_parser_profile prof;
+	bool symm;
 };
 
 /* VF operations */
@@ -76,7 +145,13 @@ struct ice_vf_ops {
 	bool (*poll_reset_status)(struct ice_vf *vf);
 	void (*clear_reset_trigger)(struct ice_vf *vf);
 	void (*irq_close)(struct ice_vf *vf);
+	int (*create_vsi)(struct ice_vf *vf);
 	void (*post_vsi_rebuild)(struct ice_vf *vf);
+	struct ice_q_vector* (*get_q_vector)(struct ice_vsi *vsi,
+					     u16 vector_id);
+	void (*cfg_rdma_irq_map)(struct ice_vf *vf,
+				 struct virtchnl_rdma_qv_info *qv_info);
+	void (*clear_rdma_irq_map)(struct ice_vf *vf);
 };
 
 /* Virtchnl/SR-IOV config info */
@@ -85,10 +160,18 @@ struct ice_vfs {
 	struct mutex table_lock;	/* Lock for protecting the hash table */
 	u16 num_supported;		/* max supported VFs on this PF */
 	u16 num_qps_per;		/* number of queue pairs per VF */
-	u16 num_msix_per;		/* default MSI-X vectors per VF */
+	u16 num_msix_per;		/* number of MSI-X vectors per VF */
 	unsigned long last_printed_mdd_jiffies;	/* MDD message rate limit */
 };
 
+struct ice_vf_qs_bw {
+	u16 queue_id;
+	u32 committed;
+	u32 peak;
+	u8 tc;
+};
+
+#define VIRTCHNL_MSG_MAX 1000
 /* VF information structure */
 struct ice_vf {
 	struct hlist_node entry;
@@ -106,38 +189,56 @@ struct ice_vf {
 	u16 ctrl_vsi_idx;
 	struct ice_vf_fdir fdir;
 	struct ice_fdir_prof_info fdir_prof_info[ICE_MAX_PTGS];
+	struct ice_vf_fsub fsub;
+	struct device_attribute rss_lut_attr;
+	struct device_attribute transmit_lldp_attr;
+	struct ice_vf_hash_ctx hash_ctx;
+	struct ice_rss_prof_info rss_prof_info[ICE_MAX_PTGS];
+	struct ice_vf_qs_bw qs_bw[ICE_MAX_QS_PER_VF];
 	/* first vector index of this VF in the PF space */
 	int first_vector_idx;
 	struct ice_sw *vf_sw_id;	/* switch ID the VF VSIs connect to */
 	struct virtchnl_version_info vf_ver;
 	u32 driver_caps;		/* reported by VF driver */
-	u8 dev_lan_addr[ETH_ALEN];
-	u8 hw_lan_addr[ETH_ALEN];
+	u16 stag;			/* VF Port Extender (PE) stag if used */
+	struct virtchnl_ether_addr dev_lan_addr;
+	struct virtchnl_ether_addr hw_lan_addr;
 	struct ice_time_mac legacy_last_added_umac;
-	DECLARE_BITMAP(txq_ena, ICE_MAX_RSS_QS_PER_VF);
-	DECLARE_BITMAP(rxq_ena, ICE_MAX_RSS_QS_PER_VF);
+	DECLARE_BITMAP(txq_ena, ICE_MAX_QS_PER_VF);
+	DECLARE_BITMAP(rxq_ena, ICE_MAX_QS_PER_VF);
 	struct ice_vlan port_vlan_info;	/* Port VLAN ID, QoS, and TPID */
 	struct virtchnl_vlan_caps vlan_v2_caps;
+	struct ice_dcf_vlan_info dcf_vlan_info;
 	struct ice_mbx_vf_info mbx_info;
 	u8 pf_set_mac:1;		/* VF MAC address set by VMM admin */
 	u8 trusted:1;
 	u8 spoofchk:1;
+	u8 transmit_lldp:1;
+#if defined(CONFIG_X86)
+	u8 sw_crosststamp_ena : 1;	/* VF SW cross timestamp enabled */
+#endif /* CONFIG_X86 && VIRTCHNL_PTP_SUPPORT */
+#ifdef HAVE_NDO_SET_VF_LINK_STATE
 	u8 link_forced:1;
 	u8 link_up:1;			/* only valid if VF link is forced */
-
-	u32 ptp_caps;
-
+#endif
 	unsigned int min_tx_rate;	/* Minimum Tx bandwidth limit in Mbps */
 	unsigned int max_tx_rate;	/* Maximum Tx bandwidth limit in Mbps */
 	DECLARE_BITMAP(vf_states, ICE_VF_STATES_NBITS);	/* VF runtime states */
-
-	unsigned long vf_caps;		/* VF's adv. capabilities */
-	u8 num_req_qs;			/* num of queue pairs requested by VF */
+	/* VF's adv. capabilities */
+	DECLARE_BITMAP(vf_caps, ICE_VF_CAP_NBITS);
+	u16 num_req_qs;			/* num of queue pairs requested by VF */
 	u16 num_mac;
 	u16 num_vf_qs;			/* num of queue configured per VF */
 	u8 vlan_strip_ena;		/* Outer and Inner VLAN strip enable */
 #define ICE_INNER_VLAN_STRIP_ENA	BIT(0)
 #define ICE_OUTER_VLAN_STRIP_ENA	BIT(1)
+	/* ADQ related variables */
+	u8 adq_enabled; /* flag to enable ADQ */
+	u8 adq_fltr_ena; /* flag to denote that ADQ filters are applied */
+	u8 num_tc;
+	u16 num_dmac_chnl_fltrs;
+	struct ice_channel_vf ch[VIRTCHNL_MAX_ADQ_V2_CHANNELS];
+	struct hlist_head tc_flower_fltr_list;
 	struct ice_mdd_vf_events mdd_rx_events;
 	struct ice_mdd_vf_events mdd_tx_events;
 	DECLARE_BITMAP(opcodes_allowlist, VIRTCHNL_OP_MAX);
@@ -145,12 +246,18 @@ struct ice_vf {
 	unsigned long repr_id;
 	const struct ice_virtchnl_ops *virtchnl_ops;
 	const struct ice_vf_ops *vf_ops;
+	struct virtchnl_ptp_caps ptp_caps;
 
+#if IS_ENABLED(CONFIG_NET_DEVLINK)
 	/* devlink port data */
 	struct devlink_port devlink_port;
+#endif /* CONFIG_NET_DEVLINK */
+	bool migration_active;
+	struct list_head virtchnl_msg_list;
+	u64 virtchnl_msg_num;
+	u16 vm_vsi_num;
 
 	u16 num_msix;			/* num of MSI-X configured on this VF */
-	struct ice_vf_qs_bw qs_bw[ICE_MAX_RSS_QS_PER_VF];
 };
 
 /* Flags for controlling behavior of ice_reset_vf */
@@ -158,6 +265,7 @@ enum ice_vf_reset_flags {
 	ICE_VF_RESET_VFLR = BIT(0), /* Indicate a VFLR reset */
 	ICE_VF_RESET_NOTIFY = BIT(1), /* Notify VF prior to reset */
 	ICE_VF_RESET_LOCK = BIT(2), /* Acquire the VF cfg_lock */
+	ICE_VF_RESET_NO_LAG_LOCK = BIT(3), /* Don't acquire the LAG lock */
 };
 
 static inline u16 ice_vf_get_port_vlan_id(struct ice_vf *vf)
@@ -226,33 +334,71 @@ static inline u16 ice_vf_get_port_vlan_tpid(struct ice_vf *vf)
 	hash_for_each_rcu((pf)->vfs.table, (bkt), (vf), entry)
 
 #ifdef CONFIG_PCI_IOV
-struct ice_vf *ice_get_vf_by_id(struct ice_pf *pf, u16 vf_id);
+/* The vf_id parameter is a u32 in order to handle IDs stored as u32 values
+ * without implicit truncation.
+ */
+struct ice_vf *ice_get_vf_by_id(struct ice_pf *pf, u32 vf_id);
+struct ice_vf *ice_get_vf_by_dev(struct device *dev);
 void ice_put_vf(struct ice_vf *vf);
+bool ice_is_valid_vf_id(struct ice_pf *pf, u32 vf_id);
 bool ice_has_vfs(struct ice_pf *pf);
 u16 ice_get_num_vfs(struct ice_pf *pf);
 struct ice_vsi *ice_get_vf_vsi(struct ice_vf *vf);
 bool ice_is_vf_disabled(struct ice_vf *vf);
 int ice_check_vf_ready_for_cfg(struct ice_vf *vf);
-void ice_set_vf_state_dis(struct ice_vf *vf);
+void ice_set_vf_state_qs_dis(struct ice_vf *vf);
 bool ice_is_any_vf_in_unicast_promisc(struct ice_pf *pf);
-void
-ice_vf_get_promisc_masks(struct ice_vf *vf, struct ice_vsi *vsi,
-			 u8 *ucast_m, u8 *mcast_m);
-int
-ice_vf_set_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi, u8 promisc_m);
-int
-ice_vf_clear_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi, u8 promisc_m);
+void ice_vf_get_promisc_masks(struct ice_vf *vf, struct ice_vsi *vsi,
+			      unsigned long *ucast_m, unsigned long *mcast_m);
+int ice_vf_set_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi,
+			   unsigned long *promisc_m);
+int ice_vf_clear_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi,
+			     unsigned long *promisc_m);
 int ice_reset_vf(struct ice_vf *vf, u32 flags);
 void ice_reset_all_vfs(struct ice_pf *pf);
 struct ice_vsi *ice_get_vf_ctrl_vsi(struct ice_pf *pf, struct ice_vsi *vsi);
+int ice_init_vf_sysfs(struct ice_vf *vf);
+int ice_handle_vf_tx_lldp(struct ice_vf *vf, bool ena);
+void ice_ena_all_vfs_rx_lldp(struct ice_pf *pf);
+int ice_ena_vf_rx_lldp(struct ice_vf *vf);
+int ice_vf_reconfig_vsi(struct ice_vf *vf);
 #else /* CONFIG_PCI_IOV */
-static inline struct ice_vf *ice_get_vf_by_id(struct ice_pf *pf, u16 vf_id)
+static inline void ice_ena_all_vfs_rx_lldp(struct ice_pf *pf)
+{
+}
+
+static inline int ice_handle_vf_tx_lldp(struct ice_vf *vf, bool ena)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ice_init_vf_sysfs(struct ice_vf *vf)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ice_vf_reconfig_vsi(struct ice_vf *vf)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline struct ice_vf *ice_get_vf_by_id(struct ice_pf *pf, u32 vf_id)
+{
+	return NULL;
+}
+
+static inline struct ice_vf *ice_get_vf_by_dev(struct device *dev)
 {
 	return NULL;
 }
 
 static inline void ice_put_vf(struct ice_vf *vf)
 {
+}
+
+static inline bool ice_is_valid_vf_id(struct ice_pf *pf, u32 vf_id)
+{
+	return false;
 }
 
 static inline bool ice_has_vfs(struct ice_pf *pf)
@@ -280,7 +426,7 @@ static inline int ice_check_vf_ready_for_cfg(struct ice_vf *vf)
 	return -EOPNOTSUPP;
 }
 
-static inline void ice_set_vf_state_dis(struct ice_vf *vf)
+static inline void ice_set_vf_state_qs_dis(struct ice_vf *vf)
 {
 }
 
@@ -290,18 +436,20 @@ static inline bool ice_is_any_vf_in_unicast_promisc(struct ice_pf *pf)
 }
 
 static inline int
-ice_vf_set_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi, u8 promisc_m)
+ice_vf_set_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi,
+		       unsigned long *promisc_m)
 {
 	return -EOPNOTSUPP;
 }
 
 static inline int
-ice_vf_clear_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi, u8 promisc_m)
+ice_vf_clear_vsi_promisc(struct ice_vf *vf, struct ice_vsi *vsi,
+			 unsigned long *promisc_m)
 {
 	return -EOPNOTSUPP;
 }
 
-static inline int ice_reset_vf(struct ice_vf *vf, u32 flags)
+static inline int ice_reset_vf(struct ice_vf *vf, bool is_vflr)
 {
 	return 0;
 }

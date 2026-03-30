@@ -209,6 +209,8 @@ int c4iw_fill_res_cm_id_entry(struct sk_buff *msg,
 	epcp = (struct c4iw_ep_common *)iw_cm_id->provider_data;
 	if (!epcp)
 		return 0;
+	if (!kref_get_unless_zero(&epcp->kref))
+		return 0;
 	uep = kzalloc(sizeof(*uep), GFP_KERNEL);
 	if (!uep)
 		return 0;
@@ -222,11 +224,13 @@ int c4iw_fill_res_cm_id_entry(struct sk_buff *msg,
 	if (epcp->state == LISTEN) {
 		uep->lep = *(struct c4iw_listen_ep *)epcp;
 		mutex_unlock(&epcp->mutex);
+		c4iw_put_ep(epcp);
 		listen_ep = &uep->lep;
 		epcp = &listen_ep->com;
 	} else {
 		uep->ep = *(struct c4iw_ep *)epcp;
 		mutex_unlock(&epcp->mutex);
+		c4iw_put_ep(epcp);
 		ep = &uep->ep;
 		epcp = &ep->com;
 	}

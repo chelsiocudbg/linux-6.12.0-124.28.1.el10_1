@@ -6972,23 +6972,6 @@ int t4_fw_bye(struct adapter *adap, unsigned int mbox)
 }
 
 /**
- *	t4_early_init - ask FW to initialize the device
- *	@adap: the adapter
- *	@mbox: mailbox to use for the FW command
- *
- *	Issues a command to FW to partially initialize the device.  This
- *	performs initialization that generally doesn't depend on user input.
- */
-int t4_early_init(struct adapter *adap, unsigned int mbox)
-{
-	struct fw_initialize_cmd c;
-
-	memset(&c, 0, sizeof(c));
-	INIT_CMD(c, INITIALIZE, WRITE);
-	return t4_wr_mbox(adap, mbox, &c, sizeof(c), NULL);
-}
-
-/**
  *	t4_fw_reset - issue a reset to FW
  *	@adap: the adapter
  *	@mbox: mailbox to use for the FW command

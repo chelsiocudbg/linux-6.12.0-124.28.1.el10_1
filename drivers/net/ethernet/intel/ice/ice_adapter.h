@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* SPDX-FileCopyrightText: Copyright Red Hat */
+/* Copyright (C) 2018-2025 Intel Corporation */
 
 #ifndef _ICE_ADAPTER_H_
 #define _ICE_ADAPTER_H_
 
 #include <linux/types.h>
 #include <linux/spinlock_types.h>
-#include <linux/refcount_types.h>
+#include "kcompat.h"
 
 struct pci_dev;
 struct ice_pf;
@@ -32,7 +32,9 @@ struct ice_port_list {
  * @refcount: Reference count. struct ice_pf objects hold the references.
  * @ctrl_pf: Control PF of the adapter
  * @ports: Ports list
- * @index: 64-bit index cached for collision detection on 32bit systems
+ * @whole_dev_lock: the lock that should be used to serialize FW/HW
+ *                  re/configuration, or any other operation that requires
+ *                  to be serialized over whole device (all PFs on given card)
  */
 struct ice_adapter {
 	refcount_t refcount;
@@ -41,10 +43,11 @@ struct ice_adapter {
 
 	struct ice_pf *ctrl_pf;
 	struct ice_port_list ports;
-	u64 index;
+
+	struct mutex whole_dev_lock;
 };
 
-struct ice_adapter *ice_adapter_get(struct pci_dev *pdev);
-void ice_adapter_put(struct pci_dev *pdev);
+struct ice_adapter *ice_adapter_get(const struct pci_dev *pdev);
+void ice_adapter_put(const struct pci_dev *pdev);
 
 #endif /* _ICE_ADAPTER_H */
