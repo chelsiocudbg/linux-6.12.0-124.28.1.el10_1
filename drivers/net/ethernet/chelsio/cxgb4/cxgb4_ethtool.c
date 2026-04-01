@@ -15,6 +15,7 @@
 
 #define EEPROM_MAGIC 0x38E2F10C
 #define RSS_HASH_KEY_SIZE 40
+#define CMIS_PAGE_SELECT_REG 127
 
 static u32 get_msglevel(struct net_device *dev)
 {
@@ -457,8 +458,12 @@ static int from_fw_port_mod_type(enum fw_port_type port_type,
 		else
 			return PORT_OTHER;
 	} else if (port_type == FW_PORT_TYPE_KR4_100G ||
-		   port_type == FW_PORT_TYPE_KR_SFP28 ||
-		   port_type == FW_PORT_TYPE_KR_XLAUI) {
+			port_type == FW_PORT_TYPE_KR_SFP28 ||
+			port_type == FW_PORT_TYPE_KR_XLAUI ||
+			port_type == FW_PORT_TYPE_KR_50G ||
+			port_type == FW_PORT_TYPE_KR2_100G ||
+			port_type == FW_PORT_TYPE_KR4_200G ||
+			port_type == FW_PORT_TYPE_KR8_400G) {
 		return PORT_NONE;
 	}
 
@@ -568,6 +573,12 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 		break;
 
 	case FW_PORT_TYPE_BP40_BA:
+                SET_LMM(Backplane);
+                FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+                FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+                FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
+                break;
+
 	case FW_PORT_TYPE_QSFP:
 		SET_LMM(FIBRE);
 		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
@@ -617,6 +628,15 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 		break;
 
 	case FW_PORT_TYPE_KR4_100G:
+                SET_LMM(Backplane);
+                FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+                FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+                FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
+                FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
+                FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
+                FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
+                break;
+
 	case FW_PORT_TYPE_CR4_QSFP:
 		SET_LMM(FIBRE);
 		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
@@ -627,6 +647,50 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR4_Full);
 		break;
 
+	case FW_PORT_TYPE_KR_50G:
+		SET_LMM(Backplane);
+		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
+		break;
+
+	case FW_PORT_TYPE_KR2_100G:
+		SET_LMM(Backplane);
+		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
+		break;
+
+	case FW_PORT_TYPE_KR4_200G:
+		SET_LMM(FIBRE);
+		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseKR4_Full);
+		break;
+
+	case FW_PORT_TYPE_KR8_400G:
+		SET_LMM(Backplane);
+		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_400G, 400000baseKR8_Full);
+		break;
 	default:
 		break;
 	}
@@ -2010,6 +2074,36 @@ static int cxgb4_get_module_eeprom(struct net_device *dev,
 			 offset, len, &data[eprom->len - len]);
 }
 
+static int cxgb4_get_module_eeprom_by_page(struct net_device *dev,
+                                          const struct ethtool_module_eeprom *page_data,
+                                          struct netlink_ext_ack *extack)
+{
+       struct port_info *pi = netdev_priv(dev);
+       struct adapter *adapter = pi->adapter;
+       int ret;
+
+       if (page_data->offset >= 128) {
+	       u8 page = page_data->page;
+	       /* Before reading EEPROM data first select the page in PageSelect register */
+	       ret = t4_i2c_rd(adapter, adapter->mbox, pi->lport,
+			       page_data->i2c_address << 1,
+			       CMIS_PAGE_SELECT_REG,        /* CMIS Page Select register */
+			       1,                           /* Page Select register length */
+			       &page);
+	       if (ret)
+		       return ret;
+       }
+
+       ret = t4_i2c_rd(adapter, adapter->mbox, pi->lport,
+                       page_data->i2c_address << 1, page_data->offset,
+                       page_data->length, page_data->data);
+
+       if(ret)
+               return ret;
+
+       return page_data->length;
+}
+
 static u32 cxgb4_get_priv_flags(struct net_device *netdev)
 {
 	struct port_info *pi = netdev_priv(netdev);
@@ -2121,6 +2215,7 @@ static const struct ethtool_ops cxgb_ethtool_ops = {
 	.get_dump_data     = get_dump_data,
 	.get_module_info   = cxgb4_get_module_info,
 	.get_module_eeprom = cxgb4_get_module_eeprom,
+	.get_module_eeprom_by_page  = cxgb4_get_module_eeprom_by_page,
 	.get_priv_flags    = cxgb4_get_priv_flags,
 	.set_priv_flags    = cxgb4_set_priv_flags,
 };

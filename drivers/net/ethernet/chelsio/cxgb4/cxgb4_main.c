@@ -2174,6 +2174,30 @@ static void notify_ulds(struct adapter *adap, enum cxgb4_state new_state)
 	}
 }
 
+int cxgb4_read_pbl_entries(struct net_device *dev, u32 pbl_addr, u64 len_b,
+		__be32 *pble)
+{
+	struct adapter *adap = netdev2adap(dev);
+	u64 addr = adap->uld_inst.vres.pbl.start + pbl_addr * 8;
+	int ret;
+
+	if (addr >= (adap->uld_inst.vres.pbl.start + adap->uld_inst.vres.pbl.size +
+				adap->uld_inst.vres.stor_pbl.size))
+		goto err;
+
+	spin_lock(&adap->win0_lock);
+	ret = t4_memory_rw_addr(adap, MEMWIN_NIC, addr, len_b, pble,
+			T4_MEMORY_READ);
+	spin_unlock(&adap->win0_lock);
+	return ret;
+
+err:
+	dev_err(adap->pdev_dev, "pbl_addr %#x, addr %#llx out of range\n",
+			pbl_addr, addr);
+	return -EINVAL;
+}
+EXPORT_SYMBOL(cxgb4_read_pbl_entries);
+
 static void check_neigh_update(struct neighbour *neigh)
 {
 	const struct device *parent;
@@ -3566,9 +3590,7 @@ EXPORT_SYMBOL(cxgb4_fatal_err);
 
 #define HMA_MAX_NO_FW_ADDRESS	(16 << 10)  /* FW supports 16K addresses */
 
-#define HMA_PAGE_ORDER					\
-	((HMA_PAGE_SIZE < HMA_MAX_NO_FW_ADDRESS) ?	\
-	ilog2(HMA_MAX_NO_FW_ADDRESS / HMA_PAGE_SIZE) : 0)
+#define HMA_PAGE_ORDER ilog2((4 << 20) / HMA_PAGE_SIZE) /* Allocate pages of size page_size << page_order */
 
 /* The minimum and maximum possible HMA sizes that can be specified in the FW
  * configuration(in units of MB).

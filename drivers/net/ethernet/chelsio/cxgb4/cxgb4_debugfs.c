@@ -2244,8 +2244,8 @@ static int sensors_show(struct seq_file *seq, void *v)
 {
 	struct t4_linux_debugfs_data *d = seq->private;
 	struct adapter *adap = d->adap;
-	u32 param[7], val[7];
-	int ret;
+	u32 param[7];
+	int ret, val[7];
 
 	/* Note that if the sensors haven't been initialized and turned on
 	 * we'll get values of 0, so treat those as "<unknown>" ...
@@ -2259,12 +2259,12 @@ static int sensors_show(struct seq_file *seq, void *v)
 	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 2,
 			      param, val);
 
-	if (ret < 0 || val[0] == 0)
+	if (ret < 0)
 		seq_puts(seq, "Temperature: <unknown>\n");
 	else
 		seq_printf(seq, "Temperature: %dC\n", val[0]);
 
-	if (ret < 0 || val[1] == 0)
+	if (ret < 0)
 		seq_puts(seq, "Core VDD:    <unknown>\n");
 	else
 		seq_printf(seq, "Core VDD:    %dmV\n", val[1]);
@@ -3052,7 +3052,7 @@ static int cxgb4_sge_qinfo_eth_nic(struct seq_file *seq, int *row)
 
 	cxgb4_sge_qinfo_eth(seq, r, s->ethqsets, rx, tx, "ETHERNET");
 #ifdef CONFIG_CXGB4_DCB
-	n = min(SGE_QINFO_NUM_PER_ROW, nentries - SGE_QINFO_NUM_PER_ROW * r);
+	n = min(SGE_QINFO_NUM_PER_ROW, s->ethqsets - SGE_QINFO_NUM_PER_ROW * r);
 	T("DCB Prio:", dcb_prio);
 	S3("u", "DCB PGID:",
 	   (ethqset2pinfo(adap, base_qset + i)->dcb.pgid >>

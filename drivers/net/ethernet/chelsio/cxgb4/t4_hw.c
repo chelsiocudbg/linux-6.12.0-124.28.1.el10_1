@@ -564,6 +564,174 @@ void t4_pcie_mem_access_offset_write(struct adapter *adap, u64 off, int win,
 }
 
 /**
+ *      t4_memory_rw_addr - read/write adapter memory via PCIE memory window
+ *      @adap: the adapter
+ *      @win: PCI-E Memory Window to use
+ *      @addr: address within adapter memory
+ *      @len: amount of memory to transfer
+ *      @hbuf: host memory buffer
+ *      @dir: direction of transfer T4_MEMORY_READ (1) or T4_MEMORY_WRITE (0)
+ *
+ *      Reads/writes an [almost] arbitrary memory region in the firmware: the
+ *      firmware memory address and host buffer must be aligned on 32-bit
+ *      boudaries; the length may be arbitrary.
+ *
+ *      NOTES:
+ *       1. The memory is transferred as a raw byte sequence from/to the
+ *          firmware's memory.  If this memory contains data structures which
+ *          contain multi-byte integers, it's the caller's responsibility to
+ *          perform appropriate byte order conversions.
+ *
+ *       2. It is the Caller's responsibility to ensure that no other code
+ *          uses the specified PCI-E Memory Window while this routine is
+ *          using it.  This is typically done via the use of OS-specific
+ *          locks, etc.
+ */
+int t4_memory_rw_addr(struct adapter *adap, int win, u64 addr,
+		u64 len, void *hbuf, int dir)
+{
+	u64 pos, offset, resid, mem_aperture;
+	u32 win_pf, mem_reg, mem_base;
+	u32 *buf;
+
+	/* Argument sanity checks ...
+	*/
+	if (addr & 0x3 || (uintptr_t)hbuf & 0x3)
+		return -EINVAL;
+	buf = (u32 *)hbuf;
+
+	/* It's convenient to be able to handle lengths which aren't a
+	 * multiple of 32-bits because we often end up transferring files to
+	 * the firmware.  So we'll handle that by normalizing the length here
+	 * and then handling any residual transfer at the end.
+	 */
+	resid = len & 0x3;
+	len -= resid;
+
+	/* Each PCI-E Memory Window is programmed with a window size -- or
+	 * "aperture" -- which controls the granularity of its mapping onto
+	 * adapter memory.  We need to grab that aperture in order to know
+	 * how to use the specified window.  The window is also programmed
+	 * with the base address of the Memory Window in BAR0's address
+	 * space.  For T4 this is an absolute PCI-E Bus Address.  For T5
+	 * the address is relative to BAR0.
+	 */
+	mem_reg = t4_read_reg(adap, t4_pcie_mem_access_base_win_reg(adap, win));
+
+	/* a dead adapter will return 0xffffffff for PIO reads */
+	if (mem_reg == 0xffffffff) {
+		CH_WARN(adap, "Unable to read PCI-E Memory Window Base[%d]\n",
+				win);
+		return -ENXIO;
+	}
+
+	mem_aperture = 1ULL << (WINDOW_G(mem_reg) + WINDOW_SHIFT_X);
+	mem_base = PCIEOFST_G(mem_reg) << PCIEOFST_SHIFT_X;
+	if (is_t4(adap->params.chip))
+		mem_base -= adap->t4_bar0;
+	win_pf = is_t4(adap->params.chip) ? 0 : PFNUM_V(adap->pf);
+
+	/* Calculate our initial PCI-E Memory Window Position and Offset into
+	 * that Window.
+	 */
+	pos = addr & ~(mem_aperture - 1);
+	offset = addr - pos;
+
+	/* Set up initial PCI-E Memory Window to cover the start of our
+	 * transfer.  (Read it back to ensure that changes propagate before we
+	 * attempt to use the new value.)
+	 */
+	t4_pcie_mem_access_offset_write(adap, pos, win, win_pf);
+
+	/* Transfer data to/from the adapter as long as there's an integral
+	 * number of 32-bit transfers to complete.
+	 *
+	 * A note on Endianness issues:
+	 *
+	 * The "register" reads and writes below from/to the PCI-E Memory
+	 * Window invoke the standard adapter Big-Endian to PCI-E Link
+	 * Little-Endian "swizzel."  As a result, if we have the following
+	 * data in adapter memory:
+	 *
+	 *     Memory:  ... | b0 | b1 | b2 | b3 | ...
+	 *     Address:      i+0  i+1  i+2  i+3
+	 *
+	 * Then a read of the adapter memory via the PCI-E Memory Window
+	 * will yield:
+	 *
+	 *     x = readl(i)
+	 *         31                  0
+	 *         [ b3 | b2 | b1 | b0 ]
+	 *
+	 * If this value is stored into local memory on a Little-Endian system
+	 * it will show up correctly in local memory as:
+	 *
+	 *     ( ..., b0, b1, b2, b3, ... )
+	 *
+	 * But on a Big-Endian system, the store will show up in memory
+	 * incorrectly swizzled as:
+	 *
+	 *     ( ..., b3, b2, b1, b0, ... )
+	 *
+	 * So we need to account for this in the reads and writes to the
+	 * PCI-E Memory Window below by undoing the register read/write
+	 * swizzels.
+	 */
+	while (len > 0) {
+		if (dir == T4_MEMORY_READ)
+			*buf++ = le32_to_cpu((__force __le32)t4_read_reg(adap,
+						mem_base + offset));
+		else
+			t4_write_reg(adap, mem_base + offset,
+					(__force u32)cpu_to_le32(*buf++));
+		offset += sizeof(__be32);
+		len -= sizeof(__be32);
+
+		/* If we've reached the end of our current window aperture,
+		 * move the PCI-E Memory Window on to the next.  Note that
+		 * doing this here after "len" may be 0 allows us to set up
+		 * the PCI-E Memory Window for a possible final residual
+		 * transfer below ...
+		 */
+		if (offset == mem_aperture) {
+			pos += mem_aperture;
+			offset = 0;
+			t4_pcie_mem_access_offset_write(adap, pos, win, win_pf);
+		}
+	}
+
+	/* If the original transfer had a length which wasn't a multiple of
+	 * 32-bits, now's where we need to finish off the transfer of the
+	 * residual amount.  The PCI-E Memory Window has already been moved
+	 * above (if necessary) to cover this final transfer.
+	 */
+	if (resid) {
+		union {
+			u32 word;
+			char byte[4];
+		} last;
+		unsigned char *bp;
+		int i;
+
+		if (dir == T4_MEMORY_READ) {
+			last.word = le32_to_cpu(
+					(__force __le32)t4_read_reg(adap,
+						mem_base + offset));
+			for (bp = (unsigned char *)buf, i = resid; i < 4; i++)
+				bp[i] = last.byte[i];
+		} else {
+			last.word = *buf;
+			for (i = resid; i < 4; i++)
+				last.byte[i] = 0;
+			t4_write_reg(adap, mem_base + offset,
+					(__force u32)cpu_to_le32(last.word));
+		}
+	}
+
+	return 0;
+}
+
+/**
  * t4_memory_rw_init - Get memory window relative offset, base, and size.
  * @adap: the adapter
  * @win: PCI-E Memory Window to use

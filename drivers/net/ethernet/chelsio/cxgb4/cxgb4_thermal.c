@@ -13,8 +13,8 @@ static int cxgb4_thermal_get_temp(struct thermal_zone_device *tzdev,
 				  int *temp)
 {
 	struct adapter *adap = thermal_zone_device_priv(tzdev);
-	u32 param, val;
-	int ret;
+	u32 param;
+	int ret, val;
 
 	param = (FW_PARAMS_MNEM_V(FW_PARAMS_MNEM_DEV) |
 		 FW_PARAMS_PARAM_X_V(FW_PARAMS_PARAM_DEV_DIAG) |
@@ -22,7 +22,7 @@ static int cxgb4_thermal_get_temp(struct thermal_zone_device *tzdev,
 
 	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1,
 			      &param, &val);
-	if (ret < 0 || val == 0)
+	if (ret < 0 )
 		return -1;
 
 	*temp = val * 1000;

@@ -35,10 +35,13 @@
 
 #include "iw_cxgb4.h"
 
-static void print_tpte(struct c4iw_dev *dev, u32 stag)
+void print_tpte(struct c4iw_dev *dev, u32 stag)
 {
-	int ret;
+	int ret, i;
 	struct fw_ri_tpte tpte;
+	u64 len_b, len;
+	__be32 *pble;
+
 
 	ret = cxgb4_read_tpte(dev->rdev.lldi.ports[0], stag,
 			      (__be32 *)&tpte);
@@ -47,7 +50,8 @@ static void print_tpte(struct c4iw_dev *dev, u32 stag)
 			"%s cxgb4_read_tpte err %d\n", __func__, ret);
 		return;
 	}
-	pr_debug("stag idx 0x%x valid %d key 0x%x state %d pdid %d perm 0x%x ps %d len 0x%llx va 0x%llx\n",
+	pr_debug("stag idx 0x%x valid %d key 0x%x state %d pdid %d"
+		 "perm 0x%x ps %d pbl_addr 0x%x len 0x%llx va 0x%llx\n",
 		 stag & 0xffffff00,
 		 FW_RI_TPTE_VALID_G(ntohl(tpte.valid_to_pdid)),
 		 FW_RI_TPTE_STAGKEY_G(ntohl(tpte.valid_to_pdid)),
@@ -55,8 +59,27 @@ static void print_tpte(struct c4iw_dev *dev, u32 stag)
 		 FW_RI_TPTE_PDID_G(ntohl(tpte.valid_to_pdid)),
 		 FW_RI_TPTE_PERM_G(ntohl(tpte.locread_to_qpid)),
 		 FW_RI_TPTE_PS_G(ntohl(tpte.locread_to_qpid)),
+		 FW_RI_TPTE_PBLADDR_G(ntohl(tpte.nosnoop_pbladdr)),
 		 ((u64)ntohl(tpte.len_hi) << 32) | ntohl(tpte.len_lo),
 		 ((u64)ntohl(tpte.va_hi) << 32) | ntohl(tpte.va_lo_fbo));
+
+	len = ((u64)ntohl(tpte.len_hi) << 32) | ntohl(tpte.len_lo);
+	len_b = (len / PAGE_SIZE + 1) * 8;
+	pble = kzalloc(len_b, GFP_ATOMIC);
+	ret = cxgb4_read_pbl_entries(dev->rdev.lldi.ports[0],
+			FW_RI_TPTE_PBLADDR_G(ntohl(tpte.nosnoop_pbladdr)),
+			len_b, (__be32 *)pble);
+	pr_err("PBL Dump:\n");
+	for (i = 0; i < len_b / 4;) {
+		pr_err("0x%08x %08x\n", be32_to_cpu(pble[i]), be32_to_cpu(pble[i+1]));
+		i+=2;
+	}
+
+	if (ret) {
+		pr_err("%s cxgb4_read_pbl_entries err %d\n", __func__, ret);
+		return;
+	}
+	kfree(pble);
 }
 
 static void dump_err_cqe(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
@@ -70,7 +93,8 @@ static void dump_err_cqe(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 		CQE_STATUS(err_cqe), CQE_TYPE(err_cqe), ntohl(err_cqe->len),
 		CQE_WRID_HI(err_cqe), CQE_WRID_LOW(err_cqe));
 
-	pr_debug("%016llx %016llx %016llx %016llx - %016llx %016llx %016llx %016llx\n",
+	pr_debug("%016llx %016llx %016llx %016llx\n"
+		 "%016llx %016llx %016llx %016llx\n",
 		 be64_to_cpu(p[0]), be64_to_cpu(p[1]), be64_to_cpu(p[2]),
 		 be64_to_cpu(p[3]), be64_to_cpu(p[4]), be64_to_cpu(p[5]),
 		 be64_to_cpu(p[6]), be64_to_cpu(p[7]));

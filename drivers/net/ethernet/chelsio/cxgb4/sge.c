@@ -2750,7 +2750,7 @@ int t4_mgmt_tx(struct adapter *adap, struct sk_buff *skb)
 static u32 cxgb4_sge_uld_ctrlq_index(struct net_device *dev,
                                     enum cxgb4_uld_type uld)
 {
-       u32 index = cxgb4_port_chan(dev) * MAX_UP_CORES;
+       u32 index = cxgb4_port_chan(dev) * netdev2adap(dev)->params.num_up_cores;
 
        switch (uld) {
        case CXGB4_ULD_RDMA:
@@ -4110,7 +4110,7 @@ static void cxgb4_sge_rx_timer_cb(struct timer_list *t)
 			struct sge_eth_rxq *rxq;
 			struct sge_fl *fl;
 
-			fl = cxgb4_sge_egr_map_get(&s->egr_map, id);
+			fl = cxgb4_sge_egr_map_get(&s->egr_map, s->egr_start + id);
 			clear_bit(id, s->starving_fl);
 			smp_mb__after_atomic();
 

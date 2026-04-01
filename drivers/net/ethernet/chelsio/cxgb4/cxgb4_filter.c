@@ -1317,7 +1317,7 @@ static int cxgb4_filter_hash_delete(struct net_device *dev, u32 filter_id,
 }
 
 static int set_tcb_field(struct adapter *adap, struct filter_entry *f,
-			 u32 ftid,  u16 word, u64 mask, u64 val, int no_reply)
+		u16 word, u64 mask, u64 val, int no_reply)
 {
 	struct cpl_set_tcb_field *req;
 	struct sk_buff *skb;
@@ -1328,7 +1328,7 @@ static int set_tcb_field(struct adapter *adap, struct filter_entry *f,
 		return -ENOMEM;
 
 	req = (struct cpl_set_tcb_field *)__skb_put_zero(skb, sizeof(*req));
-	INIT_TP_WR_CPL(req, CPL_SET_TCB_FIELD, ftid);
+	INIT_TP_WR_CPL(req, CPL_SET_TCB_FIELD, f->tid);
 	req->reply_ctrl = htons(REPLY_CHAN_V(0) |
 				QUEUENO_V(adap->sge.fw_evtq.abs_id) |
 				NO_REPLY_V(no_reply));
@@ -1340,7 +1340,7 @@ static int set_tcb_field(struct adapter *adap, struct filter_entry *f,
 		req->reply_ctrl = htons(REPLY_CHAN_V(0) |
 				QUEUENO_V(adap->sge.fw_evtq.abs_id) |
 				NO_REPLY_V(no_reply));
-	req->word_cookie = htons(TCB_WORD_V(word) | TCB_COOKIE_V(ftid));
+	req->word_cookie = htons(TCB_WORD_V(word) | TCB_COOKIE_V(f->tid));
 	req->mask = cpu_to_be64(mask);
 	req->val = cpu_to_be64(val);
 	ctrlq_index = f->fs.val.iport * adap->params.num_up_cores;
@@ -1353,46 +1353,45 @@ static int set_tcb_field(struct adapter *adap, struct filter_entry *f,
 /* Set one of the t_flags bits in the TCB.
  */
 static void set_tcb_tflag(struct adapter *adap, struct filter_entry *f,
-                         u32 ftid, u32 bit_pos, u32 val, int no_reply)
+		u32 bit_pos, u32 val, int no_reply)
 {
-       set_tcb_field(adap, f, ftid,  TCB_T_FLAGS_W, 1ULL << bit_pos,
+       set_tcb_field(adap, f, TCB_T_FLAGS_W, 1ULL << bit_pos,
                      (unsigned long long)val << bit_pos, no_reply);
 }
 
 static void set_nat_params(struct adapter *adap, struct filter_entry *f,
-			   unsigned int tid, bool dip, bool sip, bool dp,
-			   bool sp)
+		bool dip, bool sip, bool dp, bool sp)
 {
 	u8 *nat_lp = (u8 *)&f->fs.nat_lport;
 	u8 *nat_fp = (u8 *)&f->fs.nat_fport;
 
 	if (dip) {
 		if (f->fs.type) {
-			set_tcb_field(adap, f, tid, TCB_SND_UNA_RAW_W,
+			set_tcb_field(adap, f, TCB_SND_UNA_RAW_W,
 				      WORD_MASK, f->fs.nat_lip[15] |
 				      f->fs.nat_lip[14] << 8 |
 				      f->fs.nat_lip[13] << 16 |
 				      (u64)f->fs.nat_lip[12] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_SND_UNA_RAW_W + 1,
+			set_tcb_field(adap, f, TCB_SND_UNA_RAW_W + 1,
 				      WORD_MASK, f->fs.nat_lip[11] |
 				      f->fs.nat_lip[10] << 8 |
 				      f->fs.nat_lip[9] << 16 |
 				      (u64)f->fs.nat_lip[8] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_SND_UNA_RAW_W + 2,
+			set_tcb_field(adap, f, TCB_SND_UNA_RAW_W + 2,
 				      WORD_MASK, f->fs.nat_lip[7] |
 				      f->fs.nat_lip[6] << 8 |
 				      f->fs.nat_lip[5] << 16 |
 				      (u64)f->fs.nat_lip[4] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_SND_UNA_RAW_W + 3,
+			set_tcb_field(adap, f, TCB_SND_UNA_RAW_W + 3,
 				      WORD_MASK, f->fs.nat_lip[3] |
 				      f->fs.nat_lip[2] << 8 |
 				      f->fs.nat_lip[1] << 16 |
 				      (u64)f->fs.nat_lip[0] << 24, 1);
 		} else {
-			set_tcb_field(adap, f, tid, TCB_RX_FRAG3_LEN_RAW_W,
+			set_tcb_field(adap, f, TCB_RX_FRAG3_LEN_RAW_W,
 				      WORD_MASK, f->fs.nat_lip[3] |
 				      f->fs.nat_lip[2] << 8 |
 				      f->fs.nat_lip[1] << 16 |
@@ -1402,33 +1401,32 @@ static void set_nat_params(struct adapter *adap, struct filter_entry *f,
 
 	if (sip) {
 		if (f->fs.type) {
-			set_tcb_field(adap, f, tid, TCB_RX_FRAG2_PTR_RAW_W,
+			set_tcb_field(adap, f, TCB_RX_FRAG2_PTR_RAW_W,
 				      WORD_MASK, f->fs.nat_fip[15] |
 				      f->fs.nat_fip[14] << 8 |
 				      f->fs.nat_fip[13] << 16 |
 				      (u64)f->fs.nat_fip[12] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_RX_FRAG2_PTR_RAW_W + 1,
+			set_tcb_field(adap, f, TCB_RX_FRAG2_PTR_RAW_W + 1,
 				      WORD_MASK, f->fs.nat_fip[11] |
 				      f->fs.nat_fip[10] << 8 |
 				      f->fs.nat_fip[9] << 16 |
 				      (u64)f->fs.nat_fip[8] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_RX_FRAG2_PTR_RAW_W + 2,
+			set_tcb_field(adap, f, TCB_RX_FRAG2_PTR_RAW_W + 2,
 				      WORD_MASK, f->fs.nat_fip[7] |
 				      f->fs.nat_fip[6] << 8 |
 				      f->fs.nat_fip[5] << 16 |
 				      (u64)f->fs.nat_fip[4] << 24, 1);
 
-			set_tcb_field(adap, f, tid, TCB_RX_FRAG2_PTR_RAW_W + 3,
+			set_tcb_field(adap, f, TCB_RX_FRAG2_PTR_RAW_W + 3,
 				      WORD_MASK, f->fs.nat_fip[3] |
 				      f->fs.nat_fip[2] << 8 |
 				      f->fs.nat_fip[1] << 16 |
 				      (u64)f->fs.nat_fip[0] << 24, 1);
 
 		} else {
-			set_tcb_field(adap, f, tid,
-				      TCB_RX_FRAG3_START_IDX_OFFSET_RAW_W,
+			set_tcb_field(adap, f, TCB_RX_FRAG3_START_IDX_OFFSET_RAW_W,
 				      WORD_MASK, f->fs.nat_fip[3] |
 				      f->fs.nat_fip[2] << 8 |
 				      f->fs.nat_fip[1] << 16 |
@@ -1436,7 +1434,7 @@ static void set_nat_params(struct adapter *adap, struct filter_entry *f,
 		}
 	}
 
-	set_tcb_field(adap, f, tid, TCB_PDU_HDR_LEN_W, WORD_MASK,
+	set_tcb_field(adap, f, TCB_PDU_HDR_LEN_W, WORD_MASK,
 		      (dp ? (nat_lp[1] | nat_lp[0] << 8) : 0) |
 		      (sp ? (nat_fp[1] << 16 | (u64)nat_fp[0] << 24) : 0),
 		      1);
@@ -1564,50 +1562,50 @@ void cxgb4_filter_hash_create_rpl(struct adapter *adap,
         }
 
         if (f->fs.hitcnts) {
-                set_tcb_field(adap, f, tid, TCB_TIMESTAMP_W,
+                set_tcb_field(adap, f, TCB_TIMESTAMP_W,
                               TCB_TIMESTAMP_V(TCB_TIMESTAMP_M),
                               TCB_TIMESTAMP_V(0ULL), 1);
-                set_tcb_field(adap, f, tid, TCB_T_RTT_TS_RECENT_AGE_W,
+                set_tcb_field(adap, f, TCB_T_RTT_TS_RECENT_AGE_W,
                               TCB_T_RTT_TS_RECENT_AGE_V(TCB_T_RTT_TS_RECENT_AGE_M),
                               TCB_T_RTT_TS_RECENT_AGE_V(0ULL), 1);
         }
 
         if (f->fs.newdmac)
-                set_tcb_tflag(adap, f, tid, TF_CCTRL_ECE_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_CCTRL_ECE_S, 1, 1);
 
         if (f->fs.newvlan == VLAN_INSERT || f->fs.newvlan == VLAN_REWRITE)
-                set_tcb_tflag(adap, f, tid, TF_CCTRL_RFR_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_CCTRL_RFR_S, 1, 1);
 
         if (f->fs.newsmac) {
-                set_tcb_field(adap, f, tid, TCB_SMAC_SEL_W,
+                set_tcb_field(adap, f, TCB_SMAC_SEL_W,
                               TCB_SMAC_SEL_V(TCB_SMAC_SEL_M),
                               TCB_SMAC_SEL_V(f->smtidx), 1);
-                set_tcb_tflag(adap, f, tid, TF_CCTRL_CWR_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_CCTRL_CWR_S, 1, 1);
         }
 
         switch (f->fs.nat_mode) {
         case NAT_MODE_NONE:
                 break;
         case NAT_MODE_DIP:
-                set_nat_params(adap, f, tid, true, false, false, false);
+                set_nat_params(adap, f, true, false, false, false);
                 break;
         case NAT_MODE_DIP_DP:
-                set_nat_params(adap, f, tid, true, false, true, false);
+                set_nat_params(adap, f, true, false, true, false);
                 break;
         case NAT_MODE_DIP_DP_SIP:
-                set_nat_params(adap, f, tid, true, true, true, false);
+                set_nat_params(adap, f, true, true, true, false);
                 break;
         case NAT_MODE_DIP_DP_SP:
-                set_nat_params(adap, f, tid, true, false, true, true);
+                set_nat_params(adap, f, true, false, true, true);
                 break;
         case NAT_MODE_SIP_SP:
-                set_nat_params(adap, f, tid, false, true, false, true);
+                set_nat_params(adap, f, false, true, false, true);
                 break;
         case NAT_MODE_DIP_SIP_SP:
-                set_nat_params(adap, f, tid, true, true, false, true);
+                set_nat_params(adap, f, true, true, false, true);
                 break;
         case NAT_MODE_ALL:
-                set_nat_params(adap, f, tid, true, true, true, true);
+                set_nat_params(adap, f, true, true, true, true);
                 break;
         default:
                 dev_err(adap->pdev_dev, "Invalid NAT mode: %d\n",
@@ -1621,24 +1619,24 @@ void cxgb4_filter_hash_create_rpl(struct adapter *adap,
         }
 
         if (CHELSIO_CHIP_VERSION(adap->params.chip) >= CHELSIO_T7)
-                set_tcb_field(adap, f, tid, TCB_T_FLAGS_W,
+                set_tcb_field(adap, f, TCB_T_FLAGS_W,
                               TF_PEND_CTL1_V(1) | TF_PEND_CTL2_V(1),
                               TF_PEND_CTL1_V(f->fs.eport & 0x1) |
                               TF_PEND_CTL2_V((f->fs.eport >> 1) & 0x1), 1);
 
         if (f->fs.eport >= NUM_UP_TSCH_CHANNEL_INSTANCES)
-                set_tcb_tflag(adap, f, tid, TF_RECV_TSTMP_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_RECV_TSTMP_S, 1, 1);
 
         switch (f->fs.action) {
         case FILTER_PASS:
                 if (f->fs.dirsteer)
-                        set_tcb_tflag(adap, f, tid, TF_DIRECT_STEER_S, 1, 1);
+                        set_tcb_tflag(adap, f, TF_DIRECT_STEER_S, 1, 1);
                 break;
         case FILTER_DROP:
-                set_tcb_tflag(adap, f, tid, TF_DROP_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_DROP_S, 1, 1);
                 break;
         case FILTER_SWITCH:
-                set_tcb_tflag(adap, f, tid, TF_LPBK_S, 1, 1);
+                set_tcb_tflag(adap, f, TF_LPBK_S, 1, 1);
                 break;
         }
 
@@ -1647,7 +1645,7 @@ void cxgb4_filter_hash_create_rpl(struct adapter *adap,
                  * set Non-offload bit to 0 - to achieve
                  * Drop action with Hash filters
                  */
-                set_tcb_field(adap, f, tid, TCB_T_FLAGS_W,
+                set_tcb_field(adap, f, TCB_T_FLAGS_W,
                               TF_NON_OFFLOAD_V(1) | TF_MIGRATING_V(1),
                               TF_MIGRATING_V(1), 1);
         }

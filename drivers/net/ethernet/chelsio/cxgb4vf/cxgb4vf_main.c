@@ -172,8 +172,17 @@ void t4vf_os_link_changed(struct adapter *adapter, int pidx, int link_ok)
 		case 40000:
 			s = "40Gbps";
 			break;
+		case 50000:
+			s = "50Gbps";
+			break;
 		case 100000:
 			s = "100Gbps";
+			break;
+		case 200000:
+			s = "200Gbps";
+			break;
+		case 400000:
+			s = "400Gbps";
 			break;
 
 		default:
@@ -1278,7 +1287,9 @@ static int from_fw_port_mod_type(enum fw_port_type port_type,
 		   port_type == FW_PORT_TYPE_CR4_QSFP ||
 		   port_type == FW_PORT_TYPE_CR_QSFP ||
 		   port_type == FW_PORT_TYPE_CR2_QSFP ||
-		   port_type == FW_PORT_TYPE_SFP28) {
+		   port_type == FW_PORT_TYPE_SFP28 ||
+		   port_type == FW_PORT_TYPE_SFP56 ||
+		   port_type == FW_PORT_TYPE_QSFP56){
 		if (mod_type == FW_PORT_MOD_TYPE_LR ||
 		    mod_type == FW_PORT_MOD_TYPE_SR ||
 		    mod_type == FW_PORT_MOD_TYPE_ER ||
@@ -1401,6 +1412,20 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 	case FW_PORT_TYPE_CR2_QSFP:
 		SET_LMM(FIBRE);
 		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
+		break;
+
+	case FW_PORT_TYPE_SFP56:
+		SET_LMM(FIBRE);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
+		break;
+
+	case FW_PORT_TYPE_QSFP56:
+		SET_LMM(FIBRE);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
 		break;
 
 	case FW_PORT_TYPE_KR4_100G:
@@ -2921,7 +2946,7 @@ static int cxgb4vf_pci_probe(struct pci_dev *pdev,
 	/*
 	 * Set up our DMA mask
 	 */
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(60));
 	if (err) {
 		dev_err(&pdev->dev, "no usable DMA configuration\n");
 		goto err_release_regions;

@@ -617,6 +617,7 @@ struct sk_buff *cxgb4_pktgl_to_skb(const struct pkt_gl *gl,
 void t4_pktgl_free(const struct pkt_gl *gl);
 int cxgb4_flush_eq_cache(struct net_device *dev);
 int cxgb4_read_tpte(struct net_device *dev, u32 stag, __be32 *tpte);
+int cxgb4_read_pbl_entries(struct net_device *dev, u32 pbl_addr, u64 len, __be32 *pble);
 u64 cxgb4_read_sge_timestamp(struct net_device *dev);
 
 enum cxgb4_bar2_qtype { CXGB4_BAR2_QTYPE_EGRESS, CXGB4_BAR2_QTYPE_INGRESS };

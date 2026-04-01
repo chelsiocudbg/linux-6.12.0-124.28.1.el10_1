@@ -140,7 +140,7 @@ int cxgb4_pci_chip_init(struct adapter *adap)
                return 0;
        }
 
-       ret = dma_set_mask_and_coherent(adap->pdev_dev, DMA_BIT_MASK(64));
+       ret = dma_set_mask_and_coherent(adap->pdev_dev, DMA_BIT_MASK(60));
        if (ret) {
                dev_err(adap->pdev_dev, "no usable DMA configuration\n");
                goto out_free_mbox_log;
