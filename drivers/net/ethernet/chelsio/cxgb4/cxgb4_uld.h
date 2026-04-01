@@ -485,7 +485,9 @@ struct ch_ktls_stats_debug {
  * Block of information the LLD provides to ULDs attaching to a device.
  */
 struct cxgb4_lld_info {
+	struct device *dev;                  /* associated device */
 	struct pci_dev *pdev;                /* associated PCI device */
+	const char *name;                    /* associated PCI/Platform device name */
 	struct l2t_data *l2t;                /* L2 table */
 	struct cxgb4_uld_tid_info uld_tids;  /* ULD TID info */
 	struct net_device **ports;           /* device ports */

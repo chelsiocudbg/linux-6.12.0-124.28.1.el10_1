@@ -2795,6 +2795,7 @@ static void uld_init(struct adapter *adap, struct cxgb4_lld_info *lld, unsigned 
 	if (!cxgb4_uld_supported_any(adap))
 		return;
 
+	lld->dev = cxgb4_common_get_device(adap);
 	lld->pdev = cxgb4_pci_dev(adap);
 	lld->plat_dev = cxgb4_is_platform_device(adap);
 	lld->pf = adap->pf;

@@ -374,7 +374,7 @@ static void chcr_ktls_dev_del(struct net_device *netdev,
 		return;
 	/* clear l2t entry */
 	if (tx_info->l2te)
-		cxgb4_l2t_release(tx_info->l2te);
+		cxgb4_l2t_release(netdev, tx_info->l2te);
 
 #if IS_ENABLED(CONFIG_IPV6)
 	/* clear clip entry */
@@ -583,7 +583,7 @@ put_module:
 	/* release module refcount */
 	module_put(THIS_MODULE);
 free_l2t:
-	cxgb4_l2t_release(tx_info->l2te);
+	cxgb4_l2t_release(netdev, tx_info->l2te);
 free_tx_info:
 	if (tx_info->pending_close)
 		spin_unlock_bh(&tx_info->lock);
@@ -2162,7 +2162,7 @@ static void clear_conn_resources(struct chcr_ktls_info *tx_info)
 {
 	/* clear l2t entry */
 	if (tx_info->l2te)
-		cxgb4_l2t_release(tx_info->l2te);
+		cxgb4_l2t_release(tx_info->netdev, tx_info->l2te);
 
 #if IS_ENABLED(CONFIG_IPV6)
 	/* clear clip entry */

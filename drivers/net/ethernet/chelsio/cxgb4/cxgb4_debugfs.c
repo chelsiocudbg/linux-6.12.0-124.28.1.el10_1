@@ -3128,6 +3128,47 @@ static int cxgb4_sge_qinfo_eth_vxlan(struct seq_file *seq, int *row)
 #endif /* IS_ENABLED(CONFIG_VXLAN) */
 }
 
+static void cxgb4_sge_qinfo_uld_rx(struct seq_file *seq, int r, int nentries,
+                                   const struct sge_ofld_rxq *rx,
+                                   const char *qname)
+{
+        struct t4_linux_debugfs_data *d = seq->private;
+        struct adapter *adap = d->adap;
+        struct sge *s = &adap->sge;
+        int i, n;
+
+        n = min(SGE_QINFO_NUM_PER_ROW, nentries - SGE_QINFO_NUM_PER_ROW * r);
+
+        S("QType:", qname);
+        S("Interface:",
+          rx[i].rspq.netdev ? rx[i].rspq.netdev->name : "N/A");
+        R("RspQ ID:", rspq.abs_id);
+        R("RspQ size:", rspq.size);
+        R("RspQE size:", rspq.iqe_len);
+        R("RspQ CIDX:", rspq.cidx);
+        R("RspQ Gen:", rspq.gen);
+        S3("u", "Intr delay:", rspq_intr_timer(s, &rx[i].rspq));
+        S3("u", "Intr pktcnt:", rspq_intr_pktcnt(s, &rx[i].rspq));
+        RL("RxPackets:", stats.pkts);
+        RL("RxImmPkts:", stats.imm);
+        RL("RxNoMem:", stats.nomem);
+        RL("RxAN:", stats.an);
+        RL("LROmerged:", rspq.lro_mgr.lro_merged);
+        RL("LROpackets:", rspq.lro_mgr.lro_pkts);
+        if (rx[i].fl.size > 0) {
+                R("FL ID:", fl.cntxt_id);
+                R("FL size:", fl.size - 8);
+                R("FL pend:", fl.pend_cred);
+                R("FL avail:", fl.avail);
+                R("FL PIDX:", fl.pidx);
+                R("FL CIDX:", fl.cidx);
+                RL("FLAllocErr:", fl.alloc_failed);
+                RL("FLLrgAlcErr:", fl.large_alloc_failed);
+                RL("FLMapErr:", fl.mapping_err);
+                RL("FLLow:", fl.low);
+                RL("FLStarving:", fl.starving);
+        }
+}
 
 static void cxgb4_sge_qinfo_uld_tx(struct seq_file *seq, int r,
 				   enum cxgb4_uld_txq_type qtype,
@@ -3217,14 +3258,24 @@ static int cxgb4_sge_qinfo_uld_rdma(struct seq_file *seq, int *row)
 {
 	struct t4_linux_debugfs_data *d = seq->private;
 	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
 	int r, nentries, nsendtx;
+	unsigned int rdmaqs, rdmaciqs;
 
 	if (!cxgb4_uld_supported(adap, CXGB4_ULD_RDMA))
 		return -EOPNOTSUPP;
 
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_RDMA];
+	rdmaqs = (urxq_info) ? urxq_info->nrxq : 0;
+	rdmaciqs = (urxq_info) ? urxq_info->nciq : 0;
 	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_RDMA);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+			CXGB4_ULD_RDMA);
+	nentries =
+		DIV_ROUND_UP(rdmaqs, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(rdmaciqs, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
 	if (!row)
 		return nentries;
 
@@ -3234,6 +3285,22 @@ static int cxgb4_sge_qinfo_uld_rdma(struct seq_file *seq, int *row)
 		return -EINVAL;
 	}
 
+	if (r < DIV_ROUND_UP(rdmaqs, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, rdmaqs, rx, "RDMA-CPL");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(rdmaqs, SGE_QINFO_NUM_PER_ROW);
+	if (r < DIV_ROUND_UP(rdmaciqs, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[rdmaqs + r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, rdmaciqs, rx, "RDMA-CIQ");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(rdmaciqs, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_RDMA, "RDMA-SENDTX");
 	return 0;
 }
 
@@ -3241,136 +3308,19 @@ static int cxgb4_sge_qinfo_uld_iscsi(struct seq_file *seq, int *row)
 {
 	struct t4_linux_debugfs_data *d = seq->private;
 	struct adapter *adap = d->adap;
-	int r, nentries, nsendtx;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+	int r, nentries, nsendtx, niscsiq;
 
 	if (!cxgb4_uld_supported(adap, CXGB4_ULD_ISCSI))
 		return -EOPNOTSUPP;
 
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_ISCSI];
+	niscsiq = (urxq_info) ? urxq_info->nrxq: 0;
 	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_ISCSI);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_uld_iscsit(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	struct adapter *adap = d->adap;
-	int r, nentries, nsendtx;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_ISCSIT))
-		return -EOPNOTSUPP;
-
-	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_ISCSIT);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_uld_nvmeh(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	struct adapter *adap = d->adap;
-	int r, nentries, nsendtx;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_HOST))
-		return -EOPNOTSUPP;
-
-	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_TYPE_NVME_TCP_HOST);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_uld_nvmet(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	struct adapter *adap = d->adap;
-	int r, nentries, nsendtx;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_TARGET))
-		return -EOPNOTSUPP;
-
-	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_TYPE_NVME_TCP_TARGET);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_uld_cstor(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	struct adapter *adap = d->adap;
-	int r, nentries, nsendtx;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_CSTOR))
-		return -EOPNOTSUPP;
-
-	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_TYPE_CSTOR);
-	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_uld_crypto(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	int r, nentries, nsharetx, nsendtx;
-	struct adapter *adap = d->adap;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_CRYPTO))
-		return -EOPNOTSUPP;
-
-	nsharetx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SHARED,
-					       CXGB4_ULD_CRYPTO);
-	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_CRYPTO);
-	nentries = DIV_ROUND_UP(nsharetx, SGE_QINFO_NUM_PER_ROW) +
+			CXGB4_ULD_ISCSI);
+	nentries = DIV_ROUND_UP(niscsiq, SGE_QINFO_NUM_PER_ROW) +
 		   DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
 	if (!row)
 		return nentries;
@@ -3381,9 +3331,229 @@ static int cxgb4_sge_qinfo_uld_crypto(struct seq_file *seq, int *row)
 		return -EINVAL;
 	}
 
+	if (r < DIV_ROUND_UP(niscsiq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, niscsiq, rx, "iSCSI-RX");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(niscsiq, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_ISCSI, "iSCSI-SENDTX");
+	return 0;
+}
+
+static int cxgb4_sge_qinfo_uld_iscsit(struct seq_file *seq, int *row)
+{
+	struct t4_linux_debugfs_data *d = seq->private;
+	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+	int r, nentries, nsendtx, niscsitq;
+
+	if (!cxgb4_uld_supported(adap, CXGB4_ULD_ISCSIT))
+		return -EOPNOTSUPP;
+
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_ISCSIT];
+	niscsitq = (urxq_info) ? urxq_info->nrxq : 0;
+	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_ISCSIT);
+	nentries = DIV_ROUND_UP(niscsitq, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+	if (!row)
+		return nentries;
+
+	r = *row;
+	if (r >= nentries) {
+		*row -= nentries;
+		return -EINVAL;
+	}
+
+	if (r < DIV_ROUND_UP(niscsitq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, niscsitq, rx, "iSCSIT-RX");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(niscsitq, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_ISCSIT, "iSCSIT-SENDTX");
+	return 0;
+}
+
+static int cxgb4_sge_qinfo_uld_nvmeh(struct seq_file *seq, int *row)
+{
+	struct t4_linux_debugfs_data *d = seq->private;
+	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+	int r, nentries, nsendtx, n_nvmehq;
+
+	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_HOST))
+		return -EOPNOTSUPP;
+
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_TYPE_NVME_TCP_HOST];
+	n_nvmehq = (urxq_info) ? urxq_info->nrxq: 0;
+	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_NVME_TCP_HOST);
+	nentries = DIV_ROUND_UP(n_nvmehq, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+	if (!row)
+		return nentries;
+
+	r = *row;
+	if (r >= nentries) {
+		*row -= nentries;
+		return -EINVAL;
+	}
+
+	if (r < DIV_ROUND_UP(n_nvmehq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, n_nvmehq, rx, "NVMEH-RX");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(n_nvmehq, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_NVME_TCP_HOST, "NVMEH-SENDTX");
+	return 0;
+}
+
+static int cxgb4_sge_qinfo_uld_nvmet(struct seq_file *seq, int *row)
+{
+	struct t4_linux_debugfs_data *d = seq->private;
+	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+	int r, nentries, nsendtx, n_nvmetq;
+
+	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_TARGET))
+		return -EOPNOTSUPP;
+
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_TYPE_NVME_TCP_TARGET];
+	n_nvmetq = (urxq_info) ? urxq_info->nrxq : 0;
+	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_NVME_TCP_TARGET);
+	nentries = DIV_ROUND_UP(n_nvmetq, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+	if (!row)
+		return nentries;
+
+	r = *row;
+	if (r >= nentries) {
+		*row -= nentries;
+		return -EINVAL;
+	}
+
+	if (r < DIV_ROUND_UP(n_nvmetq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, n_nvmetq, rx, "NVMET-RX");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(n_nvmetq, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_NVME_TCP_TARGET, "NVMET-SENDTX");
+	return 0;
+}
+
+static int cxgb4_sge_qinfo_uld_cstor(struct seq_file *seq, int *row)
+{
+	struct t4_linux_debugfs_data *d = seq->private;
+	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+	int r, nentries, nsendtx, ncstorq, ncstoriq;
+
+	if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_CSTOR))
+		return -EOPNOTSUPP;
+
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_TYPE_CSTOR];
+	ncstorq = (urxq_info) ? urxq_info->nrxq : 0;
+	ncstoriq = (urxq_info) ? urxq_info->nciq : 0;
+	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_CSTOR);
+	nentries = DIV_ROUND_UP(ncstorq, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(ncstoriq, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+	if (!row)
+		return nentries;
+
+	r = *row;
+	if (r >= nentries) {
+		*row -= nentries;
+		return -EINVAL;
+	}
+
+	if (r < DIV_ROUND_UP(ncstorq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, ncstorq, rx, "CSTOR-RXQ");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(ncstorq, SGE_QINFO_NUM_PER_ROW);
+	if (r < DIV_ROUND_UP(ncstoriq, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[urxq_info->nrxq + r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, ncstoriq, rx, "CSTOR-CIQ");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(ncstoriq, SGE_QINFO_NUM_PER_ROW);
+	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_TYPE_CSTOR, "CSTOR-SENDTX");
+	return 0;
+}
+
+static int cxgb4_sge_qinfo_uld_crypto(struct seq_file *seq, int *row)
+{
+	struct t4_linux_debugfs_data *d = seq->private;
+	int r, nentries, nsharetx, nsendtx, ncrypto;
+	struct adapter *adap = d->adap;
+	struct sge_uld_rxq_info *urxq_info;
+	const struct sge_ofld_rxq *rx;
+	struct sge *s = &adap->sge;
+
+	if (!cxgb4_uld_supported(adap, CXGB4_ULD_CRYPTO))
+		return -EOPNOTSUPP;
+
+	urxq_info = s->uld_rxq_info[CXGB4_ULD_CRYPTO];
+	ncrypto = (urxq_info) ? urxq_info->nrxq : 0;
+	nsharetx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SHARED,
+			CXGB4_ULD_CRYPTO);
+	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
+			CXGB4_ULD_CRYPTO);
+	nentries = DIV_ROUND_UP(ncrypto, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsharetx, SGE_QINFO_NUM_PER_ROW) +
+		DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
+	if (!row)
+		return nentries;
+
+	r = *row;
+	if (r >= nentries) {
+		*row -= nentries;
+		return -EINVAL;
+	}
+
+	if (r < DIV_ROUND_UP(ncrypto, SGE_QINFO_NUM_PER_ROW)) {
+		rx = &urxq_info->uldrxq[r * SGE_QINFO_NUM_PER_ROW];
+		cxgb4_sge_qinfo_uld_rx(seq, r, ncrypto, rx, "CRYPTO-RX");
+		return 0;
+	}
+
+	r -= DIV_ROUND_UP(ncrypto, SGE_QINFO_NUM_PER_ROW);
+	if (r < DIV_ROUND_UP(nsharetx, SGE_QINFO_NUM_PER_ROW)) {
+		cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SHARED,
+				CXGB4_ULD_CRYPTO, "CRYPTO-TX");
+		return 0;
+	}
+
 	r -= DIV_ROUND_UP(nsharetx, SGE_QINFO_NUM_PER_ROW);
 	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-			       CXGB4_ULD_CRYPTO, "CRYPTO-SENDTX");
+			CXGB4_ULD_CRYPTO, "CRYPTO-SENDTX");
 	return 0;
 }
 
@@ -3397,7 +3567,7 @@ static int cxgb4_sge_qinfo_uld_chtcp(struct seq_file *seq, int *row)
 		return -EOPNOTSUPP;
 
 	nsendtx = cxgb4_sge_qinfo_uld_txq_num(adap, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-					      CXGB4_ULD_TYPE_CHTCP);
+			CXGB4_ULD_TYPE_CHTCP);
 	nentries = DIV_ROUND_UP(nsendtx, SGE_QINFO_NUM_PER_ROW);
 	if (!row)
 		return nentries;
@@ -3409,7 +3579,7 @@ static int cxgb4_sge_qinfo_uld_chtcp(struct seq_file *seq, int *row)
 	}
 
 	cxgb4_sge_qinfo_uld_tx(seq, r, CXGB4_ULD_TXQ_TYPE_SENDPATH,
-			       CXGB4_ULD_TYPE_CHTCP, "CHTCP-SENDTX");
+			CXGB4_ULD_TYPE_CHTCP, "CHTCP-SENDTX");
 	return 0;
 }
 
@@ -3438,170 +3608,6 @@ static int cxgb4_sge_qinfo_ctrl_nic(struct seq_file *seq, int *row)
 	ctrlq = &s->ctrlq[r * SGE_QINFO_NUM_PER_ROW];
 	cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "CONTROL");
 	return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_rdma(struct seq_file *seq, int *row)
-{
-	struct t4_linux_debugfs_data *d = seq->private;
-	const struct sge_ctrl_txq *ctrlq;
-	struct adapter *adap = d->adap;
-	struct sge *s = &adap->sge;
-	int r, nq, nentries;
-
-	if (!cxgb4_uld_supported(adap, CXGB4_ULD_RDMA))
-		return -EOPNOTSUPP;
-
-	nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-	nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-	if (!row)
-		return nentries;
-
-	r = *row;
-	if (r >= nentries) {
-		*row -= nentries;
-		return -EINVAL;
-	}
-
-	ctrlq = &s->ctrlq[NCHAN * MAX_UP_CORES + r * SGE_QINFO_NUM_PER_ROW];
-	cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "RDMA-CONTROL");
-	return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_iscsi(struct seq_file *seq, int *row)
-{
-       struct t4_linux_debugfs_data *d = seq->private;
-       const struct sge_ctrl_txq *ctrlq;
-       struct adapter *adap = d->adap;
-       struct sge *s = &adap->sge;
-       int r, nq, nentries;
-
-       if (!cxgb4_uld_supported(adap, CXGB4_ULD_ISCSI) ||
-           !cxgb4_uld_sendpath_enabled(adap))
-               return -EOPNOTSUPP;
-
-       nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-       nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-       if (!row)
-               return nentries;
-
-       r = *row;
-       if (r >= nentries) {
-               *row -= nentries;
-               return -EINVAL;
-       }
-
-       ctrlq = &s->ctrlq[CXGB4_ULD_CTRLQ_INDEX_ISCSI + (r * SGE_QINFO_NUM_PER_ROW)];
-       cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "ISCSI-CONTROL");
-       return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_iscsit(struct seq_file *seq, int *row)
-{
-       struct t4_linux_debugfs_data *d = seq->private;
-       const struct sge_ctrl_txq *ctrlq;
-       struct adapter *adap = d->adap;
-       struct sge *s = &adap->sge;
-       int r, nq, nentries;
-
-       if (!cxgb4_uld_supported(adap, CXGB4_ULD_ISCSIT) ||
-           !cxgb4_uld_sendpath_enabled(adap))
-               return -EOPNOTSUPP;
-
-       nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-       nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-       if (!row)
-               return nentries;
-
-       r = *row;
-       if (r >= nentries) {
-               *row -= nentries;
-               return -EINVAL;
-       }
-
-       ctrlq = &s->ctrlq[CXGB4_ULD_CTRLQ_INDEX_ISCSIT + (r * SGE_QINFO_NUM_PER_ROW)];
-       cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "ISCSIT-CONTROL");
-       return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_nvmeh(struct seq_file *seq, int *row)
-{
-       struct t4_linux_debugfs_data *d = seq->private;
-       const struct sge_ctrl_txq *ctrlq;
-       struct adapter *adap = d->adap;
-       struct sge *s = &adap->sge;
-       int r, nq, nentries;
-
-       if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_HOST))
-               return -EOPNOTSUPP;
-
-       nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-       nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-       if (!row)
-               return nentries;
-
-       r = *row;
-       if (r >= nentries) {
-               *row -= nentries;
-               return -EINVAL;
-       }
-
-       ctrlq = &s->ctrlq[CXGB4_ULD_CTRLQ_INDEX_NVMEH + r * SGE_QINFO_NUM_PER_ROW];
-       cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "NVMEH-CONTROL");
-       return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_nvmet(struct seq_file *seq, int *row)
-{
-       struct t4_linux_debugfs_data *d = seq->private;
-       const struct sge_ctrl_txq *ctrlq;
-       struct adapter *adap = d->adap;
-       struct sge *s = &adap->sge;
-       int r, nq, nentries;
-
-       if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_NVME_TCP_TARGET))
-               return -EOPNOTSUPP;
-
-       nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-       nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-       if (!row)
-               return nentries;
-
-       r = *row;
-       if (r >= nentries) {
-               *row -= nentries;
-               return -EINVAL;
-       }
-
-       ctrlq = &s->ctrlq[CXGB4_ULD_CTRLQ_INDEX_NVMET + r * SGE_QINFO_NUM_PER_ROW];
-       cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "NVMET-CONTROL");
-       return 0;
-}
-
-static int cxgb4_sge_qinfo_ctrl_cstor(struct seq_file *seq, int *row)
-{
-       struct t4_linux_debugfs_data *d = seq->private;
-       const struct sge_ctrl_txq *ctrlq;
-       struct adapter *adap = d->adap;
-       struct sge *s = &adap->sge;
-       int r, nq, nentries;
-
-       if (!cxgb4_uld_supported(adap, CXGB4_ULD_TYPE_CSTOR))
-               return -EOPNOTSUPP;
-
-       nq = adap->tidinfo.sftids.size ? 1 : adap->params.nports * adap->params.num_up_cores;
-       nentries = DIV_ROUND_UP(nq, SGE_QINFO_NUM_PER_ROW);
-       if (!row)
-               return nentries;
-
-       r = *row;
-       if (r >= nentries) {
-               *row -= nentries;
-               return -EINVAL;
-       }
-
-       ctrlq = &s->ctrlq[CXGB4_ULD_CTRLQ_INDEX_CSTOR + r * SGE_QINFO_NUM_PER_ROW];
-       cxgb4_sge_qinfo_ctrl(seq, r, nq, ctrlq, "CSTOR-CONTROL");
-       return 0;
 }
 
 static int cxgb4_sge_qinfo_fwevtq(struct seq_file *seq, int *row)
@@ -3663,6 +3669,7 @@ static int sge_qinfo_show(struct seq_file *seq, void *v)
 	SGE_QINFO_CALL(eth_trace);
 	SGE_QINFO_CALL(eth_mirror);
 	SGE_QINFO_CALL(eth_vxlan);
+
 	SGE_QINFO_CALL(uld_rdma);
 	SGE_QINFO_CALL(uld_iscsi);
 	SGE_QINFO_CALL(uld_iscsit);
@@ -3671,13 +3678,8 @@ static int sge_qinfo_show(struct seq_file *seq, void *v)
 	SGE_QINFO_CALL(uld_cstor);
 	SGE_QINFO_CALL(uld_crypto);
 	SGE_QINFO_CALL(uld_chtcp);
+
 	SGE_QINFO_CALL(ctrl_nic);
-	SGE_QINFO_CALL(ctrl_rdma);
-	SGE_QINFO_CALL(ctrl_iscsi);
-	SGE_QINFO_CALL(ctrl_iscsit);
-	SGE_QINFO_CALL(ctrl_nvmeh);
-	SGE_QINFO_CALL(ctrl_nvmet);
-	SGE_QINFO_CALL(ctrl_cstor);
 	SGE_QINFO_CALL(fwevtq);
 
 #undef SGE_QINFO_CALL
@@ -3704,6 +3706,7 @@ static int sge_queue_entries(struct seq_file *seq)
 	SGE_QINFO_NUM_CALL(eth_trace);
 	SGE_QINFO_NUM_CALL(eth_mirror);
 	SGE_QINFO_NUM_CALL(eth_vxlan);
+
 	SGE_QINFO_NUM_CALL(uld_rdma);
 	SGE_QINFO_NUM_CALL(uld_iscsi);
 	SGE_QINFO_NUM_CALL(uld_iscsit);
@@ -3712,13 +3715,8 @@ static int sge_queue_entries(struct seq_file *seq)
 	SGE_QINFO_NUM_CALL(uld_cstor);
 	SGE_QINFO_NUM_CALL(uld_crypto);
 	SGE_QINFO_NUM_CALL(uld_chtcp);
+
 	SGE_QINFO_NUM_CALL(ctrl_nic);
-	SGE_QINFO_NUM_CALL(ctrl_rdma);
-	SGE_QINFO_NUM_CALL(ctrl_iscsi);
-	SGE_QINFO_NUM_CALL(ctrl_iscsit);
-	SGE_QINFO_NUM_CALL(ctrl_nvmeh);
-	SGE_QINFO_NUM_CALL(ctrl_nvmet);
-	SGE_QINFO_NUM_CALL(ctrl_cstor);
 	SGE_QINFO_NUM_CALL(fwevtq);
 
 #undef SGE_QINFO_NUM_CALL

@@ -52,7 +52,8 @@ struct t4_status_page {
 	__be16 pidx;
 	u8 qp_err;	/* flit 1 - sw owns */
 	u8 db_off;
-	u8 pad[2];
+	u8 cq_armed;
+	u8 pad;
 	u16 host_wq_pidx;
 	u16 host_cidx;
 	u16 host_pidx;
@@ -80,27 +81,55 @@ struct t4_status_page {
 #define T4_MAX_FR_IMMD_DEPTH (T4_MAX_FR_IMMD / sizeof(u64))
 #define T4_MAX_FR_DSGL 1024
 #define T4_MAX_FR_DSGL_DEPTH (T4_MAX_FR_DSGL / sizeof(u64))
-
-static inline int t4_max_fr_depth(int use_dsgl)
-{
-	return use_dsgl ? T4_MAX_FR_DSGL_DEPTH : T4_MAX_FR_IMMD_DEPTH;
-}
+#define T4_MAX_FR_FW_DSGL 4096
+#define T4_MAX_FR_FW_DSGL_DEPTH (T4_MAX_FR_FW_DSGL / sizeof(u64))
 
 #define T4_RQ_NUM_SLOTS 2
 #define T4_RQ_NUM_BYTES (T4_EQ_ENTRY_SIZE * T4_RQ_NUM_SLOTS)
 #define T4_MAX_RECV_SGE 4
+#define T7_MAX_RD_SGE 4
+#define GSI_MAX_RECV_SGE 1
+#define ISER_SQ_SIZE 523
 
 #define T4_WRITE_CMPL_MAX_SGL 4
 #define T4_WRITE_CMPL_MAX_CQE 16
+
+/* Making ud_send_wr driver specific by moving here from t4fw_interface,h */
+struct c4iw_v2_ud_send_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2; /* set to 0 */
+	__be32 stag_inv;
+	__be32 plen;
+	__be32 sendop_psn;
+	__u8   immdlen;
+	__u8   r3[3];
+	__be32 r4;
+	__u8   tnl_lso[48]; /* cpl_tx_tnl_lso + cpl_tx_pkt_xt */
+	union {
+		struct fw_ri_immd immd_src[0];
+		struct fw_ri_isgl isgl_src[0];
+	} u;
+};
 
 union t4_wr {
 	struct fw_ri_res_wr res;
 	struct fw_ri_wr ri;
 	struct fw_ri_rdma_write_wr write;
+	struct fw_ri_v2_rdma_write_wr v2_write;
 	struct fw_ri_send_wr send;
+	struct fw_ri_v2_send_wr v2_send;
+	struct c4iw_v2_ud_send_wr v2_ud_send;
 	struct fw_ri_rdma_read_wr read;
+	struct fw_ri_v2_rdma_read_wr v2_read;
+	struct fw_ri_v2_atomic_wr v2_atomic;
 	struct fw_ri_bind_mw_wr bind;
+	struct fw_ri_v2_bind_mw_wr v2_bind;
 	struct fw_ri_fr_nsmr_wr fr;
+	struct fw_ri_v2_fr_nsmr_wr v2_fr;
 	struct fw_ri_fr_nsmr_tpte_wr fr_tpte;
 	struct fw_ri_inv_lstag_wr inv;
 	struct fw_ri_rdma_write_cmpl_wr write_cmpl;
@@ -170,6 +199,7 @@ static inline void init_wr_hdr(union t4_wr *wqe, u16 wrid,
  * CQE defs
  */
 struct t4_cqe {
+	struct rss_header rss;
 	__be32 header;
 	__be32 len;
 	union {
@@ -178,7 +208,7 @@ struct t4_cqe {
 			__be32 msn;
 		} rcqe;
 		struct {
-			__be32 stag;
+			u32 stag;
 			u16 nada2;
 			u16 cidx;
 		} scqe;
@@ -192,26 +222,22 @@ struct t4_cqe {
 			__be32 reserved;
 			__be32 abs_rqe_idx;
 		} srcqe;
+		u64 drain_cookie;
 		struct {
 			__be32 mo;
 			__be32 msn;
-			/*
-			 * Use union for immediate data to be consistent with
-			 * stack's 32 bit data and iWARP spec's 64 bit data.
-			 */
-			union {
-				struct {
-					__be32 imm_data32;
-					u32 reserved;
-				} ib_imm_data;
-				__be64 imm_data64;
-			} iw_imm_data;
+			__u64 imm_data;
 		} imm_data_rcqe;
-
-		u64 drain_cookie;
-		__be64 flits[3];
+		struct {
+			__be32 stag;
+			__be32 msn;
+			__be32 v2_header;
+			__be32 abs_rqe_idx;
+		} v2_com;
 	} u;
-	__be64 reserved[3];
+	__be64 v2_ext_hi;
+	__be64 v2_ext_lo;
+	__be64 reserved;
 	__be64 bits_type_ts;
 };
 
@@ -256,11 +282,26 @@ struct t4_cqe {
 #define CQE_STATUS(x)     (CQE_STATUS_G(be32_to_cpu((x)->header)))
 #define CQE_OPCODE(x)     (CQE_OPCODE_G(be32_to_cpu((x)->header)))
 
+#define CQE_V2_OPCODE_S      24
+#define CQE_V2_OPCODE_M      0x7F
+#define CQE_V2_OPCODE_G(x)   ((((x) >> CQE_V2_OPCODE_S)) & CQE_V2_OPCODE_M)
+#define CQE_V2_OPCODE_V(x)   ((x)<<CQE_V2_OPCODE_S)
+#define CQE_V2_OPCODE(x)     (CQE_V2_OPCODE_G(be32_to_cpu((x)->u.v2_com.v2_header)))
+
+#define CQE_V2_VLAN_S      48
+#define CQE_V2_VLAN_M      0xFFFF
+#define CQE_V2_VLAN_G(x)   ((((x) >> CQE_V2_VLAN_S)) & CQE_V2_VLAN_M)
+#define CQE_V2_VLAN(x)     (CQE_V2_VLAN_G(be64_to_cpu((x)->v2_ext_hi)))
+
+/* roce and iwarp opcode will present in different offset in cqe
+ * to make it generic for both pass the extracted opcode
+ * also handle send_with_imm in further
+ */
 #define CQE_SEND_OPCODE(x)( \
-	(CQE_OPCODE_G(be32_to_cpu((x)->header)) == FW_RI_SEND) || \
-	(CQE_OPCODE_G(be32_to_cpu((x)->header)) == FW_RI_SEND_WITH_SE) || \
-	(CQE_OPCODE_G(be32_to_cpu((x)->header)) == FW_RI_SEND_WITH_INV) || \
-	(CQE_OPCODE_G(be32_to_cpu((x)->header)) == FW_RI_SEND_WITH_SE_INV))
+		(x == FW_RI_SEND) || \
+		(x == FW_RI_SEND_WITH_SE) || \
+		(x == FW_RI_SEND_WITH_INV) || \
+		(x == FW_RI_SEND_WITH_SE_INV))
 
 #define CQE_LEN(x)        (be32_to_cpu((x)->len))
 
@@ -268,8 +309,7 @@ struct t4_cqe {
 #define CQE_WRID_STAG(x)  (be32_to_cpu((x)->u.rcqe.stag))
 #define CQE_WRID_MSN(x)   (be32_to_cpu((x)->u.rcqe.msn))
 #define CQE_ABS_RQE_IDX(x) (be32_to_cpu((x)->u.srcqe.abs_rqe_idx))
-#define CQE_IMM_DATA(x)( \
-	(x)->u.imm_data_rcqe.iw_imm_data.ib_imm_data.imm_data32)
+#define CQE_IMM_DATA(x) ((x)->u.imm_data_rcqe.imm_data)
 
 /* used for SQ completion processing */
 #define CQE_WRID_SQ_IDX(x)	((x)->u.scqe.cidx)
@@ -335,7 +375,7 @@ struct t4_sq {
 	struct t4_swsqe *sw_sq;
 	struct t4_swsqe *oldest_read;
 	void __iomem *bar2_va;
-	u64 bar2_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -353,6 +393,7 @@ struct t4_swrqe {
 	u64 wr_id;
 	ktime_t	host_time;
 	u64 sge_ts;
+	struct ib_sge sg_list[GSI_MAX_RECV_SGE];
 	int valid;
 };
 
@@ -362,7 +403,7 @@ struct t4_rq {
 	DEFINE_DMA_UNMAP_ADDR(mapping);
 	struct t4_swrqe *sw_rq;
 	void __iomem *bar2_va;
-	u64 bar2_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -395,11 +436,12 @@ struct t4_srq_pending_wr {
 
 struct t4_srq {
 	union t4_recv_wr *queue;
+	void __iomem *db;
 	dma_addr_t dma_addr;
 	DEFINE_DMA_UNMAP_ADDR(mapping);
 	struct t4_swrqe *sw_rq;
 	void __iomem *bar2_va;
-	u64 bar2_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -490,11 +532,16 @@ static inline u32 t4_rq_avail(struct t4_wq *wq)
 	return wq->rq.size - 1 - wq->rq.in_use;
 }
 
-static inline void t4_rq_produce(struct t4_wq *wq, u8 len16)
+static inline void t4_sw_rq_produce(struct t4_wq *wq)
 {
 	wq->rq.in_use++;
 	if (++wq->rq.pidx == wq->rq.size)
 		wq->rq.pidx = 0;
+}
+
+static inline void t4_rq_produce(struct t4_wq *wq, u8 len16)
+{
+	t4_sw_rq_produce(wq);
 	wq->rq.wq_pidx += DIV_ROUND_UP(len16*16, T4_EQ_ENTRY_SIZE);
 	if (wq->rq.wq_pidx >= wq->rq.size * T4_RQ_NUM_SLOTS)
 		wq->rq.wq_pidx %= wq->rq.size * T4_RQ_NUM_SLOTS;
@@ -577,23 +624,29 @@ static inline void pio_copy(u64 __iomem *dst, u64 *src)
 	}
 }
 
+extern int t5_en_wc;
+
 static inline void t4_ring_srq_db(struct t4_srq *srq, u16 inc, u8 len16,
-				  union t4_recv_wr *wqe)
+		union t4_recv_wr *wqe)
 {
 	/* Flush host queue memory writes. */
 	wmb();
-	if (inc == 1 && srq->bar2_qid == 0 && wqe) {
-		pr_debug("%s : WC srq->pidx = %d; len16=%d\n",
-			 __func__, srq->pidx, len16);
-		pio_copy(srq->bar2_va + SGE_UDB_WCDOORBELL, (u64 *)wqe);
-	} else {
-		pr_debug("%s: DB srq->pidx = %d; len16=%d\n",
-			 __func__, srq->pidx, len16);
-		writel(PIDX_T5_V(inc) | QID_V(srq->bar2_qid),
-		       srq->bar2_va + SGE_UDB_KDOORBELL);
-	}
-	/* Flush user doorbell area writes. */
-	wmb();
+	if (srq->bar2_va) {
+		if (t5_en_wc && inc == 1 && srq->bar2_qid == 0 && wqe) {
+			pr_debug("WC srq->pidx = %d; len16=%d\n", srq->pidx, len16);
+			pio_copy((u64 __iomem *)
+					(srq->bar2_va + SGE_UDB_WCDOORBELL),
+					(void *)wqe);
+		} else {
+			pr_debug("DB srq->pidx = %d; len16=%d\n", srq->pidx, len16);
+			__raw_writel((__force u32)cpu_to_le32(PIDX_T5_V(inc)
+						| QID_V(srq->bar2_qid)),
+					srq->bar2_va + SGE_UDB_KDOORBELL);
+		}
+		wmb();
+	} else
+		writel(QID_V(srq->qid) | ARM_PIDX_V(inc) | ARM_QTYPE_V(0), srq->db);
+	return;
 }
 
 static inline void t4_ring_sq_db(struct t4_wq *wq, u16 inc, union t4_wr *wqe)
@@ -615,9 +668,10 @@ static inline void t4_ring_sq_db(struct t4_wq *wq, u16 inc, union t4_wr *wqe)
 
 		/* Flush user doorbell area writes. */
 		wmb();
-		return;
 	}
-	writel(QID_V(wq->sq.qid) | PIDX_V(inc), wq->db);
+	else
+		writel(QID_V(wq->sq.qid) | PIDX_V(inc), wq->db);
+	return;
 }
 
 static inline void t4_ring_rq_db(struct t4_wq *wq, u16 inc,
@@ -640,9 +694,10 @@ static inline void t4_ring_rq_db(struct t4_wq *wq, u16 inc,
 
 		/* Flush user doorbell area writes. */
 		wmb();
-		return;
 	}
-	writel(QID_V(wq->rq.qid) | PIDX_V(inc), wq->db);
+	else
+		writel(QID_V(wq->rq.qid) | PIDX_V(inc), wq->db);
+	return;
 }
 
 static inline int t4_wq_in_error(struct t4_wq *wq)
@@ -678,7 +733,7 @@ struct t4_cq {
 	struct t4_cqe *sw_queue;
 	void __iomem *gts;
 	void __iomem *bar2_va;
-	u64 bar2_pa;
+	u64 gts_pa;
 	u32 bar2_qid;
 	struct c4iw_rdev *rdev;
 	size_t memsize;
@@ -707,9 +762,14 @@ static inline void write_gts(struct t4_cq *cq, u32 val)
 		writel(val | INGRESSQID_V(cq->cqid), cq->gts);
 }
 
-static inline int t4_clear_cq_armed(struct t4_cq *cq)
+static inline int t4_clear_cq_armed(struct t4_cq *cq, bool user)
 {
-	return test_and_clear_bit(CQ_ARMED, &cq->flags);
+	if (unlikely(user))
+		((struct t4_status_page *)&cq->queue[cq->size])->cq_armed = 0;
+	else
+		return test_and_clear_bit(CQ_ARMED, &cq->flags);
+
+	return 0;
 }
 
 static inline int t4_arm_cq(struct t4_cq *cq, int se)
@@ -745,6 +805,7 @@ static inline void t4_swcq_produce(struct t4_cq *cq)
 static inline void t4_swcq_consume(struct t4_cq *cq)
 {
 	cq->sw_in_use--;
+	pr_debug("Check!\n");
 	if (++cq->sw_cidx == cq->size)
 		cq->sw_cidx = 0;
 }
@@ -806,10 +867,14 @@ static inline int t4_next_cqe(struct t4_cq *cq, struct t4_cqe **cqe)
 
 	if (cq->error)
 		ret = -ENODATA;
-	else if (cq->sw_in_use)
+	else if (cq->sw_in_use){
+		pr_debug("sw_in_use %d\n", cq->sw_in_use);
 		*cqe = &cq->sw_queue[cq->sw_cidx];
-	else
+	}
+	else{
 		ret = t4_next_hw_cqe(cq, cqe);
+		pr_debug("ret %d\n", ret);
+	}
 	return ret;
 }
 
@@ -819,11 +884,73 @@ static inline void t4_set_cq_in_error(struct t4_cq *cq)
 }
 #endif
 
+#define T4_IQE_LEN 64
+
+struct t4_iq {
+	unsigned int cntxt_id;
+	__be64 *desc;
+	unsigned long phys_addr;
+	dma_addr_t dma_addr;
+	unsigned int size;
+	unsigned int memsize;
+};
+
+static inline void t4_clear_iq_armed(struct t4_iq *iq)
+{
+        ((struct t4_status_page *)
+                ((u8 *)iq->desc + iq->size * T4_IQE_LEN))->cq_armed = 0;
+}
+
+#define T4_TXQ_NUM_SLOTS 4
+#define T4_TXQ_NUM_BYTES (T4_EQ_ENTRY_SIZE * T4_TXQ_NUM_SLOTS)
+#define T4_MAX_TXQ_INLINE ((T4_TXQ_NUM_BYTES - \
+			sizeof(struct cpl_tx_pkt) - \
+			sizeof(struct fw_eth_tx_pkt_wr)))
+
+struct t4_eth_tx_desc {
+	__be64 flits[T4_EQ_ENTRY_SIZE / sizeof(__be64) *T4_TXQ_NUM_SLOTS];
+};
+
+struct t4_eth_txq {
+	unsigned int size;
+	unsigned int memsize;
+	unsigned int cntxt_id;
+	struct t4_eth_tx_desc *desc;
+	dma_addr_t dma_addr;
+	unsigned long phys_addr;
+	unsigned int flags;
+	u16 pidx_inc;
+};
+
+struct fl_sw_desc {
+	void *buf;
+	dma_addr_t dma_addr;
+};
+
+struct t4_fl {
+	unsigned int avail;
+	unsigned int pend_cred;
+	unsigned int cidx;
+	unsigned int pidx;
+	unsigned int cntxt_id;
+	unsigned int size;
+	unsigned int memsize;
+	struct fl_sw_desc *sdesc;
+	__be64 *desc;
+	dma_addr_t dma_addr;
+	unsigned long phys_addr;
+	void __iomem *db;
+	u8 packed;
+	u8 cong_drop;
+	u16 pidx_inc;
+};
+
 struct t4_dev_status_page {
 	u8 db_off;
+	u8 wc_supported;
 	u8 write_cmpl_supported;
-	u16 pad2;
-	u32 pad3;
+	u8 pad2;
+	u32 fid_base;
 	u64 qp_start;
 	u64 qp_size;
 	u64 cq_start;

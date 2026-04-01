@@ -141,6 +141,84 @@ void c4iw_pblpool_destroy(struct c4iw_rdev *rdev)
 	kref_put(&rdev->pbl_kref, destroy_pblpool);
 }
 
+#define MIN_RRQT_SHIFT 6
+
+u32 c4iw_rrqtpool_alloc(struct c4iw_rdev *rdev, int size)
+{
+	unsigned long addr = gen_pool_alloc(rdev->rrqt_pool, size);
+	pr_debug("addr 0x%x size %d\n", (u32)addr, size << 6);
+
+	if (!addr)
+		pr_warn_ratelimited("Out of RRQT memory\n");
+
+	mutex_lock(&rdev->stats.lock);
+	if (addr) {
+		rdev->stats.rrqt.cur += roundup(size, 1 << MIN_RRQT_SHIFT);
+		if (rdev->stats.rrqt.cur > rdev->stats.rrqt.max)
+			rdev->stats.rrqt.max = rdev->stats.rrqt.cur;
+		kref_get(&rdev->rrqt_kref);
+	} else
+		rdev->stats.rrqt.fail++;
+	mutex_unlock(&rdev->stats.lock);
+	return (u32)addr;
+}
+
+static void destroy_rrqtpool(struct kref *kref)
+{
+	struct c4iw_rdev *rdev;
+
+	rdev = container_of(kref, struct c4iw_rdev, rrqt_kref);
+	gen_pool_destroy(rdev->rrqt_pool);
+	complete(&rdev->rrqt_compl);
+}
+
+void c4iw_rrqtpool_free(struct c4iw_rdev *rdev, u32 addr, int size)
+{
+	pr_debug("addr 0x%x size %d\n", addr, size);
+	mutex_lock(&rdev->stats.lock);
+	rdev->stats.rrqt.cur -= roundup(size, 1 << MIN_RRQT_SHIFT);
+	mutex_unlock(&rdev->stats.lock);
+	gen_pool_free(rdev->rrqt_pool, (unsigned long)addr, size);
+	kref_put(&rdev->rrqt_kref, destroy_rrqtpool);
+}
+
+int c4iw_rrqtpool_create(struct c4iw_rdev *rdev)
+{
+	unsigned rrqt_start, rrqt_chunk, rrqt_top;
+
+	rdev->rrqt_pool = gen_pool_create(MIN_RRQT_SHIFT, -1);
+	if (!rdev->rrqt_pool)
+		return -ENOMEM;
+
+	rrqt_start = rdev->lldi.vr->rq.start;
+	rrqt_chunk = rdev->lldi.vr->rq.size;
+	rrqt_top = rrqt_start + rrqt_chunk;
+
+	while (rrqt_start < rrqt_top) {
+		rrqt_chunk = min(rrqt_top - rrqt_start + 1, rrqt_chunk);
+		if (gen_pool_add(rdev->rrqt_pool, rrqt_start, rrqt_chunk, -1)) {
+			pr_debug("failed to add RRQT chunk (%x/%x)\n",
+					rrqt_start, rrqt_chunk);
+			if (rrqt_chunk <= 1024 << MIN_RRQT_SHIFT) {
+				pr_warn("Failed to add all RRQT chunks (%x/%x)\n",
+						rrqt_start, rrqt_top - rrqt_start);
+				return 0;
+			}
+			rrqt_chunk >>= 1;
+		} else {
+			pr_debug("added RRQT chunk (%x/%x)\n",
+					rrqt_start, rrqt_chunk);
+			rrqt_start += rrqt_chunk;
+		}
+	}
+	return 0;
+}
+
+void c4iw_rrqtpool_destroy(struct c4iw_rdev *rdev)
+{
+	kref_put(&rdev->rrqt_kref, destroy_rrqtpool);
+}
+
 u32 c4iw_rqtpool_alloc(struct c4iw_rdev *rdev, int size)
 {
 	u32 addr;

@@ -52,12 +52,170 @@
 #include <rdma/ib_smi.h>
 #include <rdma/ib_umem.h>
 #include <rdma/ib_user_verbs.h>
+#include <rdma/ib_cache.h>
+
+#include <net/xfrm.h>
 
 #include "iw_cxgb4.h"
 
 static int fastreg_support = 1;
 module_param(fastreg_support, int, 0644);
 MODULE_PARM_DESC(fastreg_support, "Advertise fastreg support (default=1)");
+
+static int c4iw_iw_modify_port(struct ib_device *ibdev,
+		u32 port, int port_modify_mask,
+		struct ib_port_modify *props)
+{
+	return -ENOSYS;
+}
+
+static int c4iw_iw_create_ah(struct ib_ah *ah,
+		struct rdma_ah_init_attr *ah_attr,
+		struct ib_udata *udata)
+{
+	return -ENOSYS;
+}
+
+static int c4iw_iw_destroy_ah(struct ib_ah *ah, u32 flags)
+{
+	return -ENOSYS;
+}
+
+static int c4iw_roce_create_ah(struct ib_ah *ah,
+		struct rdma_ah_init_attr *ah_init_attr,
+		struct ib_udata *udata)
+{
+	struct c4iw_ah *ahp = to_c4iw_ah(ah);
+	const struct ib_gid_attr *sgid_attr;
+	struct c4iw_create_ah_resp uresp;
+	u16 vlan_id;
+	int ret = 0;
+
+	rdma_copy_ah_attr(&ahp->attr, ah_init_attr->ah_attr);
+	ahp->wr_waitp = c4iw_alloc_wr_wait(GFP_KERNEL);
+	if (!ahp->wr_waitp)
+		return -ENOMEM;
+
+	ahp->dst_port = C4IW_ROCE_PORT;
+	vlan_id = VLAN_N_VID;
+	ahp->dest_qp = 1;
+	if (ah_init_attr->ah_attr->ah_flags & IB_AH_GRH) {
+		ahp->src_port = rdma_get_udp_sport(ah_init_attr->ah_attr->grh.flow_label,
+				1, ahp->dest_qp);
+		pr_debug("GRH NA for v2, src_port = %u\n", ahp->src_port);
+	} else {
+		ahp->src_port = 0xd000;
+		pr_debug("GRH not set, src_port = %u\n", ahp->src_port);
+	}
+	sgid_attr = ah_init_attr->ah_attr->grh.sgid_attr;
+	ahp->net_type = rdma_gid_attr_network_type(sgid_attr);
+	memcpy(ahp->dmac, ah_init_attr->ah_attr->roce.dmac, ETH_ALEN);
+	ret = rdma_read_gid_l2_fields(sgid_attr, &vlan_id, ahp->smac);
+	if (ret)
+		return ret;
+
+	if (vlan_id < VLAN_N_VID) {
+		ahp->insert_vlan_tag = true;
+		ahp->vlan_id = vlan_id;
+	} else {
+		ahp->insert_vlan_tag = false;
+	}
+	rdma_gid2ip((struct sockaddr *)&ahp->sgid_addr, &sgid_attr->gid);
+	rdma_gid2ip((struct sockaddr *)&ahp->dgid_addr, &ah_init_attr->ah_attr->grh.dgid);
+	if (ahp->net_type == RDMA_NETWORK_IPV6) {
+		__be32 *daddr = ahp->dgid_addr.saddr_in6.sin6_addr.in6_u.u6_addr32;
+		__be32 *saddr = ahp->sgid_addr.saddr_in6.sin6_addr.in6_u.u6_addr32;
+
+		memcpy(ahp->dest_ip_addr, daddr, sizeof(ahp->dest_ip_addr));
+		memcpy(ahp->local_ip_addr, saddr, sizeof(ahp->local_ip_addr));
+
+		ahp->ipv4 = false;
+
+		ahp->dst = find_route6(to_c4iw_dev(ah->device), (__u8 *)ahp->local_ip_addr,
+				(__u8 *)ahp->dest_ip_addr, ahp->src_port,
+				ahp->dst_port, 0, 0);
+
+		pr_debug("ahp 0x%llx sport %u dport %u smac %pM dmac %pM "
+				"dest_ip %pI6, src_ip %pI6\n", (unsigned long long)ahp,
+				ahp->src_port, ahp->dst_port, ahp->smac, ahp->dmac,
+				&ahp->dest_ip_addr[0], &ahp->local_ip_addr[0]);
+	} else if (ahp->net_type == RDMA_NETWORK_IPV4) {
+		ahp->ipv4 = true;
+		memset(ahp->dest_ip_addr, 0, sizeof(ahp->dest_ip_addr));
+		memset(ahp->local_ip_addr, 0, sizeof(ahp->local_ip_addr));
+
+		ahp->dest_ip_addr[3] = ahp->dgid_addr.saddr_in.sin_addr.s_addr;
+		ahp->local_ip_addr[3] = ahp->sgid_addr.saddr_in.sin_addr.s_addr;
+
+		ahp->dst = find_route(to_c4iw_dev(ah->device),
+				ahp->local_ip_addr[3], ahp->dest_ip_addr[3],
+				ahp->src_port, ahp->dst_port, 0);
+
+		pr_debug("ahp 0x%llx sport %u dport %u smac %pM dmac %pM "
+				"dest_ip %pI4, src_ip %pI4\n", (unsigned long long)ahp,
+				ahp->src_port, ahp->dst_port, ahp->smac, ahp->dmac,
+				&ahp->dest_ip_addr[3], &ahp->local_ip_addr[3]);
+	}
+
+	if (ahp->dst && !IS_ERR(ahp->dst)) {
+		struct xfrm_state *x = ahp->dst->xfrm;
+
+		ahp->xfrm.ipsec_en = false;
+		if (x && x->xso.offload_handle) {
+			ahp->xfrm.ipsecidx = cxgb4_uld_xfrm_ipsecidx_get(x);
+			if (ahp->xfrm.ipsecidx && ahp->xfrm.ipsecidx != 0xffff) {
+				ahp->xfrm.ipsec_en = true;
+				ahp->xfrm.ipsec_mode = x->props.mode;
+				ahp->xfrm.ipv6 = x->props.family == AF_INET6;
+
+				if (ahp->xfrm.ipv6) {
+					memcpy(ahp->xfrm.dest_ip_addr, x->id.daddr.a6,
+							sizeof(ahp->xfrm.dest_ip_addr));
+					memcpy(ahp->xfrm.local_ip_addr, x->props.saddr.a6,
+							sizeof(ahp->xfrm.local_ip_addr));
+				} else {
+					ahp->xfrm.dest_ip_addr[3] = x->id.daddr.a4;
+					ahp->xfrm.local_ip_addr[3] = x->props.saddr.a4;
+				}
+			} else
+				pr_err("%s Invalid IPsec configuration\n", __func__);
+		}
+	}
+
+	if (udata) {
+		uresp.ah_id = ahp->ah_id;
+		ret = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
+		if(ret)
+			pr_err("need to handle error\n");
+	}
+
+	return ret;
+}
+
+static int c4iw_roce_destroy_ah(struct ib_ah *ah, u32 flags)
+{
+	struct c4iw_ah *ahp = to_c4iw_ah(ah);
+
+	rdma_destroy_ah_attr(&ahp->attr);
+	return 0;
+}
+
+static int c4iw_roce_modify_ah(struct ib_ah *ibah, struct rdma_ah_attr *attr)
+{
+	return 0;
+}
+
+static int c4iw_roce_query_ah(struct ib_ah *ah,
+		struct rdma_ah_attr *ah_attr)
+{
+	return 0;
+}
+
+static enum rdma_link_layer c4iw_roce_link_layer(struct ib_device *ibdev,
+		u32 port_num)
+{
+	return IB_LINK_LAYER_ETHERNET;
+}
 
 static void c4iw_dealloc_ucontext(struct ib_ucontext *context)
 {
@@ -230,6 +388,24 @@ static int c4iw_allocate_pd(struct ib_pd *pd, struct ib_udata *udata)
 	return 0;
 }
 
+static int c4iw_iw_query_pkey(struct ib_device *ibdev, u32 port, u16 index,
+		u16 *pkey)
+{
+	pr_debug("ibdev %p\n", ibdev);
+	*pkey = 0;
+	return 0;
+}
+
+static int c4iw_roce_query_pkey(struct ib_device *ibdev, u32 port, u16 index,
+		u16 *pkey)
+{
+	pr_debug("port %u index %u\n", port, index);
+	if (index > 0)
+		return -EINVAL;
+	*pkey = IB_DEFAULT_PKEY_FULL;
+	return 0;
+}
+
 static int c4iw_query_gid(struct ib_device *ibdev, u32 port, int index,
 			  union ib_gid *gid)
 {
@@ -242,6 +418,16 @@ static int c4iw_query_gid(struct ib_device *ibdev, u32 port, int index,
 	dev = to_c4iw_dev(ibdev);
 	memset(&(gid->raw[0]), 0, sizeof(gid->raw));
 	memcpy(&(gid->raw[0]), dev->rdev.lldi.ports[port-1]->dev_addr, 6);
+	return 0;
+}
+
+static int c4iw_add_gid(const struct ib_gid_attr *attr, void **context)
+{
+	return 0;
+}
+
+static int c4iw_del_gid(const struct ib_gid_attr *attr, void **context)
+{
 	return 0;
 }
 
@@ -276,7 +462,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->max_send_sge = min(T4_MAX_SEND_SGE, T4_MAX_WRITE_SGE);
 	props->max_recv_sge = T4_MAX_RECV_SGE;
 	props->max_srq_sge = T4_MAX_RECV_SGE;
-	props->max_sge_rd = 1;
+	props->max_sge_rd = (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7) ? T7_MAX_RD_SGE : 1;
 	props->max_res_rd_atom = dev->rdev.lldi.max_ird_adapter;
 	props->max_qp_rd_atom = min(dev->rdev.lldi.max_ordird_qp,
 				    c4iw_max_read_depth);
@@ -286,8 +472,16 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->max_mr = c4iw_num_stags(&dev->rdev);
 	props->max_pd = T4_MAX_NUM_PD;
 	props->local_ca_ack_delay = 0;
-	props->max_fast_reg_page_list_len =
-		t4_max_fr_depth(dev->rdev.lldi.ulptx_memwrite_dsgl && use_dsgl);
+	props->max_fast_reg_page_list_len = t4_max_fr_depth(&dev->rdev, use_dsgl);
+	props->max_ah = dev->rdev.lldi.uld_tids.hpftids.size;
+	props->max_pkeys = 1;
+
+	/* pass nfids via max_rdd to user space for raw QPs [iWARP].
+	 * since max_rdd is not used anywhere for iWARP, this will
+	 * eventually break when RoCE enabled, as these are RoCE-specific
+	 * attributes.
+	 */
+	props->max_rdd = dev->rdev.nfids;
 
 	return 0;
 }
@@ -310,6 +504,38 @@ static int c4iw_query_port(struct ib_device *ibdev, u32 port,
 	props->max_msg_sz = -1;
 
 	return ret;
+}
+
+static int c4iw_roce_query_port(struct ib_device *ibdev, u32 port,
+		struct ib_port_attr *props)
+{
+	struct c4iw_dev *dev;
+	int rc;
+
+	pr_debug("ibdev %p\n", ibdev);
+
+	dev = to_c4iw_dev(ibdev);
+	props->port_cap_flags =
+		IB_PORT_CM_SUP |
+		IB_PORT_SNMP_TUNNEL_SUP |
+		IB_PORT_REINIT_SUP |
+		IB_PORT_DEVICE_MGMT_SUP |
+		IB_PORT_VENDOR_CLASS_SUP | IB_PORT_BOOT_MGMT_SUP |
+		RDMA_CORE_CAP_PROT_ROCE_UDP_ENCAP;
+	props->gid_tbl_len = 1024;
+	props->ip_gids = true;
+	props->lid = 0;
+	props->max_mtu = IB_MTU_4096;
+	props->active_mtu = iboe_get_mtu(dev->rdev.lldi.ports[port - 1]->mtu);
+	props->state = IB_PORT_ACTIVE;
+	props->phys_state = IB_PORT_PHYS_STATE_LINK_UP;
+	props->sm_lid = 0;
+	props->pkey_tbl_len = 1;
+	rc = ib_get_eth_speed(ibdev, port, &props->active_speed,
+			&props->active_width);
+	props->max_msg_sz = -1;
+
+	return rc;
 }
 
 static ssize_t hw_rev_show(struct device *dev,
@@ -431,6 +657,25 @@ static int c4iw_port_immutable(struct ib_device *ibdev, u32 port_num,
 	return 0;
 }
 
+
+static int c4iw_roce_port_immutable(struct ib_device *ibdev, u32 port_num,
+		struct ib_port_immutable *immutable)
+{
+	struct ib_port_attr attr;
+	int err;
+
+	err = c4iw_roce_query_port(ibdev, port_num, &attr);
+	if (err)
+		return err;
+
+	immutable->pkey_tbl_len = attr.pkey_tbl_len;
+	immutable->gid_tbl_len = attr.gid_tbl_len;
+	immutable->core_cap_flags = RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP;
+	immutable->max_mad_size = IB_MGMT_MAD_SIZE;
+
+	return 0;
+}
+
 static void get_dev_fw_str(struct ib_device *dev, char *str)
 {
 	struct c4iw_dev *c4iw_dev = container_of(dev, struct c4iw_dev,
@@ -444,65 +689,91 @@ static void get_dev_fw_str(struct ib_device *dev, char *str)
 		 FW_HDR_FW_VER_BUILD_G(c4iw_dev->rdev.lldi.fw_vers));
 }
 
-static const struct ib_device_ops c4iw_dev_ops = {
+static const struct ib_device_ops c4iw_common_dev_ops = {
 	.owner = THIS_MODULE,
 	.driver_id = RDMA_DRIVER_CXGB4,
 	.uverbs_abi_ver = C4IW_UVERBS_ABI_VERSION,
 
 	.alloc_hw_device_stats = c4iw_alloc_device_stats,
+	.get_hw_stats = c4iw_get_mib,
 	.alloc_mr = c4iw_alloc_mr,
+	.alloc_mw = c4iw_alloc_mw,
 	.alloc_pd = c4iw_allocate_pd,
 	.alloc_ucontext = c4iw_alloc_ucontext,
 	.create_cq = c4iw_create_cq,
 	.create_qp = c4iw_create_qp,
 	.create_srq = c4iw_create_srq,
+	.dealloc_mw = c4iw_dealloc_mw,
 	.dealloc_pd = c4iw_deallocate_pd,
 	.dealloc_ucontext = c4iw_dealloc_ucontext,
 	.dereg_mr = c4iw_dereg_mr,
 	.destroy_cq = c4iw_destroy_cq,
 	.destroy_qp = c4iw_destroy_qp,
 	.destroy_srq = c4iw_destroy_srq,
-	.device_group = &c4iw_attr_group,
-	.fill_res_cq_entry = c4iw_fill_res_cq_entry,
+	.query_gid = c4iw_query_gid,
 	.fill_res_cm_id_entry = c4iw_fill_res_cm_id_entry,
+	.fill_res_cq_entry = c4iw_fill_res_cq_entry,
 	.fill_res_mr_entry = c4iw_fill_res_mr_entry,
 	.fill_res_qp_entry = c4iw_fill_res_qp_entry,
 	.get_dev_fw_str = get_dev_fw_str,
 	.get_dma_mr = c4iw_get_dma_mr,
-	.get_hw_stats = c4iw_get_mib,
-	.get_port_immutable = c4iw_port_immutable,
-	.iw_accept = c4iw_accept_cr,
-	.iw_add_ref = c4iw_qp_add_ref,
-	.iw_connect = c4iw_connect,
-	.iw_create_listen = c4iw_create_listen,
-	.iw_destroy_listen = c4iw_destroy_listen,
-	.iw_get_qp = c4iw_get_qp,
-	.iw_reject = c4iw_reject_cr,
-	.iw_rem_ref = c4iw_qp_rem_ref,
 	.map_mr_sg = c4iw_map_mr_sg,
 	.mmap = c4iw_mmap,
-	.modify_qp = c4iw_ib_modify_qp,
 	.modify_srq = c4iw_modify_srq,
 	.poll_cq = c4iw_poll_cq,
 	.post_recv = c4iw_post_receive,
-	.post_send = c4iw_post_send,
 	.post_srq_recv = c4iw_post_srq_recv,
 	.query_device = c4iw_query_device,
-	.query_gid = c4iw_query_gid,
-	.query_port = c4iw_query_port,
-	.query_qp = c4iw_ib_query_qp,
+	.query_qp = c4iw_query_qp,
 	.reg_user_mr = c4iw_reg_user_mr,
 	.req_notify_cq = c4iw_arm_cq,
 
-	INIT_RDMA_OBJ_SIZE(ib_cq, c4iw_cq, ibcq),
-	INIT_RDMA_OBJ_SIZE(ib_mw, c4iw_mw, ibmw),
 	INIT_RDMA_OBJ_SIZE(ib_pd, c4iw_pd, ibpd),
 	INIT_RDMA_OBJ_SIZE(ib_qp, c4iw_qp, ibqp),
+	INIT_RDMA_OBJ_SIZE(ib_cq, c4iw_cq, ibcq),
 	INIT_RDMA_OBJ_SIZE(ib_srq, c4iw_srq, ibsrq),
 	INIT_RDMA_OBJ_SIZE(ib_ucontext, c4iw_ucontext, ibucontext),
+
 };
 
-static int set_netdevs(struct ib_device *ib_dev, struct c4iw_rdev *rdev)
+static const struct ib_device_ops c4iw_iw_dev_ops = {
+	.get_port_immutable = c4iw_port_immutable,
+	.query_port = c4iw_query_port,
+	.modify_port = c4iw_iw_modify_port,
+	.iw_accept = c4iw_iw_accept_cr,
+	.iw_add_ref = c4iw_iw_qp_add_ref,
+	.iw_connect = c4iw_iw_connect,
+	.iw_create_listen = c4iw_iw_create_listen,
+	.iw_destroy_listen = c4iw_iw_destroy_listen,
+	.iw_get_qp = c4iw_iw_get_qp,
+	.iw_reject = c4iw_iw_reject_cr,
+	.iw_rem_ref = c4iw_iw_qp_rem_ref,
+	.post_send = c4iw_iw_post_send,
+	.modify_qp = c4iw_iw_modify_qp,
+	.query_pkey = c4iw_iw_query_pkey,
+	.create_ah = c4iw_iw_create_ah,
+	.destroy_ah = c4iw_iw_destroy_ah,
+};
+
+static const struct ib_device_ops c4iw_roce_dev_ops = {
+	.get_port_immutable = c4iw_roce_port_immutable,
+	.get_link_layer = c4iw_roce_link_layer,
+	.query_port = c4iw_roce_query_port,
+	.add_gid = c4iw_add_gid,
+	.del_gid = c4iw_del_gid,
+	.query_pkey = c4iw_roce_query_pkey,
+	.create_ah = c4iw_roce_create_ah,
+	.create_user_ah = c4iw_roce_create_ah,
+	.destroy_ah = c4iw_roce_destroy_ah,
+	.modify_ah = c4iw_roce_modify_ah, /* add when needed*/
+	.query_ah = c4iw_roce_query_ah,
+	.modify_qp = c4iw_roce_modify_qp,
+	.post_send = c4iw_roce_post_send,
+	INIT_RDMA_OBJ_SIZE(ib_ah, c4iw_ah, ibah),
+};
+
+static int set_netdevs(struct ib_device *ib_dev, struct c4iw_rdev *rdev,
+			u32 nports)
 {
 	int ret;
 	int i;
@@ -516,11 +787,28 @@ static int set_netdevs(struct ib_device *ib_dev, struct c4iw_rdev *rdev)
 	return 0;
 }
 
+static void c4iw_init_roce_dev(struct c4iw_dev *dev)
+{
+       addrconf_addr_eui48((unsigned char *)&dev->ibdev.node_guid,
+                           dev->rdev.lldi.ports[0]->dev_addr);
+       dev->ibdev.node_type = RDMA_NODE_IB_CA;
+       ib_set_device_ops(&dev->ibdev, &c4iw_roce_dev_ops);
+}
+
+static void c4iw_init_iw_dev(struct c4iw_dev *dev)
+{
+	memset(&dev->ibdev.node_guid, 0, sizeof(dev->ibdev.node_guid));
+	memcpy(&dev->ibdev.node_guid, dev->rdev.lldi.ports[0]->dev_addr, 6);
+	dev->ibdev.node_type = RDMA_NODE_RNIC;
+	ib_set_device_ops(&dev->ibdev, &c4iw_iw_dev_ops);
+}
+
 void c4iw_register_device(struct work_struct *work)
 {
 	int ret;
 	struct uld_ctx *ctx = container_of(work, struct uld_ctx, reg_work);
 	struct c4iw_dev *dev = ctx->dev;
+	u64 dma_mask;
 
 	pr_debug("c4iw_dev %p\n", dev);
 	addrconf_addr_eui48((u8 *)&dev->ibdev.node_guid,
@@ -534,12 +822,30 @@ void c4iw_register_device(struct work_struct *work)
 	dev->ibdev.dev.parent = &dev->rdev.lldi.pdev->dev;
 
 	memcpy(dev->ibdev.iw_ifname, dev->rdev.lldi.ports[0]->name,
-	       sizeof(dev->ibdev.iw_ifname));
+			sizeof(dev->ibdev.iw_ifname));
 
-	ib_set_device_ops(&dev->ibdev, &c4iw_dev_ops);
-	ret = set_netdevs(&dev->ibdev, &dev->rdev);
-	if (ret)
-		goto err_dealloc_ctx;
+	ib_set_device_ops(&dev->ibdev, &c4iw_common_dev_ops);
+	dev->ibdev.dev.dma_parms = &dev->dma_parms;
+	dma_mask = IS_ENABLED(CONFIG_64BIT) ? DMA_BIT_MASK(60) : DMA_BIT_MASK(32);
+	dma_set_max_seg_size(dev->rdev.lldi.dev, dma_mask);
+	dma_coerce_mask_and_coherent(&dev->ibdev.dev, dma_mask);
+
+	if (roce_mode && (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7)) {
+		dev->ibdev.phys_port_cnt = dev->rdev.lldi.nports;
+		ret = set_netdevs(&dev->ibdev, &dev->rdev,
+				dev->ibdev.phys_port_cnt);
+		if (ret)
+			goto err_dealloc_ctx;
+		c4iw_init_roce_dev(dev);
+	} else {
+		dev->ibdev.phys_port_cnt = dev->rdev.lldi.nports;
+		ret = set_netdevs(&dev->ibdev, &dev->rdev,
+				dev->ibdev.phys_port_cnt);
+		if (ret)
+			goto err_dealloc_ctx;
+		c4iw_init_iw_dev(dev);
+	}
+
 	dma_set_max_seg_size(&dev->rdev.lldi.pdev->dev, UINT_MAX);
 	ret = ib_register_device(&dev->ibdev, "cxgb4_%d",
 				 &dev->rdev.lldi.pdev->dev);

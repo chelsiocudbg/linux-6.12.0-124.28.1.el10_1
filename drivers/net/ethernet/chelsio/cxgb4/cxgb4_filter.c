@@ -239,7 +239,7 @@ static void cxgb4_filter_hw_resources_free(struct adapter *adap,
          * used for rewriting Source MAC Addresses in loopback rules.
          */
         if (f->l2t) {
-                cxgb4_l2t_release(f->l2t);
+                cxgb4_l2t_release(adap->port[0], f->l2t);
                 f->l2t = NULL;
         }
 

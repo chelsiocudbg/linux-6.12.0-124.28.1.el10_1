@@ -114,15 +114,14 @@ static void post_qp_event(struct c4iw_dev *dev, struct c4iw_cq *chp,
 			  enum ib_event_type ib_event)
 {
 	struct ib_event event;
-	struct c4iw_qp_attributes attrs;
+	struct c4iw_common_qp_attributes attrs;
 	unsigned long flag;
 
 	dump_err_cqe(dev, err_cqe);
 
 	if (qhp->attr.state == C4IW_QP_STATE_RTS) {
 		attrs.next_state = C4IW_QP_STATE_TERMINATE;
-		c4iw_modify_qp(qhp->rhp, qhp, C4IW_QP_ATTR_NEXT_STATE,
-			       &attrs, 0);
+		//c4iw_modify_qp(qhp->rhp, qhp, C4IW_QP_ATTR_NEXT_STATE, &attrs, 0);
 	}
 
 	event.event = ib_event;
@@ -134,7 +133,7 @@ static void post_qp_event(struct c4iw_dev *dev, struct c4iw_cq *chp,
 	if (qhp->ibqp.event_handler)
 		(*qhp->ibqp.event_handler)(&event, qhp->ibqp.qp_context);
 
-	if (t4_clear_cq_armed(&chp->cq)) {
+	if (t4_clear_cq_armed(&chp->cq, qhp->ibqp.uobject)) {
 		spin_lock_irqsave(&chp->comp_handler_lock, flag);
 		(*chp->ibcq.comp_handler)(&chp->ibcq, chp->ibcq.cq_context);
 		spin_unlock_irqrestore(&chp->comp_handler_lock, flag);
@@ -146,15 +145,22 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 	struct c4iw_cq *chp;
 	struct c4iw_qp *qhp;
 	u32 cqid;
+	u8 cqe_opc;
+	enum qp_transport_type prot;
+
+	if (rdma_protocol_roce(&dev->ibdev, 1))
+		prot = C4IW_TRANSPORT_ROCEV2;
+	else
+		prot = C4IW_TRANSPORT_IWARP;
 
 	xa_lock_irq(&dev->qps);
 	qhp = xa_load(&dev->qps, CQE_QPID(err_cqe));
 	if (!qhp) {
 		pr_err("BAD AE qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
-		       CQE_QPID(err_cqe),
-		       CQE_OPCODE(err_cqe), CQE_STATUS(err_cqe),
-		       CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
-		       CQE_WRID_LOW(err_cqe));
+				CQE_QPID(err_cqe),
+				cqe_opc, CQE_STATUS(err_cqe),
+				CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
+				CQE_WRID_LOW(err_cqe));
 		xa_unlock_irq(&dev->qps);
 		goto out;
 	}
@@ -163,104 +169,170 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 		cqid = qhp->attr.scq;
 	else
 		cqid = qhp->attr.rcq;
+	cqe_opc = prot ? CQE_V2_OPCODE(err_cqe): CQE_OPCODE(err_cqe);
 	chp = get_chp(dev, cqid);
 	if (!chp) {
 		pr_err("BAD AE cqid 0x%x qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
-		       cqid, CQE_QPID(err_cqe),
-		       CQE_OPCODE(err_cqe), CQE_STATUS(err_cqe),
-		       CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
-		       CQE_WRID_LOW(err_cqe));
+				cqid, CQE_QPID(err_cqe),
+				cqe_opc, CQE_STATUS(err_cqe),
+				CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
+				CQE_WRID_LOW(err_cqe));
 		xa_unlock_irq(&dev->qps);
 		goto out;
 	}
 
-	c4iw_qp_add_ref(&qhp->ibqp);
-	refcount_inc(&chp->refcnt);
+	c4iw_iw_qp_add_ref(&qhp->ibqp);
+	atomic_inc(&chp->refcnt);
 	xa_unlock_irq(&dev->qps);
 
 	/* Bad incoming write */
 	if (RQ_TYPE(err_cqe) &&
-	    (CQE_OPCODE(err_cqe) == FW_RI_RDMA_WRITE)) {
+			(cqe_opc == FW_RI_RDMA_WRITE)) {
 		post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_REQ_ERR);
 		goto done;
 	}
 
 	switch (CQE_STATUS(err_cqe)) {
 
-	/* Completion Events */
-	case T4_ERR_SUCCESS:
-		pr_err("AE with status 0!\n");
-		break;
+		/* Completion Events */
+		case T4_ERR_SUCCESS:
+			pr_err("AE with status 0!\n");
+			break;
 
-	case T4_ERR_STAG:
-	case T4_ERR_PDID:
-	case T4_ERR_QPID:
-	case T4_ERR_ACCESS:
-	case T4_ERR_WRAP:
-	case T4_ERR_BOUND:
-	case T4_ERR_INVALIDATE_SHARED_MR:
-	case T4_ERR_INVALIDATE_MR_WITH_MW_BOUND:
-		post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_ACCESS_ERR);
-		break;
+		case T4_ERR_STAG:
+		case T4_ERR_PDID:
+		case T4_ERR_QPID:
+		case T4_ERR_ACCESS:
+		case T4_ERR_WRAP:
+		case T4_ERR_BOUND:
+		case T4_ERR_INVALIDATE_SHARED_MR:
+		case T4_ERR_INVALIDATE_MR_WITH_MW_BOUND:
+			post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_ACCESS_ERR);
+			break;
 
-	/* Device Fatal Errors */
-	case T4_ERR_ECC:
-	case T4_ERR_ECC_PSTAG:
-	case T4_ERR_INTERNAL_ERR:
-		post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_DEVICE_FATAL);
-		break;
+			/* Device Fatal Errors */
+		case T4_ERR_ECC:
+		case T4_ERR_ECC_PSTAG:
+		case T4_ERR_INTERNAL_ERR:
+			post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_DEVICE_FATAL);
+			break;
 
-	/* QP Fatal Errors */
-	case T4_ERR_OUT_OF_RQE:
-	case T4_ERR_PBL_ADDR_BOUND:
-	case T4_ERR_CRC:
-	case T4_ERR_MARKER:
-	case T4_ERR_PDU_LEN_ERR:
-	case T4_ERR_DDP_VERSION:
-	case T4_ERR_RDMA_VERSION:
-	case T4_ERR_OPCODE:
-	case T4_ERR_DDP_QUEUE_NUM:
-	case T4_ERR_MSN:
-	case T4_ERR_TBIT:
-	case T4_ERR_MO:
-	case T4_ERR_MSN_GAP:
-	case T4_ERR_MSN_RANGE:
-	case T4_ERR_RQE_ADDR_BOUND:
-	case T4_ERR_IRD_OVERFLOW:
-		post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_FATAL);
-		break;
+			/* QP Fatal Errors */
+		case T4_ERR_OUT_OF_RQE:
+		case T4_ERR_PBL_ADDR_BOUND:
+		case T4_ERR_CRC:
+		case T4_ERR_MARKER:
+		case T4_ERR_PDU_LEN_ERR:
+		case T4_ERR_DDP_VERSION:
+		case T4_ERR_RDMA_VERSION:
+		case T4_ERR_OPCODE:
+		case T4_ERR_DDP_QUEUE_NUM:
+		case T4_ERR_MSN:
+		case T4_ERR_TBIT:
+		case T4_ERR_MO:
+		case T4_ERR_MSN_GAP:
+		case T4_ERR_MSN_RANGE:
+		case T4_ERR_RQE_ADDR_BOUND:
+		case T4_ERR_IRD_OVERFLOW:
+			post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_FATAL);
+			break;
 
-	default:
-		pr_err("Unknown T4 status 0x%x QPID 0x%x\n",
-		       CQE_STATUS(err_cqe), qhp->wq.sq.qid);
-		post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_FATAL);
-		break;
+		default:
+			pr_err("Unknown T4 status 0x%x QPID 0x%x\n",
+					CQE_STATUS(err_cqe), qhp->wq.sq.qid);
+			post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_FATAL);
+			break;
 	}
 done:
-	c4iw_cq_rem_ref(chp);
-	c4iw_qp_rem_ref(&qhp->ibqp);
+	if (atomic_dec_and_test(&chp->refcnt))
+		wake_up(&chp->wait);
+	c4iw_iw_qp_rem_ref(&qhp->ibqp);
 out:
 	return;
 }
 
-int c4iw_ev_handler(struct c4iw_dev *dev, u32 qid)
+static enum obj_type get_raw_qpsrq(struct c4iw_dev *dev, u32 qid,
+		struct c4iw_raw_qp **rqp,
+		struct c4iw_raw_srq **srq)
+{
+	enum obj_type ret = UNKNOWN;
+	struct db_fcl *f = xa_load(&dev->rawiqs, qid);
+	if (f) {
+		ret = f->type;
+		if (ret == RAW_QP)
+			*rqp = fcl_to_c4iw_raw_qp(f);
+		else {
+			*srq = fcl_to_c4iw_raw_srq(f);
+		}
+	}
+	return ret;
+}
+
+int c4iw_ev_handler(struct c4iw_dev *dev, u32 qid, u32 pidx)
 {
 	struct c4iw_cq *chp;
+	struct c4iw_raw_qp *rqp = NULL;
+	struct c4iw_raw_srq *srq;
+	enum obj_type type;
 	unsigned long flag;
 
+	/*
+	 * RDMA CQ Event
+	 */
 	xa_lock_irqsave(&dev->cqs, flag);
 	chp = xa_load(&dev->cqs, qid);
 	if (chp) {
-		refcount_inc(&chp->refcnt);
+		atomic_inc(&chp->refcnt);
 		xa_unlock_irqrestore(&dev->cqs, flag);
-		t4_clear_cq_armed(&chp->cq);
+		t4_clear_cq_armed(&chp->cq, chp->ibcq.uobject);
 		spin_lock_irqsave(&chp->comp_handler_lock, flag);
 		(*chp->ibcq.comp_handler)(&chp->ibcq, chp->ibcq.cq_context);
 		spin_unlock_irqrestore(&chp->comp_handler_lock, flag);
-		c4iw_cq_rem_ref(chp);
-	} else {
-		pr_debug("unknown cqid 0x%x\n", qid);
-		xa_unlock_irqrestore(&dev->cqs, flag);
+		if (atomic_dec_and_test(&chp->refcnt))
+			wake_up(&chp->wait);
+		return 0;
+	}
+	xa_unlock_irqrestore(&dev->cqs, flag);
+
+	/*
+	 * WD IQ Event
+	 */
+	type = get_raw_qpsrq(dev, qid, &rqp, &srq);
+	switch (type) {
+		case RAW_QP:
+			t4_clear_iq_armed(&rqp->iq);
+			(*rqp->rcq->ibcq.comp_handler)(&rqp->rcq->ibcq,
+					rqp->rcq->ibcq.cq_context);
+			break;
+		case RAW_SRQ: {
+				      struct rss_header *rss;
+				      u32 fidx;
+
+				      /*
+				       * The indirect interrupt IQE includes the IQID and PIDX of the
+				       * target IQ that received the pkt.  From the rss flit of the
+				       * target IQ IQE we get the filter TID used to place the pkt.
+				       * The filter TID is mapped back to a CQ that receives the
+				       * completion event. Whew...
+				       */
+				      rss = (void *)srq->iq.desc + pidx * T4_IQE_LEN;
+				      fidx = be32_to_cpu(rss->hash_val) -
+					      dev->rdev.lldi.uld_tids.ftids.start +
+					      dev->rdev.lldi.uld_tids.hpftids.size;
+				      chp = fidx2cq(dev, fidx);
+				      if (chp) {
+					      t4_clear_iq_armed(&srq->iq);
+					      (*chp->ibcq.comp_handler)(&chp->ibcq,
+							      chp->ibcq.cq_context);
+				      } else
+					      pr_err("%s cannot find endpoint for fidx "
+							      "%u iqid %u!\n", __func__, fidx, qid);
+				      break;
+			      }
+		default:
+			      pr_err("%s unknown iqid %d queue type %d\n",
+					      __func__, qid, (int)type);
+
 	}
 	return 0;
 }

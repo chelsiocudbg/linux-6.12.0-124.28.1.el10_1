@@ -349,8 +349,7 @@ static int write_pbl(struct c4iw_rdev *rdev, __be64 *pbl,
 	int err;
 
 	pr_debug("*pdb_addr 0x%x, pbl_base 0x%x, pbl_size %d\n",
-		 pbl_addr, rdev->lldi.vr->pbl.start,
-		 pbl_size);
+		 pbl_addr, rdev->lldi.vr->pbl.start, pbl_size);
 
 	err = write_adapter_mem(rdev, pbl_addr >> 5, pbl_size << 3, pbl, NULL,
 				wr_waitp);
@@ -363,6 +362,22 @@ static int dereg_mem(struct c4iw_rdev *rdev, u32 stag, u32 pbl_size,
 {
 	return write_tpt_entry(rdev, 1, &stag, 0, 0, 0, 0, 0, 0, 0UL, 0, 0,
 			       pbl_size, pbl_addr, skb, wr_waitp);
+}
+
+static int allocate_window(struct c4iw_rdev *rdev, u32 * stag, u32 pdid,
+		struct c4iw_wr_wait *wr_waitp)
+{
+	*stag = T4_STAG_UNSET;
+	return write_tpt_entry(rdev, 0, stag, 0, pdid, FW_RI_STAG_MW, 0, 0, 0,
+			0UL, 0, 0, 0, 0, NULL, wr_waitp);
+}
+
+static int deallocate_window(struct c4iw_rdev *rdev, u32 stag,
+		struct sk_buff *skb,
+		struct c4iw_wr_wait *wr_waitp)
+{
+	return write_tpt_entry(rdev, 1, &stag, 0, 0, 0, 0, 0, 0, 0UL, 0, 0, 0,
+			0, skb, wr_waitp);
 }
 
 static int allocate_stag(struct c4iw_rdev *rdev, u32 *stag, u32 pdid,
@@ -595,6 +610,86 @@ err_free_mhp:
 	return ERR_PTR(err);
 }
 
+int c4iw_alloc_mw(struct ib_mw *ibmw, struct ib_udata *udata)
+{
+	struct c4iw_dev *rhp;
+	struct c4iw_pd *php;
+	struct c4iw_mw *mhp;
+	u32 mmid;
+	u32 stag = 0;
+	int ret;
+
+	if (ibmw->type != IB_MW_TYPE_1)
+		return -EINVAL;
+
+	php = to_c4iw_pd(ibmw->pd);
+	rhp = php->rhp;
+	mhp = kzalloc(sizeof(*mhp), GFP_KERNEL);
+	if (!mhp)
+		return -ENOMEM;
+
+	mhp->wr_waitp = c4iw_alloc_wr_wait(GFP_KERNEL);
+	if (!mhp->wr_waitp) {
+		ret = -ENOMEM;
+		goto free_mhp;
+	}
+
+	mhp->dereg_skb = alloc_skb(SGE_MAX_WR_LEN, GFP_KERNEL);
+	if (!mhp->dereg_skb) {
+		ret = -ENOMEM;
+		goto free_wr_wait;
+	}
+
+	ret = allocate_window(&rhp->rdev, &stag, php->pdid, mhp->wr_waitp);
+	if (ret) {
+		goto free_skb;
+	}
+	mhp->rhp = rhp;
+	mhp->attr.pdid = php->pdid;
+	mhp->attr.type = FW_RI_STAG_MW;
+	mhp->attr.stag = stag;
+	mmid = (stag) >> 8;
+	mhp->ibmw.rkey = stag;
+	if (xa_insert_irq(&rhp->mrs, mmid, mhp, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto dealloc_win;
+	}
+	pr_debug("mmid 0x%x mhp %p stag 0x%x\n", mmid, mhp, stag);
+	return 0;
+
+dealloc_win:
+	deallocate_window(&rhp->rdev, mhp->attr.stag, mhp->dereg_skb,
+			mhp->wr_waitp);
+free_skb:
+	if (mhp->dereg_skb)
+		kfree_skb(mhp->dereg_skb);
+free_wr_wait:
+	c4iw_put_wr_wait(mhp->wr_waitp);
+free_mhp:
+	kfree(mhp);
+	return ret;
+}
+
+int c4iw_dealloc_mw(struct ib_mw *mw)
+{
+	struct c4iw_dev *rhp;
+	struct c4iw_mw *mhp;
+	u32 mmid;
+
+	mhp = to_c4iw_mw(mw);
+	rhp = mhp->rhp;
+	mmid = (mw->rkey) >> 8;
+	xa_erase_irq(&rhp->mrs, mmid);
+	deallocate_window(&rhp->rdev, mhp->attr.stag, mhp->dereg_skb,
+			mhp->wr_waitp);
+	if (mhp->dereg_skb)
+		kfree_skb(mhp->dereg_skb);
+	pr_debug("ib_mw %p mmid 0x%x ptr %p\n", mw, mmid, mhp);
+	c4iw_put_wr_wait(mhp->wr_waitp);
+	kfree(mhp);
+	return 0;
+}
+
 struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
 			    u32 max_num_sg)
 {
@@ -610,8 +705,7 @@ struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
 	rhp = php->rhp;
 
 	if (mr_type != IB_MR_TYPE_MEM_REG ||
-	    max_num_sg > t4_max_fr_depth(rhp->rdev.lldi.ulptx_memwrite_dsgl &&
-					 use_dsgl))
+	    max_num_sg > t4_max_fr_depth(&rhp->rdev, use_dsgl))
 		return ERR_PTR(-EINVAL);
 
 	mhp = kzalloc(sizeof(*mhp), GFP_KERNEL);
@@ -656,7 +750,8 @@ struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
 		goto err_dereg;
 	}
 
-	pr_debug("mmid 0x%x mhp %p stag 0x%x\n", mmid, mhp, stag);
+	pr_debug("mmid 0x%x mhp %p stag 0x%x max_num_sg %u length %d\n",
+			mmid, mhp, stag, max_num_sg, length);
 	return &(mhp->ibmr);
 err_dereg:
 	dereg_mem(&rhp->rdev, stag, mhp->attr.pbl_size,

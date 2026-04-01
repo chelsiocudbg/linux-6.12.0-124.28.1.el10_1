@@ -1274,7 +1274,7 @@ static int setup_sge_queues(struct adapter *adap)
 				cmplqid	= rxq_info->uldrxq[i].rspq.cntxt_id;
 
 			/* Allocate at least num_up_cores control queues per port */
-			j = i * adap->params.num_up_cores;
+			j = i * adap->params.num_up_cores + CXGB4_ULD_CTRLQ_INDEX_RDMA;
 			for (k = 0; k < adap->params.num_up_cores; k++, j++) {
 				err = t4_sge_alloc_ctrl_txq(adap, &s->ctrlq[j], adap->port[i],
 							    s->fw_evtq.cntxt_id, cmplqid, k);

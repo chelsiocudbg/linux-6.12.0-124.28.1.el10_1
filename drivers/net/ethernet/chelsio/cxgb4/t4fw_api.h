@@ -110,6 +110,7 @@ enum fw_wr_opcodes {
 	FW_RI_FR_NSMR_TPTE_WR	       = 0x20,
 	FW_RI_RDMA_WRITE_CMPL_WR       = 0x21,
 	/* rocev2 wr used from rdma kernel and user space */
+	FW_RI_WR                       = 0x0d,
 	FW_RI_V2_RDMA_WRITE_WR         = 0x22,
 	FW_RI_V2_SEND_WR               = 0x23,
 	FW_RI_V2_RDMA_READ_WR          = 0x24,
@@ -775,7 +776,7 @@ enum fw_flowc_mnem {
 	FW_FLOWC_MNEM_DCBPRIO,
 	FW_FLOWC_MNEM_SND_SCALE,
 	FW_FLOWC_MNEM_RCV_SCALE,
-	FW_FLOWC_MNEM_ULD_MODE,
+	FW_FLOWC_MNEM_ULP_MODE,
 	FW_FLOWC_MNEM_EQID,
 	FW_FLOWC_MNEM_CONG_ALG,
 	FW_FLOWC_MNEM_TXDATAPLEN_MIN,
@@ -1820,6 +1821,13 @@ struct fw_iq_cmd {
 #define FW_IQ_CMD_FL0CNGCHMAP_S		20
 #define FW_IQ_CMD_FL0CNGCHMAP_V(x)	((x) << FW_IQ_CMD_FL0CNGCHMAP_S)
 
+#define FW_IQ_CMD_FL0CONGDROP_S         16
+#define FW_IQ_CMD_FL0CONGDROP_M         0x1
+#define FW_IQ_CMD_FL0CONGDROP_V(x)      ((x) << FW_IQ_CMD_FL0CONGDROP_S)
+#define FW_IQ_CMD_FL0CONGDROP_G(x)      \
+	(((x) >> FW_IQ_CMD_FL0CONGDROP_S) & FW_IQ_CMD_FL0CONGDROP_M)
+#define FW_IQ_CMD_FL0CONGDROP_F         FW_IQ_CMD_FL0CONGDROP_V(1U)
+
 #define FW_IQ_CMD_FL0CACHELOCK_S	15
 #define FW_IQ_CMD_FL0CACHELOCK_V(x)	((x) << FW_IQ_CMD_FL0CACHELOCK_S)
 
@@ -2042,6 +2050,10 @@ struct fw_eq_eth_cmd {
 
 #define FW_EQ_ETH_CMD_ONCHIP_S		18
 #define FW_EQ_ETH_CMD_ONCHIP_V(x)	((x) << FW_EQ_ETH_CMD_ONCHIP_S)
+#define FW_EQ_ETH_CMD_ONCHIP_V(x)       ((x) << FW_EQ_ETH_CMD_ONCHIP_S)
+#define FW_EQ_ETH_CMD_ONCHIP_G(x)       \
+	(((x) >> FW_EQ_ETH_CMD_ONCHIP_S) & FW_EQ_ETH_CMD_ONCHIP_M)
+#define FW_EQ_ETH_CMD_ONCHIP_F          FW_EQ_ETH_CMD_ONCHIP_V(1U)
 
 #define FW_EQ_ETH_CMD_PCIECHN_S		16
 #define FW_EQ_ETH_CMD_PCIECHN_V(x)	((x) << FW_EQ_ETH_CMD_PCIECHN_S)

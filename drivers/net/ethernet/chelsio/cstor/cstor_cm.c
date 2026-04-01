@@ -614,7 +614,7 @@ void _cstor_free_sock(struct kref *kref)
 	dst_release(csk->dst);
 
 	if (csk->l2t)
-		cxgb4_l2t_release(csk->l2t);
+		cxgb4_l2t_release(cdev->lldi.ports[0], csk->l2t);
 
 	free_uevent_node_list(csk);
 

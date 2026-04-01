@@ -70,13 +70,13 @@ enum {
 };
 
 struct c4iw_create_qp_resp {
-	__aligned_u64 ma_sync_key;
-	__aligned_u64 sq_key;
-	__aligned_u64 rq_key;
-	__aligned_u64 sq_db_gts_key;
-	__aligned_u64 rq_db_gts_key;
-	__aligned_u64 sq_memsize;
-	__aligned_u64 rq_memsize;
+	__u64 ma_sync_key;
+	__u64 sq_key;
+	__u64 rq_key;
+	__u64 sq_db_gts_key;
+	__u64 rq_db_gts_key;
+	__u64 sq_memsize;
+	__u64 rq_memsize;
 	__u32 sqid;
 	__u32 rqid;
 	__u32 sq_size;
@@ -97,15 +97,79 @@ struct c4iw_create_srq_resp {
 	__u32 reserved; /* explicit padding */
 };
 
+struct c4iw_create_ah_resp {
+	__u32 ah_id;
+	__u8 rsvd[4];
+};
+
 enum {
 	/* HW supports SRQ_LIMIT_REACHED event */
 	T4_SRQ_LIMIT_SUPPORT = 1 << 0,
+};
+
+enum {
+	FL_PACKED_MODE = 1,
+	FL_CONG_DROP_MODE = 2
+};
+
+struct c4iw_create_raw_qp_req {
+	__u32 port;
+	__u32 vlan_pri;
+	__u32 nfids;
+	__u32 flags;
+};
+
+struct c4iw_create_raw_qp_resp {
+	union {
+		__u64 ma_sync_key;
+		__u64 txq_bar2_key;
+	};
+	__u64 db_key;
+	__u64 txq_key;
+	__u64 fl_key;
+	__u64 iq_key;
+	__u64 txq_memsize;
+	__u64 fl_memsize;
+	__u64 iq_memsize;
+	__u32 txq_id;
+	__u32 fl_id;
+	__u32 iq_id;
+	__u32 txq_size;
+	__u32 fl_size;
+	__u32 iq_size;
+	__u32 tx_chan;
+	__u32 pf;
+	__u32 flags;
+	__u32 fid;
+	__u64 fl_bar2_key;
+	__u64 iq_bar2_key;
 };
 
 struct c4iw_alloc_ucontext_resp {
 	__aligned_u64 status_page_key;
 	__u32 status_page_size;
 	__u32 reserved; /* explicit padding (optional for i386) */
+};
+
+struct c4iw_create_raw_srq_req {
+        __u32 port;
+        __u32 flags;
+};
+
+struct c4iw_create_raw_srq_resp {
+        __u64 db_key;
+        __u64 fl_key;
+        __u64 iq_key;
+        __u64 fl_memsize;
+        __u64 iq_memsize;
+        __u32 fl_id;
+        __u32 iq_id;
+        __u32 fl_size;
+        __u32 iq_size;
+        __u32 flags;
+        __u32 qid_mask;
+        __u64 fl_bar2_key;
+        __u64 iq_bar2_key;
 };
 
 struct c4iw_alloc_pd_resp {

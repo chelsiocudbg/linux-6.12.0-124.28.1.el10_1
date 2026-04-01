@@ -835,7 +835,7 @@ static void chtls_release_resources(struct sock *sk)
 	}
 
 	if (csk->l2t_entry) {
-		cxgb4_l2t_release(csk->l2t_entry);
+		cxgb4_l2t_release(csk->egress_dev, csk->l2t_entry);
 		csk->l2t_entry = NULL;
 	}
 

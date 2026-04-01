@@ -107,7 +107,7 @@ static inline void t4_set_arp_err_handler(struct sk_buff *skb, void *handle,
 	L2T_SKB_CB(skb)->arp_err_handler = handler;
 }
 
-void cxgb4_l2t_release(struct l2t_entry *e);
+void cxgb4_l2t_release(struct net_device *dev, struct l2t_entry *e);
 int cxgb4_l2t_send(struct net_device *dev, struct sk_buff *skb,
 		   struct l2t_entry *e);
 struct l2t_entry *cxgb4_l2t_get(struct l2t_data *d, struct neighbour *neigh,

@@ -51,7 +51,13 @@ enum fw_ri_wr_opcode {
 	FW_RI_RECEIVE			= 0xe,
 
 	FW_RI_SGE_EC_CR_RETURN		= 0xf,
-	FW_RI_WRITE_IMMEDIATE           = FW_RI_RDMA_INIT
+	FW_RI_WRITE_IMMEDIATE           = FW_RI_RDMA_INIT,
+
+	FW_RI_ROCEV2_SEND               = 0x0,
+	FW_RI_ROCEV2_WRITE              = 0x0,
+	FW_RI_ROCEV2_SEND_WITH_INV      = 0x5,
+	FW_RI_ROCEV2_SEND_IMMEDIATE     = 0xa,
+
 };
 
 enum fw_ri_wr_flags {
@@ -534,6 +540,195 @@ struct fw_ri_res_wr {
 	(((x) >> FW_RI_RES_WR_IQRO_S) & FW_RI_RES_WR_IQRO_M)
 #define FW_RI_RES_WR_IQRO_F	FW_RI_RES_WR_IQRO_V(1U)
 
+struct fw_ri_v2_rdma_write_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2; /* set to 0 */
+	__be32 psn_pkd;
+	__be32 r4[2];
+	__be32 r5;
+	__be32 immd_data;
+	__be64 to_sink;
+	__be32 stag_sink;
+	__be32 plen;
+	union {
+		struct fw_ri_immd immd_src[0];
+		struct fw_ri_isgl isgl_src[0];
+	} u;
+};
+
+#define FW_RI_V2_RDMA_WRITE_WR_PSN_S    0
+#define FW_RI_V2_RDMA_WRITE_WR_PSN_M    0xffffff
+#define FW_RI_V2_RDMA_WRITE_WR_PSN_V(x) ((x) << FW_RI_V2_RDMA_WRITE_WR_PSN_S)
+#define FW_RI_V2_RDMA_WRITE_WR_PSN_G(x) \
+	(((x) >> FW_RI_V2_RDMA_WRITE_WR_PSN_S) & FW_RI_V2_RDMA_WRITE_WR_PSN_M)
+
+struct fw_ri_v2_send_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2; /* set to 0 */
+	__be32 stag_inv;
+	__be32 plen;
+	__be32 sendop_psn;
+	__u8   immdlen;
+	__u8   r3[3];
+	__be32 r4;
+	/* CPL_TX_TNL_LSO, CPL_TX_PKT_XT and Eth/IP/UDP/BTH
+	 * headers in UD QP case, align size to 16B */
+#ifndef C99_NOT_SUPPORTED
+	union {
+		struct fw_ri_immd immd_src[0];
+		struct fw_ri_isgl isgl_src[0];
+	} u;
+#endif
+};
+
+#define FW_RI_V2_SEND_WR_SENDOP_S       24
+#define FW_RI_V2_SEND_WR_SENDOP_M       0xff
+#define FW_RI_V2_SEND_WR_SENDOP_V(x)    ((x) << FW_RI_V2_SEND_WR_SENDOP_S)
+#define FW_RI_V2_SEND_WR_SENDOP_G(x)    \
+	(((x) >> FW_RI_V2_SEND_WR_SENDOP_S) & FW_RI_V2_SEND_WR_SENDOP_M)
+
+#define FW_RI_V2_SEND_WR_PSN_S          0
+#define FW_RI_V2_SEND_WR_PSN_M          0xffffff
+#define FW_RI_V2_SEND_WR_PSN_V(x)       ((x) << FW_RI_V2_SEND_WR_PSN_S)
+#define FW_RI_V2_SEND_WR_PSN_G(x)       \
+	(((x) >> FW_RI_V2_SEND_WR_PSN_S) & FW_RI_V2_SEND_WR_PSN_M)
+
+struct fw_ri_v2_rdma_read_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2; /* set to 0 */
+	__be32 psn_pkd;
+	__be64 to_src;
+	__be32 stag_src;
+	__be32 plen;
+	/* TODO: Add 8B reserved to start isgl_sink.sge[0] start at 16B
+	 * boundary */
+	struct fw_ri_isgl isgl_sink; /* RRQ, max 4 nsge in rocev2, 1 in iwarp */
+};
+
+#define FW_RI_V2_RDMA_READ_WR_PSN_S     0
+#define FW_RI_V2_RDMA_READ_WR_PSN_M     0xffffff
+#define FW_RI_V2_RDMA_READ_WR_PSN_V(x)  ((x) << FW_RI_V2_RDMA_READ_WR_PSN_S)
+#define FW_RI_V2_RDMA_READ_WR_PSN_G(x)  \
+	(((x) >> FW_RI_V2_RDMA_READ_WR_PSN_S) & FW_RI_V2_RDMA_READ_WR_PSN_M)
+
+struct fw_ri_v2_atomic_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2; /* set to 0 */
+	__be32 atomicop_psn;
+};
+
+#define FW_RI_V2_ATOMIC_WR_ATOMICOP_S           28
+#define FW_RI_V2_ATOMIC_WR_ATOMICOP_M           0xf
+#define FW_RI_V2_ATOMIC_WR_ATOMICOP_V(x)        \
+	((x) << FW_RI_V2_ATOMIC_WR_ATOMICOP_S)
+#define FW_RI_V2_ATOMIC_WR_ATOMICOP_G(x)        \
+	(((x) >> FW_RI_V2_ATOMIC_WR_ATOMICOP_S) & FW_RI_V2_ATOMIC_WR_ATOMICOP_M)
+
+#define FW_RI_V2_ATOMIC_WR_PSN_S        0
+#define FW_RI_V2_ATOMIC_WR_PSN_M        0xffffff
+#define FW_RI_V2_ATOMIC_WR_PSN_V(x)     ((x) << FW_RI_V2_ATOMIC_WR_PSN_S)
+#define FW_RI_V2_ATOMIC_WR_PSN_G(x)     \
+	(((x) >> FW_RI_V2_ATOMIC_WR_PSN_S) & FW_RI_V2_ATOMIC_WR_PSN_M)
+
+struct fw_ri_v2_bind_mw_wr {
+	__u8   opcode;
+	__u8   flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2;
+	__be32 r5;
+	__be32 r6[2];
+	__u8   qpbinde_to_dcacpu;
+	__u8   pgsz_shift;
+	__u8   addr_type;
+	__u8   mem_perms;
+	__be32 stag_mr;
+	__be32 stag_mw;
+	__be32 r3;
+	__be64 len_mw;
+	__be64 va_fbo;
+	__be64 r4;
+};
+
+#define FW_RI_V2_BIND_MW_WR_QPBINDE_S           6
+#define FW_RI_V2_BIND_MW_WR_QPBINDE_M           0x1
+#define FW_RI_V2_BIND_MW_WR_QPBINDE_V(x)        \
+	((x) << FW_RI_V2_BIND_MW_WR_QPBINDE_S)
+#define FW_RI_V2_BIND_MW_WR_QPBINDE_G(x)        \
+	(((x) >> FW_RI_V2_BIND_MW_WR_QPBINDE_S) & FW_RI_V2_BIND_MW_WR_QPBINDE_M)
+#define FW_RI_V2_BIND_MW_WR_QPBINDE_F   FW_RI_V2_BIND_MW_WR_QPBINDE_V(1U)
+
+#define FW_RI_V2_BIND_MW_WR_NS_S        5
+#define FW_RI_V2_BIND_MW_WR_NS_M        0x1
+#define FW_RI_V2_BIND_MW_WR_NS_V(x)     ((x) << FW_RI_V2_BIND_MW_WR_NS_S)
+#define FW_RI_V2_BIND_MW_WR_NS_G(x)     \
+	(((x) >> FW_RI_V2_BIND_MW_WR_NS_S) & FW_RI_V2_BIND_MW_WR_NS_M)
+#define FW_RI_V2_BIND_MW_WR_NS_F        FW_RI_V2_BIND_MW_WR_NS_V(1U)
+
+#define FW_RI_V2_BIND_MW_WR_DCACPU_S    0
+#define FW_RI_V2_BIND_MW_WR_DCACPU_M    0x1f
+#define FW_RI_V2_BIND_MW_WR_DCACPU_V(x) ((x) << FW_RI_V2_BIND_MW_WR_DCACPU_S)
+#define FW_RI_V2_BIND_MW_WR_DCACPU_G(x) \
+	(((x) >> FW_RI_V2_BIND_MW_WR_DCACPU_S) & FW_RI_V2_BIND_MW_WR_DCACPU_M)
+
+struct fw_ri_v2_fr_nsmr_wr {
+	__u8   opcode;
+	__u8   v2_flags;
+	__u16  wrid;
+	__u8   r1[3];
+	__u8   len16;
+	__be32 r2;
+	__be32 r3;
+	__be32 r4[2];
+	__u8   qpbinde_to_dcacpu;
+	__u8   pgsz_shift;
+	__u8   addr_type;
+	__u8   mem_perms;
+	__be32 stag;
+	__be32 len_hi;
+	__be32 len_lo;
+	__be32 va_hi;
+	__be32 va_lo_fbo;
+};
+
+#define FW_RI_V2_FR_NSMR_WR_QPBINDE_S           6
+#define FW_RI_V2_FR_NSMR_WR_QPBINDE_M           0x1
+#define FW_RI_V2_FR_NSMR_WR_QPBINDE_V(x)        \
+	((x) << FW_RI_V2_FR_NSMR_WR_QPBINDE_S)
+#define FW_RI_V2_FR_NSMR_WR_QPBINDE_G(x)        \
+	(((x) >> FW_RI_V2_FR_NSMR_WR_QPBINDE_S) & FW_RI_V2_FR_NSMR_WR_QPBINDE_M)
+#define FW_RI_V2_FR_NSMR_WR_QPBINDE_F   FW_RI_V2_FR_NSMR_WR_QPBINDE_V(1U)
+
+#define FW_RI_V2_FR_NSMR_WR_NS_S        5
+#define FW_RI_V2_FR_NSMR_WR_NS_M        0x1
+#define FW_RI_V2_FR_NSMR_WR_NS_V(x)     ((x) << FW_RI_V2_FR_NSMR_WR_NS_S)
+#define FW_RI_V2_FR_NSMR_WR_NS_G(x)     \
+	(((x) >> FW_RI_V2_FR_NSMR_WR_NS_S) & FW_RI_V2_FR_NSMR_WR_NS_M)
+#define FW_RI_V2_FR_NSMR_WR_NS_F        FW_RI_V2_FR_NSMR_WR_NS_V(1U)
+
+#define FW_RI_V2_FR_NSMR_WR_DCACPU_S    0
+#define FW_RI_V2_FR_NSMR_WR_DCACPU_M    0x1f
+#define FW_RI_V2_FR_NSMR_WR_DCACPU_V(x) ((x) << FW_RI_V2_FR_NSMR_WR_DCACPU_S)
+#define FW_RI_V2_FR_NSMR_WR_DCACPU_G(x) \
+	(((x) >> FW_RI_V2_FR_NSMR_WR_DCACPU_S) & FW_RI_V2_FR_NSMR_WR_DCACPU_M)
+
 struct fw_ri_rdma_write_wr {
 	__u8   opcode;
 	__u8   flags;
@@ -786,6 +981,34 @@ struct fw_ri_wr {
 				struct fw_ri_send_wr send;
 			} u;
 		} init;
+		struct fw_ri_rocev2_init {
+			__u8   type;
+			__u8   r3[3];
+			__u8   rocev2_flags;
+			__u8   qp_caps;
+			__be16 nrqe;
+			__be32 pdid;
+			__be32 qpid;
+			__be32 sq_eqid;
+			__be32 rq_eqid;
+			__be32 scqid;
+			__be32 rcqid;
+			__be32 ord_max;
+			__be32 ird_max;
+			__be32 psn_pkd;
+			__be32 epsn_pkd;
+			__be32 hwrqsize;
+			__be32 hwrqaddr;
+			__be32 q_key;
+			__u8   pkthdrsize;
+			__u8   r;
+			__be16 p_key;
+			//struct cpl_tx_tnl_lso tnl_lso;
+			__u8   tnl_lso[48]; /* cpl_tx_tnl_lso + cpl_tx_pkt_xt */
+#ifndef C99_NOT_SUPPORTED
+			struct fw_ri_immd pkthdr[0];
+#endif
+		} rocev2_init;
 		struct fw_ri_fini {
 			__u8   type;
 			__u8   r3[7];
@@ -799,6 +1022,12 @@ struct fw_ri_wr {
 		} terminate;
 	} u;
 };
+
+#define FW_RI_WR_TRANSPORT_TYPE_S       16
+#define FW_RI_WR_TRANSPORT_TYPE_M       0x7
+#define FW_RI_WR_TRANSPORT_TYPE_V(x)    ((x) << FW_RI_WR_TRANSPORT_TYPE_S)
+#define FW_RI_WR_TRANSPORT_TYPE_G(x)    \
+	(((x) >> FW_RI_WR_TRANSPORT_TYPE_S) & FW_RI_WR_TRANSPORT_TYPE_M)
 
 #define FW_RI_WR_MPAREQBIT_S	7
 #define FW_RI_WR_MPAREQBIT_M	0x1

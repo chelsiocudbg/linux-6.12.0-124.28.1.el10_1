@@ -1056,11 +1056,9 @@ struct sge {
 
 	struct sge_eth_txq ethtxq[MAX_ETH_QSETS];
 	struct sge_eth_txq ptptxq;
-	struct sge_ofld_rxq rdmarxq[MAX_RDMA_QUEUES];
-	struct sge_ofld_rxq rdmaciq[MAX_RDMA_CIQS];
 	struct sge_ctrl_txq ctrlq[MAX_CTRL_QUEUES];
-
 	struct sge_eth_rxq ethrxq[MAX_ETH_QSETS];
+
 	struct sge_rspq fw_evtq ____cacheline_aligned_in_smp;
 	struct sge_uld_rxq_info **uld_rxq_info;
 	struct sge_uld_txq_info **uld_txq_info;
@@ -1077,8 +1075,6 @@ struct sge {
 	u16 ethqsets;               /* # of active Ethernet queue sets */
 	u16 ethtxq_rover;           /* Tx queue to clean up next */
 	u16 ofldqsets;              /* # of active ofld queue sets */
-	u16 rdmaqs;                 /* # of available RDMA Rx queues */
-	u16 rdmaciqs;               /* # of available RDMA concentrator IQs */
 	u16 nqs_per_uld;	    /* # of Rx queues per ULD */
 	u16 eoqsets;                /* # of ETHOFLD queues */
 	u16 mirrorqsets;            /* # of Mirror queues */
@@ -1422,6 +1418,11 @@ struct ch_sched_flowc {
 	s8  class; /* class index */
 };
 
+enum {
+	CHELSIO_SET_FILTER              = 1063,
+};
+
+
 /* Defined bit width of user definable filter tuples
  */
 #define ETHTYPE_BITWIDTH 16
@@ -1560,6 +1561,8 @@ struct ch_filter_specification {
 	struct ch_filter_tuple mask;
 };
 
+#define CH_FILTER_SPECIFICATION_ID 0x5
+
 enum {
 	FILTER_PASS = 0,        /* default */
 	FILTER_DROP,
@@ -1582,6 +1585,18 @@ enum {
 	NAT_MODE_SIP_SP,	/* NAT on Src IP and Src Port */
 	NAT_MODE_DIP_SIP_SP,	/* NAT on Dst IP, Src IP and Src Port */
 	NAT_MODE_ALL		/* NAT on entire 4-tuple */
+};
+
+struct ch_filter {
+	uint32_t cmd;           /* common "cxgbtool" command header */
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	uint32_t filter_id:28;  /* the filter index to set */
+	uint32_t filter_ver:4;  /* filter spec version */
+#else
+	uint32_t filter_ver:4;  /* filter spec version */
+	uint32_t filter_id:28;  /* the filter index to set */
+#endif
+	struct ch_filter_specification fs;
 };
 
 #include "cxgb4_filter.h"

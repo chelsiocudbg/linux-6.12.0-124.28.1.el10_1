@@ -810,7 +810,7 @@ void _cxgbit_free_csk(struct kref *kref)
 	cxgb4_remove_tid(csk->com.cdev->lldi.tids, 0, csk->tid,
 			 csk->com.local_addr.ss_family);
 	dst_release(csk->dst);
-	cxgb4_l2t_release(csk->l2t);
+	cxgb4_l2t_release(csk->com.cdev->lldi.ports[0], csk->l2t);
 
 	cdev = csk->com.cdev;
 	spin_lock_bh(&cdev->cskq.lock);

@@ -366,9 +366,9 @@ static void _t4_l2e_free(struct l2t_entry *e)
 }
 
 /* Locked version of _t4_l2e_free */
-static void t4_l2e_free(struct l2t_entry *e)
+static void t4_l2e_free(struct adapter *adap, struct l2t_entry *e)
 {
-	struct l2t_data *d;
+	struct l2t_data *d = adap->l2t;
 
 	spin_lock_bh(&e->lock);
 	if (atomic_read(&e->refcnt) == 0) {  /* hasn't been recycled */
@@ -384,10 +384,10 @@ static void t4_l2e_free(struct l2t_entry *e)
 	atomic_inc(&d->nfree);
 }
 
-void cxgb4_l2t_release(struct l2t_entry *e)
+void cxgb4_l2t_release(struct net_device *dev, struct l2t_entry *e)
 {
 	if (atomic_dec_and_test(&e->refcnt))
-		t4_l2e_free(e);
+		t4_l2e_free(netdev2adap(dev), e);
 }
 EXPORT_SYMBOL(cxgb4_l2t_release);
 

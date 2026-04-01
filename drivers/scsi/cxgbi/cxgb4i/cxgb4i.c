@@ -1676,7 +1676,7 @@ free_cpls:
 static inline void l2t_put(struct cxgbi_sock *csk)
 {
 	if (csk->l2t) {
-		cxgb4_l2t_release(csk->l2t);
+		cxgb4_l2t_release(csk->cdev->ports[csk->port_id], csk->l2t);
 		csk->l2t = NULL;
 		cxgbi_sock_put(csk);
 	}

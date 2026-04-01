@@ -46,22 +46,29 @@
 #include <linux/timer.h>
 #include <linux/io.h>
 #include <linux/workqueue.h>
+#include <linux/if_vlan.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+#include <linux/genalloc.h>
 
 #include <asm/byteorder.h>
 
 #include <net/net_namespace.h>
+#include <net/xfrm.h>
 
 #include <rdma/ib_verbs.h>
+#include <rdma/ib_pack.h>
 #include <rdma/iw_cm.h>
 #include <rdma/rdma_netlink.h>
 #include <rdma/iw_portmap.h>
 #include <rdma/restrack.h>
+#include <rdma/ib_cache.h>
 
 #include "cxgb4.h"
 #include "cxgb4_uld.h"
 #include "cxgb4_rdma_resource.h"
 #include "l2t.h"
-#include <rdma/cxgb4-abi.h>
+#include <uapi/rdma/cxgb4-abi.h>
 
 #define DRV_NAME "iw_cxgb4"
 #define MOD DRV_NAME ":"
@@ -72,8 +79,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include "t4.h"
-
 #define PBL_OFF(rdev_p, a) ((a) - (rdev_p)->lldi.vr->pbl.start)
 #define RQT_OFF(rdev_p, a) ((a) - (rdev_p)->lldi.vr->rq.start)
 
@@ -82,10 +87,12 @@ static inline void *cplhdr(struct sk_buff *skb)
 	return skb->data;
 }
 
+#define T6_MAX_PAGE_SIZE 0x8000000
+
+#define ESP_HDR_LEN 16
+
 struct c4iw_resource {
 	struct cxgb4_id_table tpt_table;
-	struct cxgb4_id_table pdid_table;
-	struct cxgb4_id_table srq_table;
 };
 
 enum c4iw_rdev_flags {
@@ -97,6 +104,7 @@ struct c4iw_stats {
 	struct mutex lock;
 	struct cxgb4_rdma_stat stag;
 	struct cxgb4_rdma_stat pbl;
+	struct cxgb4_rdma_stat rrqt;
 	struct cxgb4_rdma_stat ocqp;
 	u64  db_full;
 	u64  db_empty;
@@ -136,6 +144,7 @@ struct c4iw_rdev {
 	struct c4iw_resource resource;
 	struct cxgb4_rdma_resource *rdma_res;
 	struct cxgb4_dev_ucontext uctx;
+	struct gen_pool *rrqt_pool;
 	struct gen_pool *pbl_pool;
 	struct gen_pool *ocqp_pool;
 	u32 flags;
@@ -144,18 +153,39 @@ struct c4iw_rdev {
 	void __iomem *bar2_kva;
 	unsigned long oc_mw_pa;
 	void __iomem *oc_mw_kva;
+	unsigned long *fids;
+	int nfids;
 	struct c4iw_stats stats;
 	struct c4iw_hw_queue hw_queue;
 	struct t4_dev_status_page *status_page;
+	dma_addr_t daddr;
 	atomic_t wr_log_idx;
 	struct wr_log_entry *wr_log;
+	u8 gsi_qp_inuse;
+	struct c4iw_qp *gsi_qp;
+	struct c4iw_cq *gsi_scq;
+	struct c4iw_cq *gsi_rcq;
+	struct list_head blocker_list;
+	struct mutex blocker_lock;
+	struct list_head ep_glist;
+	struct mutex ep_glist_lock;
 	int wr_log_size;
 	struct workqueue_struct *free_workq;
+	struct completion rrqt_compl;
 	struct completion rqt_compl;
 	struct completion pbl_compl;
+	struct kref rrqt_kref;
 	struct kref rqt_kref;
 	struct kref pbl_kref;
 };
+
+#include "t4.h"
+
+static inline int c4iw_onchip_pa(struct c4iw_rdev *rdev, u64 pa)
+{
+	return pa >= rdev->oc_mw_pa &&
+		pa < rdev->oc_mw_pa + rdev->lldi.vr->ocq.size;
+}
 
 static inline int c4iw_fatal_error(struct c4iw_rdev *rdev)
 {
@@ -167,12 +197,21 @@ static inline int c4iw_num_stags(struct c4iw_rdev *rdev)
 	return (int)(rdev->lldi.vr->stag.size >> 5);
 }
 
+static inline int t4_max_fr_depth(struct c4iw_rdev *rdev, bool use_dsgl)
+{
+	if (rdev->lldi.ulptx_memwrite_dsgl && use_dsgl)
+		return rdev->lldi.dev_512sgl_mr ? T4_MAX_FR_FW_DSGL_DEPTH : T4_MAX_FR_DSGL_DEPTH;
+	else
+		return T4_MAX_FR_IMMD_DEPTH;
+}
+
 #define C4IW_WR_TO (60*HZ)
 
 struct c4iw_wr_wait {
 	struct completion completion;
 	int ret;
 	struct kref kref;
+	struct list_head blist_entry;
 };
 
 void _c4iw_free_wr_wait(struct kref *kref);
@@ -216,6 +255,33 @@ static inline void c4iw_wake_up_noref(struct c4iw_wr_wait *wr_waitp, int ret)
 static inline void c4iw_wake_up_deref(struct c4iw_wr_wait *wr_waitp, int ret)
 {
 	_c4iw_wake_up(wr_waitp, ret, true);
+}
+
+void c4iw_disable_device(struct c4iw_rdev *rdev, int recover);
+
+static inline int c4iw_wait(struct c4iw_rdev *rdev, struct completion *c)
+{
+        int ret;
+
+        if (c4iw_fatal_error(rdev))
+                return -EIO;
+
+        ret = wait_for_completion_timeout(c, C4IW_WR_TO);
+
+        /*
+         * If we timed out, then mark the device as dead and
+         * notify the LLD.  The LLD can then possibly initiate
+         * device recovery (see CXGB4_STATE_START_RECOVERY).
+         */
+        if (!ret) {
+                pr_err(MOD "%s: Timeout waiting for FW reply\n",
+                       rdev->lldi.name);
+                WARN_ON(1);
+                c4iw_disable_device(rdev, 0);
+                cxgb4_fatal_err(rdev->lldi.ports[0]);
+                return -EIO;
+        }
+        return 0;
 }
 
 static inline int c4iw_wait_for_reply(struct c4iw_rdev *rdev,
@@ -276,15 +342,20 @@ enum db_state {
 struct c4iw_dev {
 	struct ib_device ibdev;
 	struct c4iw_rdev rdev;
+	struct device_dma_parameters dma_parms;
 	struct xarray cqs;
 	struct xarray qps;
+	struct xarray rawqps;
+	struct xarray rawiqs;
 	struct xarray mrs;
+	spinlock_t lock;
 	struct mutex db_mutex;
 	struct dentry *debugfs_root;
 	enum db_state db_state;
 	struct xarray hwtids;
 	struct xarray atids;
 	struct xarray stids;
+	struct xarray fids;
 	struct list_head db_fc_list;
 	u32 avail_ird;
 	wait_queue_head_t wait;
@@ -302,6 +373,11 @@ static inline struct c4iw_dev *to_c4iw_dev(struct ib_device *ibdev)
 	return container_of(ibdev, struct c4iw_dev, ibdev);
 }
 
+static inline struct c4iw_dev *rdev_to_c4iw_dev(struct c4iw_rdev *rdev)
+{
+	return container_of(rdev, struct c4iw_dev, rdev);
+}
+
 static inline struct c4iw_cq *get_chp(struct c4iw_dev *rhp, u32 cqid)
 {
 	return xa_load(&rhp->cqs, cqid);
@@ -312,12 +388,35 @@ static inline struct c4iw_qp *get_qhp(struct c4iw_dev *rhp, u32 qpid)
 	return xa_load(&rhp->qps, qpid);
 }
 
+static inline struct c4iw_cq *fidx2cq(struct c4iw_dev *rhp, u32 fidx)
+{
+	 return xa_load(&rhp->fids, fidx);
+}
+
 extern uint c4iw_max_read_depth;
 
 static inline int cur_max_read_depth(struct c4iw_dev *dev)
 {
 	return min(dev->rdev.lldi.max_ordird_qp, c4iw_max_read_depth);
 }
+
+struct dst_entry *find_route6(struct c4iw_dev *dev, __u8 *local_ip,
+		__u8 *peer_ip, __be16 local_port,
+		__be16 peer_port, u8 tos,
+		__u32 sin6_scope_id);
+struct dst_entry *find_route(struct c4iw_dev *dev, __be32 local_ip,
+		__be32 peer_ip, __be16 local_port,
+		__be16 peer_port, u8 tos);
+
+
+struct c4iw_xfrm_info {
+	bool ipsec_en;
+	bool ipsec_mode;
+	bool ipv6;
+	u16 ipsecidx;
+	u32 local_ip_addr[4];
+	u32 dest_ip_addr[4];
+};
 
 struct c4iw_pd {
 	struct ib_pd ibpd;
@@ -386,10 +485,11 @@ struct c4iw_cq {
 	struct c4iw_dev *rhp;
 	struct sk_buff *destroy_skb;
 	struct t4_cq cq;
+	u8 gsi_cq;
 	spinlock_t lock;
 	spinlock_t comp_handler_lock;
-	refcount_t refcnt;
-	struct completion cq_rel_comp;
+	atomic_t refcnt;
+	wait_queue_head_t wait;
 	struct c4iw_wr_wait *wr_waitp;
 };
 
@@ -408,7 +508,7 @@ struct c4iw_mpa_attributes {
 	u8 p2p_type;
 };
 
-struct c4iw_qp_attributes {
+struct c4iw_common_qp_attributes {
 	u32 scq;
 	u32 rcq;
 	u32 sq_num_entries;
@@ -437,31 +537,209 @@ struct c4iw_qp_attributes {
 	u8 send_term;
 };
 
+#define C4IW_ROCE_PSN_MASK 0xFFFFFF
+#define C4IW_ROCE_PORT 4791
+union c4iw_roce_sockaddr {
+	struct sockaddr_in saddr_in;
+	struct sockaddr_in6 saddr_in6;
+};
+
+struct c4iw_ah {
+	struct ib_ah ibah;
+	struct rdma_ah_attr attr;
+	struct sk_buff *ah_skb;
+	struct c4iw_dev *rhp;
+	struct c4iw_pd *php;
+	struct c4iw_wr_wait *wr_waitp;
+
+	/* AV */
+	union c4iw_roce_sockaddr sgid_addr;
+	union c4iw_roce_sockaddr dgid_addr;
+	union ib_gid dgid;
+	bool ipv4:1;
+	bool insert_vlan_tag:1;
+	u8 smac[ETH_ALEN];
+	u8 dmac[ETH_ALEN];
+	u16 src_port;
+	u16 dst_port;
+	u32 local_ip_addr[4];
+	u32 dest_ip_addr[4];
+	u32 flowlabel;
+	u16 p_key;
+	u32 dest_qp;
+	u8 gid_index;
+	u8 stat_rate;
+	u8 hop_limit;
+	u8 net_type;
+	u16 vlan_id;
+	u8 vlan_en;
+	u8 tclass;
+	u8 port;
+	u8 sl;
+
+	/* HW queues */
+	u16 ctrlq_idx;
+	u16 rss_qid;
+	u16 txq_idx;
+
+	/* add id for each ah */
+	int ah_id;
+
+	/* For route resolution */
+	struct l2t_entry *l2t;
+	struct dst_entry *dst;
+
+	/* For ipsec xfrm state */
+	struct c4iw_xfrm_info xfrm;
+};
+
+struct c4iw_gsi_attr {
+	u8 ttl;
+	u8 tos;
+	u32 snd_mss;
+	u16 vlan_tag;
+	u16 arp_idx;
+	u32 flow_label;
+	u8 udp_state;
+	u32 psn_nxt;
+	u32 lsn;
+	u32 epsn;
+	u32 psn_max;
+	u32 psn_una;
+	u32 cwnd;
+	u8 rexmit_thresh;
+	u8 rnr_nak_thresh;
+};
+
+struct c4iw_roce_qp_attributes {
+	u32 q_key;
+	u16 err_rq_idx;
+	u8 roce_tver;
+	u8 ack_credits;
+	u8 err_rq_idx_valid;
+	u32 pd_id;
+	u16 ord_size;
+	u16 ird_size;
+	u32 hwtid;
+	u32 atid;
+	u32 gsi_ftid;
+	struct c4iw_ah roce_ah;
+	struct c4iw_gsi_attr gsi_attr;
+};
+
+enum obj_type {
+	UNKNOWN,
+	RC_QP,
+	RAW_QP,
+	RAW_SRQ,
+	BASIC_SRQ,
+};
+
+struct db_fcl {
+	struct list_head db_fc_entry;
+	enum obj_type type;
+};
+
+enum qp_transport_type {
+	C4IW_TRANSPORT_IWARP,
+	C4IW_TRANSPORT_ROCEV2,
+};
+enum c4iw_qp_history {
+	ROCE_ACT_OPEN_REQ,
+	ROCE_ACT_OPEN_RPL,
+	ROCE_QP_REFED,
+	ROCE_QP_DEREFED,
+	ROCE_RDMA_INIT,
+	ROCE_RDMA_FINI
+};
+
 struct c4iw_qp {
 	struct ib_qp ibqp;
-	struct list_head db_fc_entry;
+	struct db_fcl fcl;
 	struct c4iw_dev *rhp;
+	struct net_device *netdev;
 	struct c4iw_ep *ep;
-	struct c4iw_qp_attributes attr;
+	struct c4iw_common_qp_attributes attr;
 	struct t4_wq wq;
 	spinlock_t lock;
 	struct mutex mutex;
-	wait_queue_head_t wait;
+	enum ib_qp_type qp_type;
+	enum qp_transport_type qp_trans;
 	int sq_sig_all;
+	int mtu;
+	u16 txq_id;
 	struct c4iw_srq *srq;
+	struct ch_filter gsi_filt;
+	struct c4iw_roce_qp_attributes roce_attr;
 	struct c4iw_ucontext *ucontext;
+	wait_queue_head_t wait;
 	struct c4iw_wr_wait *wr_waitp;
 	struct completion qp_rel_comp;
+	unsigned long history;
 	refcount_t qp_refcnt;
+	struct list_head db_fc_entry;
 };
+
+static inline void c4iw_copy_ip_ntohl(u32 *dst, __be32 *src)
+{
+	*dst++ = ntohl(*src++);
+	*dst++ = ntohl(*src++);
+	*dst++ = ntohl(*src++);
+	*dst = ntohl(*src);
+}
 
 static inline struct c4iw_qp *to_c4iw_qp(struct ib_qp *ibqp)
 {
 	return container_of(ibqp, struct c4iw_qp, ibqp);
 }
 
+static inline struct c4iw_qp *fcl_to_c4iw_qp(struct db_fcl *fcl)
+{
+	return container_of(fcl, struct c4iw_qp, fcl);
+}
+
+struct c4iw_raw_qp {
+	struct ib_qp ibqp;
+	struct db_fcl fcl;
+	struct c4iw_dev *rhp;
+	struct net_device *netdev;
+	struct c4iw_cq *scq;
+	struct c4iw_cq *rcq;
+	struct t4_iq iq;
+	struct t4_fl fl;
+	struct t4_eth_txq txq;
+	int txq_idx;
+	u32 state;
+	struct mutex mutex;
+	atomic_t refcnt;
+	wait_queue_head_t wait;
+	u16 vlan_pri;
+	int fid;
+	int nfids;
+};
+
+static inline struct c4iw_raw_qp *to_c4iw_raw_qp(struct ib_qp *ibqp)
+{
+	return container_of(ibqp, struct c4iw_raw_qp, ibqp);
+}
+
+static inline struct c4iw_raw_qp *fcl_to_c4iw_raw_qp(struct db_fcl *fcl)
+{
+	return container_of(fcl, struct c4iw_raw_qp, fcl);
+}
+
+struct c4iw_raw_srq {
+	struct ib_srq ibsrq;
+	struct db_fcl fcl;
+	struct c4iw_dev *dev;
+	struct net_device *netdev;
+	struct t4_iq iq;
+	struct t4_fl fl;
+};
+
 struct c4iw_srq {
 	struct ib_srq ibsrq;
+	struct db_fcl fcl;
 	struct list_head db_fc_entry;
 	struct c4iw_dev *rhp;
 	struct t4_srq wq;
@@ -478,6 +756,16 @@ struct c4iw_srq {
 static inline struct c4iw_srq *to_c4iw_srq(struct ib_srq *ibsrq)
 {
 	return container_of(ibsrq, struct c4iw_srq, ibsrq);
+}
+
+static inline struct c4iw_raw_srq *to_c4iw_raw_srq(struct ib_srq *ibsrq)
+{
+	return container_of(ibsrq, struct c4iw_raw_srq, ibsrq);
+}
+
+static inline struct c4iw_raw_srq *fcl_to_c4iw_raw_srq(struct db_fcl *fcl)
+{
+	return container_of(fcl, struct c4iw_raw_srq, fcl);
 }
 
 struct c4iw_ucontext {
@@ -592,11 +880,9 @@ enum c4iw_qp_attr_mask {
 				     C4IW_QP_ATTR_QP_CONTEXT_ACTIVATE)
 };
 
-int c4iw_modify_qp(struct c4iw_dev *rhp,
-				struct c4iw_qp *qhp,
-				enum c4iw_qp_attr_mask mask,
-				struct c4iw_qp_attributes *attrs,
-				int internal);
+
+int c4iw_modify_iw_rc_qp(struct c4iw_qp *qhp, enum c4iw_qp_attr_mask mask,
+               struct c4iw_common_qp_attributes *attrs, int internal);
 
 enum c4iw_qp_state {
 	C4IW_QP_STATE_IDLE,
@@ -643,12 +929,131 @@ static inline int to_ib_qp_state(int c4iw_qp_state)
 	return IB_QPS_ERR;
 }
 
+enum c4iw_v2_qp_state {
+       C4IW_QP_V2_STATE_RESET,
+       C4IW_QP_V2_STATE_IDLE,
+       C4IW_QP_V2_STATE_RTR,
+       C4IW_QP_V2_STATE_RTS,
+       C4IW_QP_V2_STATE_ERROR,
+       C4IW_QP_V2_STATE_TERMINATE,
+       C4IW_QP_V2_STATE_CLOSING,
+       C4IW_QP_V2_STATE_TOT
+};
+
+static inline int c4iw_convert_v2_state(enum ib_qp_state ib_state)
+{
+       switch (ib_state) {
+       case IB_QPS_RESET:
+               return C4IW_QP_V2_STATE_RESET;
+       case IB_QPS_INIT:
+               return C4IW_QP_V2_STATE_IDLE;
+       case IB_QPS_RTR:
+               return C4IW_QP_V2_STATE_RTR;
+       case IB_QPS_RTS:
+               return C4IW_QP_V2_STATE_RTS;
+       case IB_QPS_SQD:
+               return C4IW_QP_V2_STATE_CLOSING;
+       case IB_QPS_SQE:
+               return C4IW_QP_V2_STATE_TERMINATE;
+       case IB_QPS_ERR:
+               return C4IW_QP_V2_STATE_ERROR;
+       default:
+               return -1;
+       }
+}
+
+static inline int v2_to_ib_qp_state(int c4iw_v2_qp_state)
+{
+       switch (c4iw_v2_qp_state) {
+       case C4IW_QP_V2_STATE_RESET:
+               return IB_QPS_RESET;
+       case C4IW_QP_V2_STATE_IDLE:
+               return IB_QPS_INIT;
+       case C4IW_QP_V2_STATE_RTR:
+               return IB_QPS_RTR;
+       case C4IW_QP_V2_STATE_RTS:
+               return IB_QPS_RTS;
+       case C4IW_QP_V2_STATE_CLOSING:
+               return IB_QPS_SQD;
+       case C4IW_QP_V2_STATE_TERMINATE:
+               return IB_QPS_SQE;
+       case C4IW_QP_V2_STATE_ERROR:
+               return IB_QPS_ERR;
+       }
+       return IB_QPS_ERR;
+}
+
+enum c4iw_v2_ing_cqe_opcode {
+       IB_CQE_V2_OPC_SEND_FIRST,
+       IB_CQE_V2_OPC_SEND_MIDDLE,
+       IB_CQE_V2_OPC_SEND_LAST,
+       IB_CQE_V2_OPC_SEND_LAST_WITH_IMM,
+       IB_CQE_V2_OPC_SEND_ONLY,
+       IB_CQE_V2_OPC_SEND_ONLY_WITH_IMM,
+       IB_CQE_V2_OPC_WRITE_FIRST,
+       IB_CQE_V2_OPC_WRITE_MIDDLE,
+       IB_CQE_V2_OPC_WRITE_LAST,
+       IB_CQE_V2_OPC_WRITE_LAST_WITH_IMM,
+       IB_CQE_V2_OPC_WRITE_ONLY,
+       IB_CQE_V2_OPC_WRITE_ONLY_WITH_IMM,
+       IB_CQE_V2_OPC_READ_REQUEST,
+       IB_CQE_V2_OPC_READ_RESPONSE_FIRST,
+       IB_CQE_V2_OPC_READ_RESPONSE_MIDDLE,
+       IB_CQE_V2_OPC_READ_RESPONSE_LAST,
+       IB_CQE_V2_OPC_READ_RESPONSE_ONLY,
+       IB_CQE_V2_OPC_ACK,
+       IB_CQE_V2_OPC_SEND_LAST_WITH_INV = 0x16,
+       IB_CQE_V2_OPC_SEND_ONLY_WITH_INV = 0x17,
+};
+
+static inline int v2_ib_opc_to_fw_opc(enum c4iw_v2_ing_cqe_opcode opcode)
+{
+       switch (opcode) {
+       case IB_CQE_V2_OPC_SEND_FIRST:
+       case IB_CQE_V2_OPC_SEND_MIDDLE:
+       case IB_CQE_V2_OPC_SEND_LAST:
+       case IB_CQE_V2_OPC_SEND_ONLY:
+               return FW_RI_SEND;
+       case IB_CQE_V2_OPC_SEND_LAST_WITH_INV:
+       case IB_CQE_V2_OPC_SEND_ONLY_WITH_INV:
+               return FW_RI_SEND_WITH_INV;
+#if 0 //Bhar: enable send_imm when fw enables it
+       case IB_CQE_V2_OPC_SEND_LAST_WITH_IMM:
+       case IB_CQE_V2_OPC_SEND_ONLY_WITH_IMM:
+               return FW_RI_SEND_IMMEDIATE;
+#endif
+       case IB_CQE_V2_OPC_WRITE_FIRST:
+       case IB_CQE_V2_OPC_WRITE_MIDDLE:
+       case IB_CQE_V2_OPC_WRITE_LAST:
+       case IB_CQE_V2_OPC_WRITE_ONLY:
+               return FW_RI_RDMA_WRITE;
+       case IB_CQE_V2_OPC_WRITE_LAST_WITH_IMM:
+       case IB_CQE_V2_OPC_WRITE_ONLY_WITH_IMM:
+               return FW_RI_WRITE_IMMEDIATE;
+       case IB_CQE_V2_OPC_READ_REQUEST:
+               return FW_RI_READ_REQ;
+       case IB_CQE_V2_OPC_READ_RESPONSE_FIRST:
+       case IB_CQE_V2_OPC_READ_RESPONSE_MIDDLE:
+       case IB_CQE_V2_OPC_READ_RESPONSE_LAST:
+       case IB_CQE_V2_OPC_READ_RESPONSE_ONLY:
+               return FW_RI_READ_RESP;
+       default:
+               return 0x1F; //Bhar: setting opc to reserved code to deal with it in poll_cq_one()
+       }
+}
+
 static inline u32 c4iw_ib_to_tpt_access(int a)
 {
 	return (a & IB_ACCESS_REMOTE_WRITE ? FW_RI_MEM_ACCESS_REM_WRITE : 0) |
 	       (a & IB_ACCESS_REMOTE_READ ? FW_RI_MEM_ACCESS_REM_READ : 0) |
 	       (a & IB_ACCESS_LOCAL_WRITE ? FW_RI_MEM_ACCESS_LOCAL_WRITE : 0) |
 	       FW_RI_MEM_ACCESS_LOCAL_READ;
+}
+
+static inline u32 c4iw_ib_to_tpt_bind_access(int acc)
+{
+	return (acc & IB_ACCESS_REMOTE_WRITE ? FW_RI_MEM_ACCESS_REM_WRITE : 0) |
+		(acc & IB_ACCESS_REMOTE_READ ? FW_RI_MEM_ACCESS_REM_READ : 0);
 }
 
 enum c4iw_mmid_state {
@@ -686,7 +1091,11 @@ enum c4iw_mmid_state {
 		 ep, kref_read(&((ep)->kref)));				\
 	kref_get(&((ep)->kref));					\
 }
+
 void _c4iw_free_ep(struct kref *kref);
+struct sk_buff *get_skb(struct sk_buff *skb, int len, gfp_t gfp);
+int c4iw_l2t_send(struct c4iw_rdev *rdev, struct sk_buff *skb,
+		struct l2t_entry *l2t);
 
 struct mpa_message {
 	u8 key[16];
@@ -808,6 +1217,7 @@ enum c4iw_ep_history {
 	ACT_RETRY_NOMEM         = 20,
 	ACT_RETRY_INUSE         = 21,
 	CLOSE_CON_RPL		= 22,
+	KILLED                  = 23,
 	EP_DISC_FAIL		= 24,
 	QP_REFED		= 25,
 	QP_DEREFED		= 26,
@@ -850,6 +1260,7 @@ struct c4iw_ep_common {
 	struct c4iw_wr_wait *wr_waitp;
 	unsigned long flags;
 	unsigned long history;
+	struct list_head glist_entry;
 };
 
 struct c4iw_listen_ep {
@@ -895,6 +1306,7 @@ struct c4iw_ep {
 	unsigned int retry_count;
 	int snd_win;
 	int rcv_win;
+	u16 ipsecidx;
 	u32 snd_wscale;
 	struct c4iw_ep_stats stats;
 	u32 srqe_idx;
@@ -912,6 +1324,11 @@ static inline struct c4iw_listen_ep *to_listen_ep(struct iw_cm_id *cm_id)
 	return cm_id->provider_data;
 }
 
+static inline struct c4iw_ah *to_c4iw_ah(struct ib_ah *ibah)
+{
+	return container_of(ibah, struct c4iw_ah, ibah);
+}
+
 static inline int ocqp_supported(const struct cxgb4_lld_info *infop)
 {
 #if defined(__i386__) || defined(__x86_64__) || defined(CONFIG_PPC64)
@@ -921,89 +1338,123 @@ static inline int ocqp_supported(const struct cxgb4_lld_info *infop)
 #endif
 }
 
+
 typedef int (*c4iw_handler_func)(struct c4iw_dev *dev, struct sk_buff *skb);
 
+int c4iw_ep_redirect(void *ctx, struct dst_entry *old, struct dst_entry *new,
+                     struct l2t_entry *l2t);
+void c4iw_put_qpid(struct c4iw_rdev *rdev, u32 qpid,
+                  struct cxgb4_dev_ucontext *uctx);
 int c4iw_init_resource(struct c4iw_rdev *rdev, u32 nr_tpt);
+int c4iw_init_ctrl_qp(struct c4iw_rdev *rdev);
 int c4iw_pblpool_create(struct c4iw_rdev *rdev);
+int c4iw_rrqtpool_create(struct c4iw_rdev *rdev);
 int c4iw_ocqp_pool_create(struct c4iw_rdev *rdev);
 void c4iw_pblpool_destroy(struct c4iw_rdev *rdev);
 void c4iw_rqtpool_destroy(struct c4iw_rdev *rdev);
+void c4iw_rrqtpool_destroy(struct c4iw_rdev *rdev);
 void c4iw_ocqp_pool_destroy(struct c4iw_rdev *rdev);
+int c4iw_destroy_ctrl_qp(struct c4iw_rdev *rdev);
 void c4iw_destroy_resource(struct c4iw_rdev *rdev);
 void c4iw_register_device(struct work_struct *work);
 void c4iw_unregister_device(struct c4iw_dev *dev);
 int __init c4iw_cm_init(void);
 void c4iw_cm_term(void);
 int c4iw_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc);
-int c4iw_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
-		   const struct ib_send_wr **bad_wr);
+int c4iw_iw_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
+                   const struct ib_send_wr **bad_wr);
+int c4iw_roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
+                       const struct ib_send_wr **bad_wr);
 int c4iw_post_receive(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
-		      const struct ib_recv_wr **bad_wr);
-int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
-int c4iw_create_listen(struct iw_cm_id *cm_id, int backlog);
-int c4iw_destroy_listen(struct iw_cm_id *cm_id);
-int c4iw_accept_cr(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
-int c4iw_reject_cr(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len);
-void c4iw_qp_add_ref(struct ib_qp *qp);
-void c4iw_qp_rem_ref(struct ib_qp *qp);
+                      const struct ib_recv_wr **bad_wr);
+int c4iw_iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
+int c4iw_iw_create_listen(struct iw_cm_id *cm_id, int backlog);
+int c4iw_iw_destroy_listen(struct iw_cm_id *cm_id);
+int c4iw_iw_accept_cr(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param);
+int c4iw_iw_reject_cr(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len);
+void c4iw_iw_qp_add_ref(struct ib_qp *qp);
+void c4iw_iw_qp_rem_ref(struct ib_qp *qp);
 struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
-			    u32 max_num_sg);
+                            u32 max_num_sg);
 int c4iw_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg, int sg_nents,
-		   unsigned int *sg_offset);
+                   unsigned int *sg_offset);
+int c4iw_dealloc_mw(struct ib_mw *mw);
 void c4iw_dealloc(struct uld_ctx *ctx);
+void c4iw_dispatch_event(struct ib_device* ibdev,
+                          u8 port_num,
+                          enum ib_event_type type);
+int c4iw_alloc_mw(struct ib_mw *ibmw, struct ib_udata *udata);
 struct ib_mr *c4iw_reg_user_mr(struct ib_pd *pd, u64 start,
-					   u64 length, u64 virt, int acc,
-					   struct ib_udata *udata);
+                                           u64 length, u64 virt, int acc,
+                                           struct ib_udata *udata);
 struct ib_mr *c4iw_get_dma_mr(struct ib_pd *pd, int acc);
 int c4iw_dereg_mr(struct ib_mr *ib_mr, struct ib_udata *udata);
 int c4iw_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata);
 void c4iw_cq_rem_ref(struct c4iw_cq *chp);
 int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		   struct uverbs_attr_bundle *attrs);
+                   struct uverbs_attr_bundle *attrs);
+int c4iw_resize_cq(struct ib_cq *cq, int cqe, struct ib_udata *udata);
 int c4iw_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags);
 int c4iw_modify_srq(struct ib_srq *ib_srq, struct ib_srq_attr *attr,
-		    enum ib_srq_attr_mask srq_attr_mask,
-		    struct ib_udata *udata);
+                    enum ib_srq_attr_mask srq_attr_mask,
+                    struct ib_udata *udata);
 int c4iw_destroy_srq(struct ib_srq *ib_srq, struct ib_udata *udata);
 int c4iw_create_srq(struct ib_srq *srq, struct ib_srq_init_attr *attrs,
-		    struct ib_udata *udata);
+                    struct ib_udata *udata);
 int c4iw_destroy_qp(struct ib_qp *ib_qp, struct ib_udata *udata);
 int c4iw_create_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
-		   struct ib_udata *udata);
-int c4iw_ib_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
-				 int attr_mask, struct ib_udata *udata);
-int c4iw_ib_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
-		     int attr_mask, struct ib_qp_init_attr *init_attr);
-struct ib_qp *c4iw_get_qp(struct ib_device *dev, int qpn);
+                   struct ib_udata *udata);
+int c4iw_iw_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
+                                 int attr_mask, struct ib_udata *udata);
+int c4iw_roce_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
+                       int attr_mask, struct ib_udata *udata);
+int c4iw_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
+                     int attr_mask, struct ib_qp_init_attr *init_attr);
+struct ib_qp *c4iw_iw_get_qp(struct ib_device *dev, int qpn);
+u32 c4iw_rrqtpool_alloc(struct c4iw_rdev *rdev, int size);
+void c4iw_rrqtpool_free(struct c4iw_rdev *rdev, u32 addr, int size);
 u32 c4iw_rqtpool_alloc(struct c4iw_rdev *rdev, int size);
 void c4iw_rqtpool_free(struct c4iw_rdev *rdev, u32 addr, int size);
 u32 c4iw_pblpool_alloc(struct c4iw_rdev *rdev, int size);
 void c4iw_pblpool_free(struct c4iw_rdev *rdev, u32 addr, int size);
 void c4iw_flush_hw_cq(struct c4iw_cq *chp, struct c4iw_qp *flush_qhp);
-void c4iw_count_rcqes(struct t4_cq *cq, struct t4_wq *wq, int *count);
+void c4iw_count_rcqes(struct t4_cq *cq, struct t4_wq *wq, int *count, enum qp_transport_type prot);
 int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp);
-int c4iw_flush_rq(struct t4_wq *wq, struct t4_cq *cq, int count);
+int c4iw_flush_rq(struct c4iw_qp *wq, struct t4_cq *cq, int count);
 int c4iw_flush_sq(struct c4iw_qp *qhp);
-int c4iw_ev_handler(struct c4iw_dev *rnicp, u32 qid);
+int c4iw_ev_handler(struct c4iw_dev *rnicp, u32 qid, u32 pidx);
+u16 c4iw_rqes_posted(struct c4iw_qp *qhp);
+int c4iw_post_terminate(struct c4iw_qp *qhp, struct t4_cqe *err_cqe);
 void print_tpte(struct c4iw_dev *dev, u32 stag);
 void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe);
 
 extern struct cxgb4_client t4c_client;
 extern c4iw_handler_func c4iw_handlers[NUM_CPL_CMDS];
+struct ib_qp *c4iw_create_raw_qp(struct ib_pd *pd,
+                                 struct ib_qp_init_attr *attrs,
+                                 struct ib_udata *udata);
 void __iomem *c4iw_bar2_addrs(struct c4iw_rdev *rdev, unsigned int qid,
-			      enum cxgb4_bar2_qtype qtype,
-			      unsigned int *pbar2_qid, u64 *pbar2_pa);
-extern void c4iw_log_wr_stats(struct t4_wq *wq, struct t4_cqe *cqe);
+                              enum cxgb4_bar2_qtype qtype,
+                              unsigned int *pbar2_qid, u64 *pbar2_pa);
+extern void c4iw_log_wr_stats(struct t4_wq *wq, struct t4_cqe *cqe, enum qp_transport_type prot);
 extern int c4iw_wr_log;
 extern int db_fc_threshold;
 extern int db_coalescing_threshold;
 extern int use_dsgl;
+extern int wd_disable_inaddr_any;
+extern int roce_mode;
 void c4iw_invalidate_mr(struct c4iw_dev *rhp, u32 rkey);
 void c4iw_dispatch_srq_limit_reached_event(struct c4iw_srq *srq);
+u32 cxgb4_uld_ocqp_pool_alloc(struct net_device *dev, int size);
+void cxgb4_uld_ocqp_pool_free(struct net_device *dev, u32 addr, int size);
+
+#ifndef IB_QPT_RAW_ETH
+#define IB_QPT_RAW_ETH 8
+#endif
 void c4iw_copy_wr_to_srq(struct t4_srq *srq, union t4_recv_wr *wqe, u8 len16);
 void c4iw_flush_srqidx(struct c4iw_qp *qhp, u32 srqidx);
 int c4iw_post_srq_recv(struct ib_srq *ibsrq, const struct ib_recv_wr *wr,
-		       const struct ib_recv_wr **bad_wr);
+                       const struct ib_recv_wr **bad_wr);
 struct c4iw_wr_wait *c4iw_alloc_wr_wait(gfp_t gfp);
 
 int c4iw_fill_res_mr_entry(struct sk_buff *msg, struct ib_mr *ibmr);
