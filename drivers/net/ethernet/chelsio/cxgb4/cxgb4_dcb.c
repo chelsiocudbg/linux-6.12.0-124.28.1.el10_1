@@ -273,13 +273,24 @@ bad_state_transition:
 void cxgb4_dcb_handle_fw_update(struct adapter *adap,
 				const struct fw_port_cmd *pcmd)
 {
-	const union fw_port_dcb *fwdcb = &pcmd->u.dcb;
 	int port = FW_PORT_CMD_PORTID_G(be32_to_cpu(pcmd->op_to_portid));
-	struct net_device *dev = adap->port[adap->chan_map[port]];
-	struct port_info *pi = netdev_priv(dev);
-	struct port_dcb_info *dcb = &pi->dcb;
+	const union fw_port_dcb *fwdcb = &pcmd->u.dcb;
 	int dcb_type = pcmd->u.dcb.pgid.type;
+	struct port_dcb_info *dcb;
 	int dcb_running_version;
+	struct net_device *dev;
+	struct port_info *pi;
+
+	dev = cxgb4_port_chan_to_netdev(adap, port);
+	if (!dev) {
+		dev_warn(adap->pdev_dev,
+			 "Could not get netdevice for handling DCB FW update for port: %d\n",
+			 port);
+		return;
+	}
+
+	pi = netdev_priv(dev);
+	dcb = &pi->dcb;
 
 	/* Handle Firmware DCB Control messages separately since they drive
 	 * our state machine.

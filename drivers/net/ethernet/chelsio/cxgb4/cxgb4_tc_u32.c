@@ -173,8 +173,7 @@ int cxgb4_config_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 	 * rule. Only insert rule if its prio doesn't conflict with
 	 * existing rules.
 	 */
-	filter_id = cxgb4_get_free_ftid(dev, inet_family, false,
-					TC_U32_NODE(cls->knode.handle));
+	filter_id = CXGB4_FILTER_ID_ANY & 0x0fffffff;
 	if (filter_id < 0) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "No free LETCAM index available");
@@ -197,7 +196,7 @@ int cxgb4_config_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 
 	memset(&fs, 0, sizeof(fs));
 
-	if (filter_id < adapter->tids.nhpftids)
+	if (filter_id < adapter->tidinfo.hpftids.size)
 		fs.prio = 1;
 	fs.tc_prio = cls->common.prio;
 	fs.tc_cookie = cls->knode.handle;
@@ -334,7 +333,7 @@ int cxgb4_config_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 	fs.type = is_ipv6 ? 1 : 0;
 
 	/* Set the filter */
-	ret = cxgb4_set_filter(dev, filter_id, &fs);
+	ret = cxgb4_filter_create(dev, filter_id, &fs, NULL, GFP_KERNEL);
 	if (ret)
 		goto out;
 
@@ -365,41 +364,36 @@ int cxgb4_delete_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 		return -EOPNOTSUPP;
 
 	/* Fetch the location to delete the filter. */
-	max_tids = adapter->tids.nhpftids + adapter->tids.nftids;
+	max_tids = adapter->tidinfo.hpftids.size + adapter->tidinfo.ftids.size;
 
-	spin_lock_bh(&adapter->tids.ftid_lock);
 	filter_id = 0;
 	while (filter_id < max_tids) {
-		if (filter_id < adapter->tids.nhpftids) {
+		if (filter_id < adapter->tidinfo.hpftids.size) {
 			i = filter_id;
-			f = &adapter->tids.hpftid_tab[i];
 			if (f->valid && f->fs.tc_cookie == cls->knode.handle) {
 				found = true;
 				break;
 			}
 
-			i = find_next_bit(adapter->tids.hpftid_bmap,
-					  adapter->tids.nhpftids, i + 1);
-			if (i >= adapter->tids.nhpftids) {
-				filter_id = adapter->tids.nhpftids;
+			i = 0;
+			if (i >= adapter->tidinfo.hpftids.size) {
+				filter_id = adapter->tidinfo.hpftids.size;
 				continue;
 			}
 
 			filter_id = i;
 		} else {
-			i = filter_id - adapter->tids.nhpftids;
-			f = &adapter->tids.ftid_tab[i];
+			i = filter_id - adapter->tidinfo.hpftids.size;
 			if (f->valid && f->fs.tc_cookie == cls->knode.handle) {
 				found = true;
 				break;
 			}
 
-			i = find_next_bit(adapter->tids.ftid_bmap,
-					  adapter->tids.nftids, i + 1);
-			if (i >= adapter->tids.nftids)
+			i = 0;
+			if (i >= adapter->tidinfo.ftids.size)
 				break;
 
-			filter_id = i + adapter->tids.nhpftids;
+			filter_id = i + adapter->tidinfo.hpftids.size;
 		}
 
 		nslots = 0;
@@ -412,8 +406,6 @@ int cxgb4_delete_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 
 		filter_id += nslots;
 	}
-	spin_unlock_bh(&adapter->tids.ftid_lock);
-
 	if (!found)
 		return -ERANGE;
 
@@ -437,7 +429,7 @@ int cxgb4_delete_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 			return -EINVAL;
 	}
 
-	ret = cxgb4_del_filter(dev, filter_id, NULL);
+	ret = cxgb4_filter_delete(dev, filter_id, NULL, NULL, GFP_KERNEL);
 	if (ret)
 		goto out;
 
@@ -455,7 +447,7 @@ int cxgb4_delete_knode(struct net_device *dev, struct tc_cls_u32_offload *cls)
 				if (!test_bit(j, link->tid_map))
 					continue;
 
-				ret = __cxgb4_del_filter(dev, j, NULL, NULL);
+				ret = cxgb4_filter_delete(dev, j, NULL, NULL, GFP_KERNEL);
 				if (ret)
 					goto out;
 
@@ -494,7 +486,7 @@ void cxgb4_cleanup_tc_u32(struct adapter *adap)
 
 struct cxgb4_tc_u32_table *cxgb4_init_tc_u32(struct adapter *adap)
 {
-	unsigned int max_tids = adap->tids.nftids + adap->tids.nhpftids;
+	unsigned int max_tids = adap->tidinfo.ftids.size + adap->tidinfo.hpftids.size;
 	struct cxgb4_tc_u32_table *t;
 	unsigned int i;
 

@@ -796,20 +796,17 @@ int cxgb4_validate_flow_actions(struct net_device *dev,
 
 static void cxgb4_tc_flower_hash_prio_add(struct adapter *adap, u32 tc_prio)
 {
-	spin_lock_bh(&adap->tids.ftid_lock);
-	if (adap->tids.tc_hash_tids_max_prio < tc_prio)
-		adap->tids.tc_hash_tids_max_prio = tc_prio;
-	spin_unlock_bh(&adap->tids.ftid_lock);
+	if (adap->tidinfo.tc_hash_tids_max_prio < tc_prio)
+		adap->tidinfo.tc_hash_tids_max_prio = tc_prio;
 }
 
 static void cxgb4_tc_flower_hash_prio_del(struct adapter *adap, u32 tc_prio)
 {
-	struct tid_info *t = &adap->tids;
+	struct cxgb4_tid_info *t = &adap->tidinfo;
 	struct ch_tc_flower_entry *fe;
 	struct rhashtable_iter iter;
 	u32 found = 0;
 
-	spin_lock_bh(&t->ftid_lock);
 	/* Bail if the current rule is not the one with the max
 	 * prio.
 	 */
@@ -849,7 +846,6 @@ static void cxgb4_tc_flower_hash_prio_del(struct adapter *adap, u32 tc_prio)
 		t->tc_hash_tids_max_prio = 0;
 
 out_unlock:
-	spin_unlock_bh(&t->ftid_lock);
 }
 
 int cxgb4_flow_rule_replace(struct net_device *dev, struct flow_rule *rule,
@@ -870,22 +866,20 @@ int cxgb4_flow_rule_replace(struct net_device *dev, struct flow_rule *rule,
 	cxgb4_process_flow_match(dev, rule, fs);
 	cxgb4_process_flow_actions(dev, &rule->action, fs);
 
-	fs->hash = is_filter_exact_match(adap, fs);
 	inet_family = fs->type ? PF_INET6 : PF_INET;
 
 	/* Get a free filter entry TID, where we can insert this new
 	 * rule. Only insert rule if its prio doesn't conflict with
 	 * existing rules.
 	 */
-	fidx = cxgb4_get_free_ftid(dev, inet_family, fs->hash,
-				   tc_prio);
+	fidx = CXGB4_FILTER_ID_ANY & 0x0fffffff;
 	if (fidx < 0) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "No free LETCAM index available");
 		return -ENOMEM;
 	}
 
-	if (fidx < adap->tids.nhpftids) {
+	if (fidx < adap->tidinfo.hpftids.size) {
 		fs->prio = 1;
 		fs->hash = 0;
 	}
@@ -899,7 +893,7 @@ int cxgb4_flow_rule_replace(struct net_device *dev, struct flow_rule *rule,
 	fs->tc_prio = tc_prio;
 
 	init_completion(&ctx.completion);
-	ret = __cxgb4_set_filter(dev, fidx, fs, &ctx);
+	ret = cxgb4_filter_create(dev, fidx, fs, &ctx, GFP_KERNEL);
 	if (ret) {
 		NL_SET_ERR_MSG_FMT_MOD(extack, "filter creation err %d", ret);
 		return ret;
@@ -959,7 +953,7 @@ del_filter:
 	if (fs->hash)
 		cxgb4_tc_flower_hash_prio_del(adap, cls->common.prio);
 
-	cxgb4_del_filter(dev, ch_flower->filter_id, &ch_flower->fs);
+	cxgb4_filter_delete(dev, ch_flower->filter_id, &ch_flower->fs, NULL, GFP_KERNEL);
 
 free_entry:
 	kfree(ch_flower);
@@ -975,7 +969,7 @@ int cxgb4_flow_rule_destroy(struct net_device *dev, u32 tc_prio,
 
 	hash = fs->hash;
 
-	ret = cxgb4_del_filter(dev, tid, fs);
+	ret = cxgb4_filter_delete(dev, tid, fs, NULL, GFP_KERNEL);
 	if (ret)
 		return ret;
 
@@ -1026,7 +1020,7 @@ static void ch_flower_stats_handler(struct work_struct *work)
 
 		while ((flower_entry = rhashtable_walk_next(&iter)) &&
 		       !IS_ERR(flower_entry)) {
-			ret = cxgb4_get_filter_counters(adap->port[0],
+			ret = cxgb4_filter_get_counters(adap->port[0],
 							flower_entry->filter_id,
 							&packets, &bytes,
 							flower_entry->fs.hash);
@@ -1072,7 +1066,7 @@ int cxgb4_tc_flower_stats(struct net_device *dev,
 		goto err;
 	}
 
-	ret = cxgb4_get_filter_counters(dev, ch_flower->filter_id,
+	ret = cxgb4_filter_get_counters(dev, ch_flower->filter_id,
 					&packets, &bytes,
 					ch_flower->fs.hash);
 	if (ret < 0)

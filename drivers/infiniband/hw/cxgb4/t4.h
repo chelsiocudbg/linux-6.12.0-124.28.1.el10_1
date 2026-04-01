@@ -38,7 +38,6 @@
 #include "t4_tcb.h"
 #include "t4fw_ri_api.h"
 
-#define T4_MAX_NUM_PD 65536
 #define T4_MAX_MR_SIZE (~0ULL)
 #define T4_PAGESIZE_MASK 0xffff000  /* 4KB-128MB */
 #define T4_STAG_UNSET 0xffffffff
@@ -62,7 +61,6 @@ struct t4_status_page {
 };
 
 #define T4_RQT_ENTRY_SHIFT 6
-#define T4_RQT_ENTRY_SIZE  BIT(T4_RQT_ENTRY_SHIFT)
 #define T4_EQ_ENTRY_SIZE 64
 
 #define T4_SQ_NUM_SLOTS 5

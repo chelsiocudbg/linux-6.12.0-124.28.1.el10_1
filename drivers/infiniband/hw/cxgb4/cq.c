@@ -35,7 +35,7 @@
 #include "iw_cxgb4.h"
 
 static void destroy_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
-		       struct c4iw_dev_ucontext *uctx, struct sk_buff *skb,
+		       struct cxgb4_dev_ucontext *uctx, struct sk_buff *skb,
 		       struct c4iw_wr_wait *wr_waitp)
 {
 	struct fw_ri_res_wr *res_wr;
@@ -64,11 +64,11 @@ static void destroy_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
 	dma_free_coherent(&(rdev->lldi.pdev->dev),
 			  cq->memsize, cq->queue,
 			  dma_unmap_addr(cq, mapping));
-	c4iw_put_cqid(rdev, cq->cqid, uctx);
+	cxgb4_uld_put_cqid(uctx, cq->cqid);
 }
 
 static int create_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
-		     struct c4iw_dev_ucontext *uctx,
+		     struct cxgb4_dev_ucontext *uctx,
 		     struct c4iw_wr_wait *wr_waitp)
 {
 	struct fw_ri_res_wr *res_wr;
@@ -82,7 +82,7 @@ static int create_cq(struct c4iw_rdev *rdev, struct t4_cq *cq,
 	if (user)
 		ucontext = container_of(uctx, struct c4iw_ucontext, uctx);
 
-	cq->cqid = c4iw_get_cqid(rdev, uctx);
+	cq->cqid = cxgb4_uld_get_cqid(rdev->rdma_res, uctx);
 	if (!cq->cqid) {
 		ret = -ENOMEM;
 		goto err1;
@@ -176,7 +176,7 @@ err4:
 err3:
 	kfree(cq->sw_queue);
 err2:
-	c4iw_put_cqid(rdev, cq->cqid, uctx);
+	cxgb4_uld_put_cqid(uctx, cq->cqid);
 err1:
 	return ret;
 }
@@ -1103,7 +1103,7 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 			goto err_free_mm;
 
 		memset(&uresp, 0, sizeof(uresp));
-		uresp.qid_mask = rhp->rdev.cqmask;
+		uresp.qid_mask = rhp->rdev.rdma_res->cqmask;
 		uresp.cqid = chp->cq.cqid;
 		uresp.size = chp->cq.size;
 		uresp.memsize = chp->cq.memsize;

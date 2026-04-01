@@ -37,7 +37,13 @@
 
 #include <linux/export.h>
 
-struct t4_debugfs_entry {
+struct t4_linux_debugfs_data {
+       struct adapter *adap;
+       unsigned int data;
+       unsigned char coreid;
+};
+
+struct t4_linux_debugfs_entry {
 	const char *name;
 	const struct file_operations *ops;
 	umode_t mode;
@@ -52,6 +58,19 @@ struct seq_tab {
 	char data[];             /* the table data */
 };
 
+#define DEFINE_SIMPLE_DEBUGFS_FILE(name) \
+static int name##_open(struct inode *inode, struct file *file) \
+{ \
+        return single_open(file, name##_show, inode->i_private); \
+} \
+static const struct file_operations name##_debugfs_fops = { \
+        .owner   = THIS_MODULE, \
+        .open    = name##_open, \
+        .read    = seq_read, \
+        .llseek  = seq_lseek, \
+        .release = single_release \
+}
+
 static inline unsigned int hex2val(char c)
 {
 	return isdigit(c) ? c - '0' : tolower(c) - 'a' + 10;
@@ -62,9 +81,9 @@ struct seq_tab *seq_open_tab(struct file *f, unsigned int rows,
 			     int (*show)(struct seq_file *seq, void *v, int i));
 
 int t4_setup_debugfs(struct adapter *adap);
-void add_debugfs_files(struct adapter *adap,
-		       struct t4_debugfs_entry *files,
-		       unsigned int nfiles);
+void add_debugfs_files(struct adapter *adap, struct dentry *dentry,
+                      unsigned char coreid, struct t4_linux_debugfs_entry *f,
+                      unsigned int n);
 int mem_open(struct inode *inode, struct file *file);
-
+int cxgb4_setup_debugfs(struct adapter *adap);
 #endif

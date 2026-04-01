@@ -45,6 +45,7 @@
 #define PF_BASE(idx) (PF0_BASE + (idx) * PF_STRIDE)
 #define PF_REG(idx, reg) (PF_BASE(idx) + (reg))
 
+#define NUM_UP_TSCH_CHANNEL_INSTANCES 4
 #define NUM_CIM_CTL_TSCH_CHANNEL_INSTANCES 4
 #define NUM_CIM_CTL_TSCH_CHANNEL_TSCH_CLASS_INSTANCES 16
 
@@ -65,6 +66,8 @@
 #define PCIE_MAILBOX_REG(reg_addr, idx) ((reg_addr) + (idx) * 8)
 #define MC_BIST_STATUS_REG(reg_addr, idx) ((reg_addr) + (idx) * 4)
 #define EDC_BIST_STATUS_REG(reg_addr, idx) ((reg_addr) + (idx) * 4)
+
+#define T7_PCIE_MEM_ACCESS_REG(reg_addr, idx) ((reg_addr) + (idx) * 16)
 
 #define PCIE_FW_REG(reg_addr, idx) ((reg_addr) + (idx) * 4)
 
@@ -109,8 +112,17 @@
 #define CIDXINC_M    0xfffU
 #define CIDXINC_V(x) ((x) << CIDXINC_S)
 
-#define SGE_CONTROL_A	0x1008
 #define SGE_CONTROL2_A	0x1124
+
+#define RXCPLMODE_ISCSI_S    28
+#define RXCPLMODE_ISCSI_V(x) ((x) << RXCPLMODE_ISCSI_S)
+#define RXCPLMODE_ISCSI_F    RXCPLMODE_ISCSI_V(1U)
+
+#define RXCPLMODE_NVMT_S    27
+#define RXCPLMODE_NVMT_V(x) ((x) << RXCPLMODE_NVMT_S)
+#define RXCPLMODE_NVMT_F    RXCPLMODE_NVMT_V(1U)
+
+#define SGE_CONTROL_A	0x1008
 
 #define RXPKTCPLMODE_S    18
 #define RXPKTCPLMODE_V(x) ((x) << RXPKTCPLMODE_S)
@@ -172,6 +184,7 @@
 
 #define SGE_CTXT_DATA0_A 0x1200
 #define SGE_CTXT_DATA5_A 0x1214
+#define SGE_CTXT_DATA6_A 0x1218
 
 #define GLOBALENABLE_S    0
 #define GLOBALENABLE_V(x) ((x) << GLOBALENABLE_S)
@@ -329,6 +342,10 @@
 #define EGRESS_SIZE_ERR_V(x) ((x) << EGRESS_SIZE_ERR_S)
 #define EGRESS_SIZE_ERR_F    EGRESS_SIZE_ERR_V(1U)
 
+#define FATAL_WRE_LEN_S    7
+#define FATAL_WRE_LEN_V(x) ((x) << FATAL_WRE_LEN_S)
+#define FATAL_WRE_LEN_F    FATAL_WRE_LEN_V(1U)
+
 #define SGE_INT_ENABLE3_A 0x1040
 #define SGE_FL_BUFFER_SIZE0_A 0x1044
 #define SGE_FL_BUFFER_SIZE1_A 0x1048
@@ -406,6 +423,17 @@
 #define TSVAL_G(x) (((x) >> TSVAL_S) & TSVAL_M)
 
 #define SGE_DBFIFO_STATUS_A 0x10a4
+
+#define LP_INT_THRESH_S    12
+#define LP_INT_THRESH_M    0xfU
+#define LP_INT_THRESH_V(x) ((x) << LP_INT_THRESH_S)
+#define LP_INT_THRESH_G(x) (((x) >> LP_INT_THRESH_S) & LP_INT_THRESH_M)
+
+#define LP_INT_THRESH_T5_S    18
+#define LP_INT_THRESH_T5_M    0xfffU
+#define LP_INT_THRESH_T5_V(x) ((x) << LP_INT_THRESH_T5_S)
+#define LP_INT_THRESH_T5_G(x) (((x) >> LP_INT_THRESH_T5_S) & LP_INT_THRESH_T5_M)
+
 #define SGE_DBVFIFO_SIZE_A 0x113c
 
 #define HP_INT_THRESH_S    28
@@ -761,6 +789,17 @@
 
 #define PCIE_NONFAT_ERR_A	0x3010
 #define PCIE_CFG_SPACE_REQ_A	0x3060
+
+#define WRBE_S    24
+#define WRBE_M    0xfU
+#define WRBE_V(x) ((x) << WRBE_S)
+#define WRBE_G(x) (((x) >> WRBE_S) & WRBE_M)
+
+#define T6_WRBE_S    25
+#define T6_WRBE_M    0xfU
+#define T6_WRBE_V(x) ((x) << T6_WRBE_S)
+#define T6_WRBE_G(x) (((x) >> T6_WRBE_S) & T6_WRBE_M)
+
 #define PCIE_CFG_SPACE_DATA_A	0x3064
 #define PCIE_MEM_ACCESS_BASE_WIN_A 0x3068
 
@@ -803,6 +842,43 @@
 
 #define PCIE_FW_A 0x30b8
 #define PCIE_FW_PF_A 0x30bc
+
+#define PCIE_DBG_INDIR_REQ_A 0x30ec
+
+#define DBGENABLE_S    31
+#define DBGENABLE_V(x) ((x) << DBGENABLE_S)
+#define DBGENABLE_F    DBGENABLE_V(1U)
+
+#define DBGAUTOINC_S    30
+#define DBGAUTOINC_V(x) ((x) << DBGAUTOINC_S)
+#define DBGAUTOINC_F    DBGAUTOINC_V(1U)
+
+#define POINTER_S    8
+#define POINTER_M    0xffffU
+#define POINTER_V(x) ((x) << POINTER_S)
+#define POINTER_G(x) (((x) >> POINTER_S) & POINTER_M)
+
+#define SELECT_S    0
+#define SELECT_M    0xfU
+#define SELECT_V(x) ((x) << SELECT_S)
+#define SELECT_G(x) (((x) >> SELECT_S) & SELECT_M)
+
+#define PCIE_DBG_INDIR_DATA_0_A 0x30f0
+#define PCIE_DBG_INDIR_DATA_1_A 0x30f4
+#define PCIE_DBG_INDIR_DATA_2_A 0x30f8
+#define PCIE_DBG_INDIR_DATA_3_A 0x30fc
+
+#define PCIE_PF_INT_CFG_A 0x3140
+
+#define T7_VECBASE_S    0
+#define T7_VECBASE_M    0xfffU
+#define T7_VECBASE_V(x) ((x) << T7_VECBASE_S)
+#define T7_VECBASE_G(x) (((x) >> T7_VECBASE_S) & T7_VECBASE_M)
+
+#define T7_PF_INT_VECNUM_S    12
+#define T7_PF_INT_VECNUM_M  0x7ffU
+#define T7_PF_INT_VECNUM_V(x) ((x) << T7_PF_INT_VECNUM_S)
+#define T7_PF_INT_VECNUM_G(x) (((x) >> T7_PF_INT_VECNUM_S) & T7_PF_INT_VECNUM_M)
 
 #define PCIE_CORE_UTL_SYSTEM_BUS_AGENT_STATUS_A 0x5908
 
@@ -884,6 +960,9 @@
 #define TDUE_V(x) ((x) << TDUE_S)
 #define TDUE_F    TDUE_V(1U)
 
+#define PCIE_MEM_ACCESS_OFFSET0_A 0x3708
+#define T7_PCIE_MEM_ACCESS_BASE_WIN_A 0x3700
+
 /* SPARE2 register contains 32-bit value at offset 0x6 in Serial INIT
  * Configuration flashed on EEPROM. This value corresponds to 32-bit
  * Serial Configuration Version information.
@@ -944,6 +1023,8 @@
 #define MC_BIST_DATA_PATTERN_A 0x760c
 
 #define MC_BIST_STATUS_RDATA_A 0x7688
+#define T7_MC_P_INT_CAUSE_A 0x49320
+#define T7_MC_P_ECC_STATUS_A 0x4932c
 
 /* registers for module MA */
 #define MA_EDRAM0_BAR_A 0x77c0
@@ -957,6 +1038,16 @@
 #define EDRAM0_SIZE_V(x) ((x) << EDRAM0_SIZE_S)
 #define EDRAM0_SIZE_G(x) (((x) >> EDRAM0_SIZE_S) & EDRAM0_SIZE_M)
 
+#define T7_EDRAM0_BASE_S    16
+#define T7_EDRAM0_BASE_M    0xffffU
+#define T7_EDRAM0_BASE_V(x) ((x) << T7_EDRAM0_BASE_S)
+#define T7_EDRAM0_BASE_G(x) (((x) >> T7_EDRAM0_BASE_S) & T7_EDRAM0_BASE_M)
+
+#define T7_EDRAM0_SIZE_S    0
+#define T7_EDRAM0_SIZE_M    0xffffU
+#define T7_EDRAM0_SIZE_V(x) ((x) << T7_EDRAM0_SIZE_S)
+#define T7_EDRAM0_SIZE_G(x) (((x) >> T7_EDRAM0_SIZE_S) & T7_EDRAM0_SIZE_M)
+
 #define MA_EDRAM1_BAR_A 0x77c4
 
 #define EDRAM1_BASE_S    16
@@ -967,6 +1058,16 @@
 #define EDRAM1_SIZE_M    0xfffU
 #define EDRAM1_SIZE_V(x) ((x) << EDRAM1_SIZE_S)
 #define EDRAM1_SIZE_G(x) (((x) >> EDRAM1_SIZE_S) & EDRAM1_SIZE_M)
+
+#define T7_EDRAM1_BASE_S    16
+#define T7_EDRAM1_BASE_M    0xffffU
+#define T7_EDRAM1_BASE_V(x) ((x) << T7_EDRAM1_BASE_S)
+#define T7_EDRAM1_BASE_G(x) (((x) >> T7_EDRAM1_BASE_S) & T7_EDRAM1_BASE_M)
+
+#define T7_EDRAM1_SIZE_S    0
+#define T7_EDRAM1_SIZE_M    0xffffU
+#define T7_EDRAM1_SIZE_V(x) ((x) << T7_EDRAM1_SIZE_S)
+#define T7_EDRAM1_SIZE_G(x) (((x) >> T7_EDRAM1_SIZE_S) & T7_EDRAM1_SIZE_M)
 
 #define MA_EXT_MEMORY_BAR_A 0x77c8
 
@@ -995,6 +1096,38 @@
 #define EXT_MEM1_SIZE_V(x) ((x) << EXT_MEM1_SIZE_S)
 #define EXT_MEM1_SIZE_G(x) (((x) >> EXT_MEM1_SIZE_S) & EXT_MEM1_SIZE_M)
 
+#define T7_EXT_MEM1_BASE_S    16
+#define T7_EXT_MEM1_BASE_M    0xffffU
+#define T7_EXT_MEM1_BASE_V(x) ((x) << T7_EXT_MEM1_BASE_S)
+#define T7_EXT_MEM1_BASE_G(x) (((x) >> T7_EXT_MEM1_BASE_S) & T7_EXT_MEM1_BASE_M)
+
+#define T7_EXT_MEM1_SIZE_S    0
+#define T7_EXT_MEM1_SIZE_M    0xffffU
+#define T7_EXT_MEM1_SIZE_V(x) ((x) << T7_EXT_MEM1_SIZE_S)
+#define T7_EXT_MEM1_SIZE_G(x) (((x) >> T7_EXT_MEM1_SIZE_S) & T7_EXT_MEM1_SIZE_M)
+
+#define MA_HOST_MEMORY_BAR_A 0x77cc
+
+#define HMA_BASE_S    16
+#define HMA_BASE_M    0xfffU
+#define HMA_BASE_V(x) ((x) << HMA_BASE_S)
+#define HMA_BASE_G(x) (((x) >> HMA_BASE_S) & HMA_BASE_M)
+
+#define HMA_SIZE_S    0
+#define HMA_SIZE_M    0xfffU
+#define HMA_SIZE_V(x) ((x) << HMA_SIZE_S)
+#define HMA_SIZE_G(x) (((x) >> HMA_SIZE_S) & HMA_SIZE_M)
+
+#define HMATARGETBASE_S    16
+#define HMATARGETBASE_M    0xffffU
+#define HMATARGETBASE_V(x) ((x) << HMATARGETBASE_S)
+#define HMATARGETBASE_G(x) (((x) >> HMATARGETBASE_S) & HMATARGETBASE_M)
+
+#define T7_HMA_SIZE_S    0
+#define T7_HMA_SIZE_M    0xffffU
+#define T7_HMA_SIZE_V(x) ((x) << T7_HMA_SIZE_S)
+#define T7_HMA_SIZE_G(x) (((x) >> T7_HMA_SIZE_S) & T7_HMA_SIZE_M)
+
 #define MA_EXT_MEMORY0_BAR_A 0x77c8
 
 #define EXT_MEM0_BASE_S    16
@@ -1005,6 +1138,16 @@
 #define EXT_MEM0_SIZE_M    0xfffU
 #define EXT_MEM0_SIZE_V(x) ((x) << EXT_MEM0_SIZE_S)
 #define EXT_MEM0_SIZE_G(x) (((x) >> EXT_MEM0_SIZE_S) & EXT_MEM0_SIZE_M)
+
+#define T7_EXT_MEM0_BASE_S    16
+#define T7_EXT_MEM0_BASE_M    0xffffU
+#define T7_EXT_MEM0_BASE_V(x) ((x) << T7_EXT_MEM0_BASE_S)
+#define T7_EXT_MEM0_BASE_G(x) (((x) >> T7_EXT_MEM0_BASE_S) & T7_EXT_MEM0_BASE_M)
+
+#define T7_EXT_MEM0_SIZE_S    0
+#define T7_EXT_MEM0_SIZE_M    0xffffU
+#define T7_EXT_MEM0_SIZE_V(x) ((x) << T7_EXT_MEM0_SIZE_S)
+#define T7_EXT_MEM0_SIZE_G(x) (((x) >> T7_EXT_MEM0_SIZE_S) & T7_EXT_MEM0_SIZE_M)
 
 #define MA_TARGET_MEM_ENABLE_A 0x77d8
 
@@ -1027,6 +1170,10 @@
 #define EXT_MEM0_ENABLE_S    2
 #define EXT_MEM0_ENABLE_V(x) ((x) << EXT_MEM0_ENABLE_S)
 #define EXT_MEM0_ENABLE_F    EXT_MEM0_ENABLE_V(1U)
+
+#define MC_SPLIT_S    6
+#define MC_SPLIT_V(x) ((x) << MC_SPLIT_S)
+#define MC_SPLIT_F    MC_SPLIT_V(1U)
 
 #define MA_INT_CAUSE_A	0x77e0
 
@@ -1052,6 +1199,9 @@
 #define MA_PARITY_ERROR_STATUS_A	0x77f4
 #define MA_PARITY_ERROR_STATUS1_A	0x77f4
 #define MA_PARITY_ERROR_STATUS2_A	0x7804
+
+#define MA_LOCAL_DEBUG_CFG_A 0x78f8
+#define MA_LOCAL_DEBUG_PERF_CFG_A 0x7914
 
 /* registers for module EDC_0 */
 #define EDC_0_BASE_ADDR		0x7900
@@ -1633,6 +1783,62 @@
 #define FCOEMASK_V(x) ((x) << FCOEMASK_S)
 #define FCOEMASK_F    FCOEMASK_V(1U)
 
+#define TCPFLAGS_S    13
+#define TCPFLAGS_V(x) ((x) << TCPFLAGS_S)
+#define TCPFLAGS_F    TCPFLAGS_V(1U)
+
+#define SYNONLY_S    12
+#define SYNONLY_V(x) ((x) << SYNONLY_S)
+#define SYNONLY_F    SYNONLY_V(1U)
+
+#define ROCE_S    11
+#define ROCE_V(x) ((x) << ROCE_S)
+#define ROCE_F    ROCE_V(1U)
+
+#define T7_FRAGMENTATION_S    10
+#define T7_FRAGMENTATION_V(x) ((x) << T7_FRAGMENTATION_S)
+#define T7_FRAGMENTATION_F    T7_FRAGMENTATION_V(1U)
+
+#define T7_MPSHITTYPE_S    9
+#define T7_MPSHITTYPE_V(x) ((x) << T7_MPSHITTYPE_S)
+#define T7_MPSHITTYPE_F    T7_MPSHITTYPE_V(1U)
+
+#define T7_MACMATCH_S    8
+#define T7_MACMATCH_V(x) ((x) << T7_MACMATCH_S)
+#define T7_MACMATCH_F    T7_MACMATCH_V(1U)
+
+#define T7_ETHERTYPE_S    7
+#define T7_ETHERTYPE_V(x) ((x) << T7_ETHERTYPE_S)
+#define T7_ETHERTYPE_F    T7_ETHERTYPE_V(1U)
+
+#define T7_PROTOCOL_S    6
+#define T7_PROTOCOL_V(x) ((x) << T7_PROTOCOL_S)
+#define T7_PROTOCOL_F    T7_PROTOCOL_V(1U)
+
+#define T7_TOS_S    5
+#define T7_TOS_V(x) ((x) << T7_TOS_S)
+#define T7_TOS_F    T7_TOS_V(1U)
+
+#define T7_VLAN_S    4
+#define T7_VLAN_V(x) ((x) << T7_VLAN_S)
+#define T7_VLAN_F    T7_VLAN_V(1U)
+
+#define T7_VNIC_ID_S    3
+#define T7_VNIC_ID_V(x) ((x) << T7_VNIC_ID_S)
+#define T7_VNIC_ID_F    T7_VNIC_ID_V(1U)
+
+#define T7_PORT_S    2
+#define T7_PORT_V(x) ((x) << T7_PORT_S)
+#define T7_PORT_F    T7_PORT_V(1U)
+
+#define T7_FCOE_S    1
+#define T7_FCOE_V(x) ((x) << T7_FCOE_S)
+#define T7_FCOE_F    T7_FCOE_V(1U)
+
+#define IPSECIDX_S    0
+#define IPSECIDX_V(x) ((x) << IPSECIDX_S)
+#define IPSECIDX_F    IPSECIDX_V(1U)
+
 #define TP_INGRESS_CONFIG_A	0x141
 
 #define VNIC_S    11
@@ -1670,7 +1876,21 @@
 #define TP_MIB_FCOE_BYTE_0_HI_A	0x50
 #define TP_MIB_OFD_VLN_DROP_0_A	0x58
 #define TP_MIB_USM_PKTS_A	0x5c
+#define TP_CHANNEL_MAP_A 0x27
+
+#define T7_LB_MODE_S    30
+#define T7_LB_MODE_M    0x3U
+#define T7_LB_MODE_V(x) ((x) << T7_LB_MODE_S)
+#define T7_LB_MODE_G(x) (((x) >> T7_LB_MODE_S) & T7_LB_MODE_M)
+
 #define TP_MIB_RQE_DFR_PKT_A	0x64
+#define TP_MIB_RDMA_IN_PKT_0_A 0x80
+
+#define ULP_RX_MISC_FEATURE_ENABLE_A 0x1925c
+
+#define ISCSI_ALL_CMP_MODE_S    9
+#define ISCSI_ALL_CMP_MODE_V(x) ((x) << ISCSI_ALL_CMP_MODE_S)
+#define ISCSI_ALL_CMP_MODE_F    ISCSI_ALL_CMP_MODE_V(1U)
 
 #define ULP_TX_INT_CAUSE_A	0x8dcc
 #define ULP_TX_TPT_LLIMIT_A	0x8dd4
@@ -1732,6 +1952,8 @@
 #define ULP_TX_ASIC_DEBUG_3_A 0x8f80
 #define ULP_TX_ASIC_DEBUG_4_A 0x8f84
 
+#define TP_ROCE_RRQ_BASE_A 0x95
+
 /* registers for module PM_RX */
 #define PM_RX_BASE_ADDR 0x8fc0
 
@@ -1745,6 +1967,7 @@
 #define PM_TX_STAT_LSB_A 0x8ff0
 #define PM_TX_DBG_CTRL_A 0x8ff0
 #define PM_TX_DBG_DATA_A 0x8ff4
+#define T7_PM_TX_DBG_STAT_MSB_A 0x10000
 #define PM_TX_DBG_STAT_MSB_A 0x1001a
 
 #define PCMD_LEN_OVFL0_S    31
@@ -1907,6 +2130,7 @@
 #define MPS_PORT_STAT_RX_PORT_LESS_64B_H 0x614
 #define MAC_PORT_MAGIC_MACID_LO 0x824
 #define MAC_PORT_MAGIC_MACID_HI 0x828
+#define T7_MAC_PORT_TX_TS_VAL_LO 0x88c
 #define MAC_PORT_TX_TS_VAL_LO   0x928
 #define MAC_PORT_TX_TS_VAL_HI   0x92c
 
@@ -2084,6 +2308,9 @@
 
 #define MPS_TRC_FILTER_MATCH_CTL_A_A 0x9810
 #define MPS_TRC_FILTER_MATCH_CTL_B_A 0x9820
+#define T7_MPS_TRC_FILTER_MATCH_CTL_A_A 0xa460
+#define T7_MPS_TRC_FILTER_MATCH_CTL_B_A 0xa480
+#define T7_MPS_T5_TRC_RSS_CONTROL_A 0xa434
 
 #define TFMINPKTSIZE_S    16
 #define TFMINPKTSIZE_M    0x1ffU
@@ -2446,6 +2673,7 @@
 #define T6_VFWRADDR_G(x) (((x) >> T6_VFWRADDR_S) & T6_VFWRADDR_M)
 
 #define TP_RSS_CONFIG_CNG_A 0x7e04
+#define TP_RSS_CONFIG_SRAM_A 0x7e0c
 #define TP_RSS_SECRET_KEY0_A 0x40
 #define TP_RSS_PF0_CONFIG_A 0x30
 #define TP_RSS_PF_MAP_A 0x38
@@ -2591,6 +2819,9 @@
 #define GENEVE_V(x) ((x) << GENEVE_S)
 #define GENEVE_G(x) (((x) >> GENEVE_S) & GENEVE_M)
 
+#define T7_MPS_TRC_INT_CAUSE_A 0xa4e4
+#define T7_MPS_RX_VXLAN_TYPE_A 0x1123c
+#define T7_MPS_RX_GENEVE_TYPE_A 0x11240
 #define MPS_CLS_TCAM_Y_L_A 0xf000
 #define MPS_CLS_TCAM_DATA0_A 0xf000
 #define MPS_CLS_TCAM_DATA1_A 0xf004
@@ -2637,6 +2868,9 @@
 #define DATAVIDH1_M    0x7fU
 #define DATAVIDH1_G(x) (((x) >> DATAVIDH1_S) & DATAVIDH1_M)
 
+#define MPS_CLS_TCAM0_RDATA0_REQ_ID1_A 0xf01c
+#define MPS_CLS_TCAM0_RDATA1_REQ_ID1_A 0xf020
+#define MPS_CLS_TCAM0_RDATA2_REQ_ID1_A 0xf024
 #define MPS_CLS_TCAM_RDATA0_REQ_ID1_A 0xf020
 #define MPS_CLS_TCAM_RDATA1_REQ_ID1_A 0xf024
 #define MPS_CLS_TCAM_RDATA2_REQ_ID1_A 0xf028
@@ -2682,6 +2916,16 @@
 
 #define MPS_CLS_TCAM_X_L(idx) (MPS_CLS_TCAM_X_L_A + (idx) * 16)
 #define NUM_MPS_CLS_TCAM_X_L_INSTANCES 512
+
+#define T7_CTLTCAMSEL_S    26
+#define T7_CTLTCAMSEL_M    0x3U
+#define T7_CTLTCAMSEL_V(x) ((x) << T7_CTLTCAMSEL_S)
+#define T7_CTLTCAMSEL_G(x) (((x) >> T7_CTLTCAMSEL_S) & T7_CTLTCAMSEL_M)
+
+#define T7_1_CTLTCAMINDEX_S    17
+#define T7_1_CTLTCAMINDEX_M    0x1ffU
+#define T7_1_CTLTCAMINDEX_V(x) ((x) << T7_1_CTLTCAMINDEX_S)
+#define T7_1_CTLTCAMINDEX_G(x) (((x) >> T7_1_CTLTCAMINDEX_S) & T7_1_CTLTCAMINDEX_M)
 
 #define MPS_CLS_SRAM_L_A 0xe000
 
@@ -2813,6 +3057,20 @@
 #define SLVFIFOPARINT_V(x) ((x) << SLVFIFOPARINT_S)
 #define SLVFIFOPARINT_F    SLVFIFOPARINT_V(1U)
 
+#define ULP_RX_RRQ_LLIMIT_A 0x192c0
+#define ULP_RX_RRQ_ULIMIT_A 0x192c4
+#define ULP_RX_NVME_TCP_STAG_LLIMIT_A 0x192c8
+#define ULP_RX_NVME_TCP_STAG_ULIMIT_A 0x192cc
+#define ULP_RX_NVME_TCP_RQ_LLIMIT_A 0x192d0
+#define ULP_RX_NVME_TCP_RQ_ULIMIT_A 0x192d4
+#define ULP_RX_NVME_TCP_PBL_LLIMIT_A 0x192d8
+#define ULP_RX_NVME_TCP_PBL_ULIMIT_A 0x192dc
+#define ULP_RX_NVME_TCP_MAX_LENGTH_A 0x192e0
+#define ULP_TX_NVME_TCP_TPT_LLIMIT_A 0x8fa4
+#define ULP_TX_NVME_TCP_TPT_ULIMIT_A 0x8fa8
+#define ULP_TX_NVME_TCP_PBL_LLIMIT_A 0x8fac
+#define ULP_TX_NVME_TCP_PBL_ULIMIT_A 0x8fb0
+
 #define ULP_RX_INT_CAUSE_A 0x19158
 #define ULP_RX_ISCSI_LLIMIT_A 0x1915c
 #define ULP_RX_ISCSI_ULIMIT_A 0x19160
@@ -2850,6 +3108,21 @@
 
 #define ULP_RX_TDDP_PSZ_A 0x19178
 
+#define MPS_CLS_TCAM0_RDATA1_REQ_ID1_A 0xf020
+#define MPS_CLS_TCAM0_RDATA0_REQ_ID1_A 0xf01c
+#define MPS_CLS_TCAM0_RDATA2_REQ_ID1_A 0xf024
+#define MPS_T5_CLS_SRAM_L_A 0xe000
+#define MPS_T5_CLS_SRAM_H_A 0xe004
+
+#define SRAMWRN_S    31
+#define SRAMWRN_V(x) ((x) << SRAMWRN_S)
+#define SRAMWRN_F    SRAMWRN_V(1U)
+
+#define SRAMINDEX_S    16
+#define SRAMINDEX_M    0x7ffU
+#define SRAMINDEX_V(x) ((x) << SRAMINDEX_S)
+#define SRAMINDEX_G(x) (((x) >> SRAMINDEX_S) & SRAMINDEX_M)
+
 /* registers for module SF */
 #define SF_DATA_A 0x193f8
 #define SF_OP_A 0x193fc
@@ -2872,6 +3145,10 @@
 #define OP_S    0
 #define OP_V(x) ((x) << OP_S)
 #define OP_F    OP_V(1U)
+
+#define QUADREADDISABLE_S    5
+#define QUADREADDISABLE_V(x) ((x) << QUADREADDISABLE_S)
+#define QUADREADDISABLE_F    QUADREADDISABLE_V(1U)
 
 #define PL_PF_INT_CAUSE_A 0x3c0
 
@@ -2926,6 +3203,50 @@
 #define MA_V(x) ((x) << MA_S)
 #define MA_F    MA_V(1U)
 
+#define T7_ULP_TX_S    29
+#define T7_ULP_TX_V(x) ((x) << T7_ULP_TX_S)
+#define T7_ULP_TX_F    T7_ULP_TX_V(1U)
+
+#define T7_SGE_S    28
+#define T7_SGE_V(x) ((x) << T7_SGE_S)
+#define T7_SGE_F    T7_SGE_V(1U)
+
+#define T7_CPL_SWITCH_S    26
+#define T7_CPL_SWITCH_V(x) ((x) << T7_CPL_SWITCH_S)
+#define T7_CPL_SWITCH_F    T7_CPL_SWITCH_V(1U)
+
+#define T7_ULP_RX_S    25
+#define T7_ULP_RX_V(x) ((x) << T7_ULP_RX_S)
+#define T7_ULP_RX_F    T7_ULP_RX_V(1U)
+
+#define T7_PM_RX_S    24
+#define T7_PM_RX_V(x) ((x) << T7_PM_RX_S)
+#define T7_PM_RX_F    T7_PM_RX_V(1U)
+
+#define T7_PM_TX_S    23
+#define T7_PM_TX_V(x) ((x) << T7_PM_TX_S)
+#define T7_PM_TX_F    T7_PM_TX_V(1U)
+
+#define T7_MA_S    22
+#define T7_MA_V(x) ((x) << T7_MA_S)
+#define T7_MA_F    T7_MA_V(1U)
+
+#define T7_TP_S    21
+#define T7_TP_V(x) ((x) << T7_TP_S)
+#define T7_TP_F    T7_TP_V(1U)
+
+#define T7_LE_S    20
+#define T7_LE_V(x) ((x) << T7_LE_S)
+#define T7_LE_F    T7_LE_V(1U)
+
+#define T7_EDC1_S    19
+#define T7_EDC1_V(x) ((x) << T7_EDC1_S)
+#define T7_EDC1_F    T7_EDC1_V(1U)
+
+#define T7_EDC0_S    18
+#define T7_EDC0_V(x) ((x) << T7_EDC0_S)
+#define T7_EDC0_F    T7_EDC0_V(1U)
+
 #define TP_S    19
 #define TP_V(x) ((x) << TP_S)
 #define TP_F    TP_V(1U)
@@ -2949,6 +3270,10 @@
 #define PCIE_S    14
 #define PCIE_V(x) ((x) << PCIE_S)
 #define PCIE_F    PCIE_V(1U)
+
+#define T7_PCIE_S    15
+#define T7_PCIE_V(x) ((x) << T7_PCIE_S)
+#define T7_PCIE_F    T7_PCIE_V(1U)
 
 #define XGMAC_KR1_S    12
 #define XGMAC_KR1_V(x) ((x) << XGMAC_KR1_S)
@@ -2995,6 +3320,15 @@
 #define MC1_F    MC1_V(1U)
 
 #define PL_INT_ENABLE_A 0x19410
+
+#define T7_MC1_S    17
+#define T7_MC1_V(x) ((x) << T7_MC1_S)
+#define T7_MC1_F    T7_MC1_V(1U)
+
+#define T7_MC0_S    16
+#define T7_MC0_V(x) ((x) << T7_MC0_S)
+#define T7_MC0_F    T7_MC0_V(1U)
+
 #define PL_INT_MAP0_A 0x19414
 #define PL_RST_A 0x19428
 
@@ -3011,6 +3345,10 @@
 #define FATALPERR_S    4
 #define FATALPERR_V(x) ((x) << FATALPERR_S)
 #define FATALPERR_F    FATALPERR_V(1U)
+
+#define INVALIDACCESS_S    3
+#define INVALIDACCESS_V(x) ((x) << INVALIDACCESS_S)
+#define INVALIDACCESS_F    INVALIDACCESS_V(1U)
 
 #define PERRVFID_S    0
 #define PERRVFID_V(x) ((x) << PERRVFID_S)
@@ -3034,6 +3372,10 @@
 #define T6_UNKNOWNCMD_S    3
 #define T6_UNKNOWNCMD_V(x) ((x) << T6_UNKNOWNCMD_S)
 #define T6_UNKNOWNCMD_F    T6_UNKNOWNCMD_V(1U)
+
+#define T6_ACTRGNFULL_S    21
+#define T6_ACTRGNFULL_V(x) ((x) << T6_ACTRGNFULL_S)
+#define T6_ACTRGNFULL_F    T6_ACTRGNFULL_V(1U)
 
 #define T6_LIP0_S    2
 #define T6_LIP0_V(x) ((x) << T6_LIP0_S)
@@ -3171,6 +3513,7 @@
 #define ADDRESS_V(x) ((x) << ADDRESS_S)
 
 #define MAC_PORT_INT_CAUSE_A 0x8dc
+#define T7_MAC_PORT_INT_CAUSE_A 0x86c
 #define XGMAC_PORT_INT_CAUSE_A 0x10dc
 
 #define TP_TX_MOD_QUEUE_REQ_MAP_A 0x7e28
@@ -3200,10 +3543,27 @@
 #define NUM_MPS_CLS_SRAM_L_INSTANCES 336
 #define NUM_MPS_T5_CLS_SRAM_L_INSTANCES 512
 
+#define MPS_T5_CLS_SRAM_L_A 0xe000
+#define MPS_T5_CLS_SRAM_H_A 0xe004
+
+#define SRAMWRN_S    31
+#define SRAMWRN_V(x) ((x) << SRAMWRN_S)
+#define SRAMWRN_F    SRAMWRN_V(1U)
+
+#define SRAMINDEX_S    16
+#define SRAMINDEX_M    0x7ffU
+#define SRAMINDEX_V(x) ((x) << SRAMINDEX_S)
+#define SRAMINDEX_G(x) (((x) >> SRAMINDEX_S) & SRAMINDEX_M)
+
 #define T5_PORT0_BASE 0x30000
 #define T5_PORT_STRIDE 0x4000
 #define T5_PORT_BASE(idx) (T5_PORT0_BASE + (idx) * T5_PORT_STRIDE)
 #define T5_PORT_REG(idx, reg) (T5_PORT_BASE(idx) + (reg))
+
+#define T7_PORT0_BASE 0x30000
+#define T7_PORT_STRIDE 0x2000
+#define T7_PORT_BASE(idx) (T7_PORT0_BASE + (idx) * T7_PORT_STRIDE)
+#define T7_PORT_REG(idx, reg) (T7_PORT_BASE(idx) + (reg))
 
 #define MC_0_BASE_ADDR 0x40000
 #define MC_1_BASE_ADDR 0x48000
@@ -3248,12 +3608,40 @@
 #define HOSTWRITE_V(x)	((x) << HOSTWRITE_S)
 #define HOSTWRITE_F	HOSTWRITE_V(1U)
 
+#define T7_HOSTBUSY_S    31
+#define T7_HOSTBUSY_V(x) ((x) << T7_HOSTBUSY_S)
+#define T7_HOSTBUSY_F    T7_HOSTBUSY_V(1U)
+
+#define T7_HOSTWRITE_S    30
+#define T7_HOSTWRITE_V(x) ((x) << T7_HOSTWRITE_S)
+#define T7_HOSTWRITE_F    T7_HOSTWRITE_V(1U)
+
+#define HOSTGRPSEL_S    28
+#define HOSTGRPSEL_M    0x3U
+#define HOSTGRPSEL_V(x) ((x) << HOSTGRPSEL_S)
+#define HOSTGRPSEL_G(x) (((x) >> HOSTGRPSEL_S) & HOSTGRPSEL_M)
+
+#define HOSTCORESEL_S    24
+#define HOSTCORESEL_M    0xfU
+#define HOSTCORESEL_V(x) ((x) << HOSTCORESEL_S)
+#define HOSTCORESEL_G(x) (((x) >> HOSTCORESEL_S) & HOSTCORESEL_M)
+
 #define CIM_IBQ_DBG_CFG_A 0x7b60
+
+#define IBQDBGCORE_S    28
+#define IBQDBGCORE_M    0xfU
+#define IBQDBGCORE_V(x) ((x) << IBQDBGCORE_S)
+#define IBQDBGCORE_G(x) (((x) >> IBQDBGCORE_S) & IBQDBGCORE_M)
 
 #define IBQDBGADDR_S    16
 #define IBQDBGADDR_M    0xfffU
 #define IBQDBGADDR_V(x) ((x) << IBQDBGADDR_S)
 #define IBQDBGADDR_G(x) (((x) >> IBQDBGADDR_S) & IBQDBGADDR_M)
+
+#define T7_IBQDBGADDR_S    12
+#define T7_IBQDBGADDR_M    0x1fffU
+#define T7_IBQDBGADDR_V(x) ((x) << T7_IBQDBGADDR_S)
+#define T7_IBQDBGADDR_G(x) (((x) >> T7_IBQDBGADDR_S) & T7_IBQDBGADDR_M)
 
 #define IBQDBGBUSY_S    1
 #define IBQDBGBUSY_V(x) ((x) << IBQDBGBUSY_S)
@@ -3264,6 +3652,16 @@
 #define IBQDBGEN_F    IBQDBGEN_V(1U)
 
 #define CIM_OBQ_DBG_CFG_A 0x7b64
+
+#define OBQDBGCORE_S    28
+#define OBQDBGCORE_M    0xfU
+#define OBQDBGCORE_V(x) ((x) << OBQDBGCORE_S)
+#define OBQDBGCORE_G(x) (((x) >> OBQDBGCORE_S) & OBQDBGCORE_M)
+
+#define T7_OBQDBGADDR_S    12
+#define T7_OBQDBGADDR_M    0x1fffU
+#define T7_OBQDBGADDR_V(x) ((x) << T7_OBQDBGADDR_S)
+#define T7_OBQDBGADDR_G(x) (((x) >> T7_OBQDBGADDR_S) & T7_OBQDBGADDR_M)
 
 #define OBQDBGADDR_S    16
 #define OBQDBGADDR_M    0xfffU
@@ -3329,6 +3727,25 @@
 #define UPDBGLACAPTPCONLY_F	UPDBGLACAPTPCONLY_V(1U)
 
 #define CIM_QUEUE_CONFIG_REF_A 0x7b48
+
+#define CORESELECT_S    6
+#define CORESELECT_M    0xfU
+#define CORESELECT_V(x) ((x) << CORESELECT_S)
+#define CORESELECT_G(x) (((x) >> CORESELECT_S) & CORESELECT_M)
+
+#define T7_OBQSELECT_S    5
+#define T7_OBQSELECT_V(x) ((x) << T7_OBQSELECT_S)
+#define T7_OBQSELECT_F    T7_OBQSELECT_V(1U)
+
+#define T7_IBQSELECT_S    4
+#define T7_IBQSELECT_V(x) ((x) << T7_IBQSELECT_S)
+#define T7_IBQSELECT_F    T7_IBQSELECT_V(1U)
+
+#define T7_QUENUMSELECT_S    0
+#define T7_QUENUMSELECT_M    0xfU
+#define T7_QUENUMSELECT_V(x) ((x) << T7_QUENUMSELECT_S)
+#define T7_QUENUMSELECT_G(x) (((x) >> T7_QUENUMSELECT_S) & T7_QUENUMSELECT_M)
+
 #define CIM_QUEUE_CONFIG_CTRL_A 0x7b4c
 
 #define CIMQSIZE_S    24
@@ -3382,5 +3799,42 @@
 
 #define QUENUMSELECT_S    0
 #define QUENUMSELECT_V(x) ((x) << QUENUMSELECT_S)
+
+#define T7_UP_IBQ_0_SHADOW_RDADDR_A 0x400
+#define T7_UP_OBQ_0_SHADOW_RDADDR_A 0x600
+#define T7_UP_OBQ_0_SHADOW_REALADDR_A 0x704
+
+
+#define ULP_RX_CTL1_A 0x19330
+
+#define ISCSI_CTL2_S    27
+#define ISCSI_CTL2_V(x) ((x) << ISCSI_CTL2_S)
+#define ISCSI_CTL2_F    ISCSI_CTL2_V(1U)
+
+#define ISCSI_CTL0_S    25
+#define ISCSI_CTL0_V(x) ((x) << ISCSI_CTL0_S)
+#define ISCSI_CTL0_F    ISCSI_CTL0_V(1U)
+
+/* registers for module ARM */
+#define ARM_BASE_ADDR 0x47000
+
+#define ARM_UART_INT_CAUSE_A 0x47158
+
+#define TX_FIFO_EMPTY_S 0
+#define TX_FIFO_EMPTY_V(x) ((x) << TX_FIFO_EMPTY_S)
+#define TX_FIFO_EMPTY_F TX_FIFO_EMPTY_V(1)
+
+/* registers for module HMA */
+#define HMA_LOCAL_DEBUG_CFG_A 0x51320
+
+/* registers for module UP */
+#define T7_UP_IBQ_0_SHADOW_RDADDR_A 0x400
+#define T7_UP_OBQ_0_SHADOW_RDADDR_A 0x600
+#define T7_UP_OBQ_0_SHADOW_REALADDR_A 0x704
+
+#define T7_QUEREMFLITS_S    0
+#define T7_QUEREMFLITS_M    0xfffU
+#define T7_QUEREMFLITS_V(x) ((x) << T7_QUEREMFLITS_S)
+#define T7_QUEREMFLITS_G(x) (((x) >> T7_QUEREMFLITS_S) & T7_QUEREMFLITS_M)
 
 #endif /* __T4_REGS_H */

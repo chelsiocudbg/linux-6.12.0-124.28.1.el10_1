@@ -36,19 +36,26 @@
 #include "t4_msg.h"
 #include "srq.h"
 
-struct srq_data *t4_init_srq(int srq_size)
+int cxgb4_srq_init(struct adapter *adap, u32 srq_size)
 {
 	struct srq_data *s;
 
 	s = kvzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
-		return NULL;
+		return -ENOMEM;
 
 	s->srq_size = srq_size;
 	init_completion(&s->comp);
 	mutex_init(&s->lock);
 
-	return s;
+	adap->uld_inst.srq = s;
+	return 0;
+}
+
+void cxgb4_srq_cleanup(struct adapter *adap)
+{
+       kfree(adap->uld_inst.srq);
+       adap->uld_inst.srq = NULL;
 }
 
 /* cxgb4_get_srq_entry: read the SRQ table entry
@@ -75,7 +82,7 @@ int cxgb4_get_srq_entry(struct net_device *dev,
 	int rc = -ENODEV;
 
 	adap = netdev2adap(dev);
-	s = adap->srq;
+	s = adap->uld_inst.srq;
 
 	if (!(adap->flags & CXGB4_FULL_INIT_DONE) || !s)
 		goto out;
@@ -113,7 +120,7 @@ void do_srq_table_rpl(struct adapter *adap,
 		      const struct cpl_srq_table_rpl *rpl)
 {
 	unsigned int idx = TID_TID_G(GET_TID(rpl));
-	struct srq_data *s = adap->srq;
+	struct srq_data *s = adap->uld_inst.srq;
 	struct srq_entry *e;
 
 	if (unlikely(rpl->status != CPL_CONTAINS_READ_RPL)) {

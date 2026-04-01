@@ -105,8 +105,6 @@ static int t4_sched_bind_unbind_op(struct port_info *pi, void *arg,
 		fe = (struct sched_flowc_entry *)arg;
 
 		fw_class = bind ? fe->param.class : FW_SCHED_CLS_NONE;
-		err = cxgb4_ethofld_send_flowc(adap->port[pi->port_id],
-					       fe->param.tid, fw_class);
 		break;
 	}
 	default:
@@ -263,9 +261,6 @@ static int t4_sched_flowc_unbind(struct port_info *pi, struct ch_sched_flowc *p)
 	struct sched_class *e;
 	int err = 0;
 
-	if (p->tid < 0 || p->tid >= adap->tids.neotids)
-		return -ERANGE;
-
 	/* Find the existing entry that the flowc is bound to */
 	fe = t4_sched_entry_lookup(pi, SCHED_FLOWC, p->tid);
 	if (fe) {
@@ -287,12 +282,9 @@ static int t4_sched_flowc_bind(struct port_info *pi, struct ch_sched_flowc *p)
 {
 	struct sched_table *s = pi->sched_tbl;
 	struct sched_flowc_entry *fe = NULL;
-	struct adapter *adap = pi->adapter;
+//	struct adapter *adap = pi->adapter;
 	struct sched_class *e;
 	int err = 0;
-
-	if (p->tid < 0 || p->tid >= adap->tids.neotids)
-		return -ERANGE;
 
 	fe = kvzalloc(sizeof(*fe), GFP_KERNEL);
 	if (!fe)

@@ -64,19 +64,6 @@ module_param(c4iw_wr_log_size_order, int, 0444);
 MODULE_PARM_DESC(c4iw_wr_log_size_order,
 		 "Number of entries (log2) in the work request timing log.");
 
-
-/* SVC mem func declaration */
-static void svc_setup_func_ptr(void);
-static void * svc_default_kmalloc( size_t size, int flag, void* qp_ptr);
-static void svc_default_kfree(void *ptr, void* qp_ptr);
-static void * svc_default_dma_zalloc(struct device *dev, size_t size, dma_addr_t *dma_handle, int flag, void* qp_ptr);
-static void svc_default_dma_free(struct device *dev, size_t size, void * ptr, dma_addr_t dma_handle, void* qp_ptr);
-
-void *(*svc_kmalloc)(size_t size,int flags, void* qp_ptr);
-void (*svc_kfree)(void *ptr, void* qp_ptr);
-void *(*svc_dma_zalloc)(struct device *dev, size_t size, dma_addr_t* dma_handle, int flag, void*qp_ptr);
-void (*svc_dma_free)(struct device *dev, size_t size, void *ptr, dma_addr_t dma_handle, void* qp_ptr);
-
 static LIST_HEAD(uld_ctx_list);
 static DEFINE_MUTEX(dev_mutex);
 static struct workqueue_struct *reg_workq;
@@ -486,26 +473,34 @@ static int stats_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "   Object: %10s %10s %10s %10s\n", "Total", "Current",
 		   "Max", "Fail");
 	seq_printf(seq, "     PDID: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.pd.total, dev->rdev.stats.pd.cur,
-			dev->rdev.stats.pd.max, dev->rdev.stats.pd.fail);
+		   dev->rdev.rdma_res->stats.pd.total,
+		   dev->rdev.rdma_res->stats.pd.cur,
+		   dev->rdev.rdma_res->stats.pd.max,
+		   dev->rdev.rdma_res->stats.pd.fail);
 	seq_printf(seq, "      QID: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.qid.total, dev->rdev.stats.qid.cur,
-			dev->rdev.stats.qid.max, dev->rdev.stats.qid.fail);
+		   dev->rdev.rdma_res->stats.qid.total,
+		   dev->rdev.rdma_res->stats.qid.cur,
+		   dev->rdev.rdma_res->stats.qid.max,
+		   dev->rdev.rdma_res->stats.qid.fail);
 	seq_printf(seq, "     SRQS: %10llu %10llu %10llu %10llu\n",
-		   dev->rdev.stats.srqt.total, dev->rdev.stats.srqt.cur,
-			dev->rdev.stats.srqt.max, dev->rdev.stats.srqt.fail);
+		   dev->rdev.rdma_res->stats.srqt.total,
+		   dev->rdev.rdma_res->stats.srqt.cur,
+		   dev->rdev.rdma_res->stats.srqt.max,
+		   dev->rdev.rdma_res->stats.srqt.fail);
 	seq_printf(seq, "   TPTMEM: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.stag.total, dev->rdev.stats.stag.cur,
-			dev->rdev.stats.stag.max, dev->rdev.stats.stag.fail);
+		   dev->rdev.stats.stag.total, dev->rdev.stats.stag.cur,
+		   dev->rdev.stats.stag.max, dev->rdev.stats.stag.fail);
 	seq_printf(seq, "   PBLMEM: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.pbl.total, dev->rdev.stats.pbl.cur,
-			dev->rdev.stats.pbl.max, dev->rdev.stats.pbl.fail);
+		   dev->rdev.stats.pbl.total, dev->rdev.stats.pbl.cur,
+		   dev->rdev.stats.pbl.max, dev->rdev.stats.pbl.fail);
 	seq_printf(seq, "   RQTMEM: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.rqt.total, dev->rdev.stats.rqt.cur,
-			dev->rdev.stats.rqt.max, dev->rdev.stats.rqt.fail);
+		   dev->rdev.rdma_res->stats.rqt.total,
+		   dev->rdev.rdma_res->stats.rqt.cur,
+		   dev->rdev.rdma_res->stats.rqt.max,
+		   dev->rdev.rdma_res->stats.rqt.fail);
 	seq_printf(seq, "  OCQPMEM: %10llu %10llu %10llu %10llu\n",
-			dev->rdev.stats.ocqp.total, dev->rdev.stats.ocqp.cur,
-			dev->rdev.stats.ocqp.max, dev->rdev.stats.ocqp.fail);
+		   dev->rdev.stats.ocqp.total, dev->rdev.stats.ocqp.cur,
+		   dev->rdev.stats.ocqp.max, dev->rdev.stats.ocqp.fail);
 	seq_printf(seq, "  DB FULL: %10llu\n", dev->rdev.stats.db_full);
 	seq_printf(seq, " DB EMPTY: %10llu\n", dev->rdev.stats.db_empty);
 	seq_printf(seq, "  DB DROP: %10llu\n", dev->rdev.stats.db_drop);
@@ -534,18 +529,10 @@ static ssize_t stats_clear(struct file *file, const char __user *buf,
 	struct c4iw_dev *dev = ((struct seq_file *)file->private_data)->private;
 
 	mutex_lock(&dev->rdev.stats.lock);
-	dev->rdev.stats.pd.max = 0;
-	dev->rdev.stats.pd.fail = 0;
-	dev->rdev.stats.qid.max = 0;
-	dev->rdev.stats.qid.fail = 0;
 	dev->rdev.stats.stag.max = 0;
 	dev->rdev.stats.stag.fail = 0;
 	dev->rdev.stats.pbl.max = 0;
 	dev->rdev.stats.pbl.fail = 0;
-	dev->rdev.stats.rqt.max = 0;
-	dev->rdev.stats.rqt.fail = 0;
-	dev->rdev.stats.rqt.max = 0;
-	dev->rdev.stats.rqt.fail = 0;
 	dev->rdev.stats.ocqp.max = 0;
 	dev->rdev.stats.ocqp.fail = 0;
 	dev->rdev.stats.db_full = 0;
@@ -556,6 +543,17 @@ static ssize_t stats_clear(struct file *file, const char __user *buf,
 	dev->rdev.stats.act_ofld_conn_fails = 0;
 	dev->rdev.stats.pas_ofld_conn_fails = 0;
 	mutex_unlock(&dev->rdev.stats.lock);
+
+	mutex_lock(&dev->rdev.rdma_res->stats.lock);
+	dev->rdev.rdma_res->stats.pd.max = 0;
+	dev->rdev.rdma_res->stats.pd.fail = 0;
+	dev->rdev.rdma_res->stats.qid.max = 0;
+	dev->rdev.rdma_res->stats.qid.fail = 0;
+	dev->rdev.rdma_res->stats.srqt.max = 0;
+	dev->rdev.rdma_res->stats.srqt.fail = 0;
+	dev->rdev.rdma_res->stats.rqt.max = 0;
+	dev->rdev.rdma_res->stats.rqt.fail = 0;
+	mutex_unlock(&dev->rdev.rdma_res->stats.lock);
 	return count;
 }
 
@@ -757,49 +755,12 @@ static void setup_debugfs(struct c4iw_dev *devp)
 					 (void *)devp, &wr_log_debugfs_fops, 4096);
 }
 
-void c4iw_release_dev_ucontext(struct c4iw_rdev *rdev,
-			       struct c4iw_dev_ucontext *uctx)
-{
-	struct list_head *pos, *nxt;
-	struct c4iw_qid_list *entry;
-
-	mutex_lock(&uctx->lock);
-	list_for_each_safe(pos, nxt, &uctx->qpids) {
-		entry = list_entry(pos, struct c4iw_qid_list, entry);
-		list_del_init(&entry->entry);
-		if (!(entry->qid & rdev->qpmask)) {
-			c4iw_put_resource(&rdev->resource.qid_table,
-					  entry->qid);
-			mutex_lock(&rdev->stats.lock);
-			rdev->stats.qid.cur -= rdev->qpmask + 1;
-			mutex_unlock(&rdev->stats.lock);
-		}
-		kfree(entry);
-	}
-
-	list_for_each_safe(pos, nxt, &uctx->cqids) {
-		entry = list_entry(pos, struct c4iw_qid_list, entry);
-		list_del_init(&entry->entry);
-		kfree(entry);
-	}
-	mutex_unlock(&uctx->lock);
-}
-
-void c4iw_init_dev_ucontext(struct c4iw_rdev *rdev,
-			    struct c4iw_dev_ucontext *uctx)
-{
-	INIT_LIST_HEAD(&uctx->qpids);
-	INIT_LIST_HEAD(&uctx->cqids);
-	mutex_init(&uctx->lock);
-}
-
 /* Caller takes care of locking if needed */
 static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 {
 	int err;
-	unsigned int factor;
 
-	c4iw_init_dev_ucontext(rdev, &rdev->uctx);
+	cxgb4_uld_init_dev_ucontext(&rdev->uctx);
 
 	/*
 	 * This implementation assumes udb_density == ucq_density!  Eventually
@@ -829,10 +790,6 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 		return -EINVAL;
 	}
 
-	factor = PAGE_SIZE / rdev->lldi.sge_host_page_size;
-	rdev->qpmask = (rdev->lldi.udb_density * factor) - 1;
-	rdev->cqmask = (rdev->lldi.ucq_density * factor) - 1;
-
 	pr_debug("dev %s stag start 0x%0x size 0x%0x num stags %d pbl start 0x%0x size 0x%0x rq start 0x%0x size 0x%0x qp qid start %u size %u cq qid start %u size %u srq size %u\n",
 		 pci_name(rdev->lldi.pdev), rdev->lldi.vr->stag.start,
 		 rdev->lldi.vr->stag.size, c4iw_num_stags(rdev),
@@ -844,43 +801,37 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 		 rdev->lldi.vr->cq.start,
 		 rdev->lldi.vr->cq.size,
 		 rdev->lldi.vr->srq.size);
-	pr_debug("udb %pR db_reg %p gts_reg %p qpmask 0x%x cqmask 0x%x\n",
-		 &rdev->lldi.pdev->resource[2],
-		 rdev->lldi.db_reg, rdev->lldi.gts_reg,
-		 rdev->qpmask, rdev->cqmask);
 
 	if (c4iw_num_stags(rdev) == 0)
 		return -EINVAL;
 
-	rdev->stats.pd.total = T4_MAX_NUM_PD;
 	rdev->stats.stag.total = rdev->lldi.vr->stag.size;
 	rdev->stats.pbl.total = rdev->lldi.vr->pbl.size;
-	rdev->stats.rqt.total = rdev->lldi.vr->rq.size;
-	rdev->stats.srqt.total = rdev->lldi.vr->srq.size;
 	rdev->stats.ocqp.total = rdev->lldi.vr->ocq.size;
-	rdev->stats.qid.total = rdev->lldi.vr->qp.size;
 
-	err = c4iw_init_resource(rdev, c4iw_num_stags(rdev),
-				 T4_MAX_NUM_PD, rdev->lldi.vr->srq.size);
+	err = c4iw_init_resource(rdev, c4iw_num_stags(rdev));
 	if (err) {
 		pr_err("error %d initializing resources\n", err);
 		return err;
 	}
+
+	pr_debug("udb %pR db_reg %p gts_reg %p qpmask 0x%x cqmask 0x%x\n",
+		 &rdev->lldi.pdev->resource[2],
+		 rdev->lldi.db_reg, rdev->lldi.gts_reg,
+		 rdev->rdma_res->qpmask, rdev->rdma_res->cqmask);
+
 	err = c4iw_pblpool_create(rdev);
 	if (err) {
 		pr_err("error %d initializing pbl pool\n", err);
 		goto destroy_resource;
 	}
-	err = c4iw_rqtpool_create(rdev);
-	if (err) {
-		pr_err("error %d initializing rqt pool\n", err);
-		goto destroy_pblpool;
-	}
+
 	err = c4iw_ocqp_pool_create(rdev);
 	if (err) {
 		pr_err("error %d initializing ocqp pool\n", err);
-		goto destroy_rqtpool;
+		goto destroy_pblpool;
 	}
+
 	rdev->status_page = (struct t4_dev_status_page *)
 			    __get_free_page(GFP_KERNEL);
 	if (!rdev->status_page) {
@@ -923,19 +874,17 @@ err_free_status_page_and_wr_log:
 	free_page((unsigned long)rdev->status_page);
 destroy_ocqp_pool:
 	c4iw_ocqp_pool_destroy(rdev);
-destroy_rqtpool:
-	c4iw_rqtpool_destroy(rdev);
 destroy_pblpool:
 	c4iw_pblpool_destroy(rdev);
 destroy_resource:
-	c4iw_destroy_resource(&rdev->resource);
+	c4iw_destroy_resource(rdev);
 	return err;
 }
 
 static void c4iw_rdev_close(struct c4iw_rdev *rdev)
 {
 	kfree(rdev->wr_log);
-	c4iw_release_dev_ucontext(rdev, &rdev->uctx);
+	cxgb4_uld_release_dev_ucontext(rdev->rdma_res, &rdev->uctx);
 	free_page((unsigned long)rdev->status_page);
 	c4iw_pblpool_destroy(rdev);
 	c4iw_rqtpool_destroy(rdev);
@@ -943,18 +892,18 @@ static void c4iw_rdev_close(struct c4iw_rdev *rdev)
 	wait_for_completion(&rdev->rqt_compl);
 	c4iw_ocqp_pool_destroy(rdev);
 	destroy_workqueue(rdev->free_workq);
-	c4iw_destroy_resource(&rdev->resource);
+	c4iw_destroy_resource(rdev);
 }
 
 void c4iw_dealloc(struct uld_ctx *ctx)
 {
+	if (!xa_empty(&ctx->dev->cqs))
+		pr_err("iw_cxgb4: CQs pending!!\n");
+	if (!xa_empty(&ctx->dev->qps))
+		pr_err("iw_cxgb4: QPs pending!!\n");
+	if (!xa_empty(&ctx->dev->mrs))
+		pr_err("iw_cxgb4: MRs pending!!\n");
 	c4iw_rdev_close(&ctx->dev->rdev);
-        if (!xa_empty(&ctx->dev->cqs))
-                pr_err("iw_cxgb4: CQs pending!!\n");
-        if (!xa_empty(&ctx->dev->qps))
-                pr_err("iw_cxgb4: QPs pending!!\n");
-        if (!xa_empty(&ctx->dev->mrs))
-                pr_err("iw_cxgb4: MRs pending!!\n");
 	wait_event(ctx->dev->wait, xa_empty(&ctx->dev->hwtids));
 	WARN_ON(!xa_empty(&ctx->dev->stids));
 	WARN_ON(!xa_empty(&ctx->dev->atids));
@@ -969,7 +918,6 @@ void c4iw_dealloc(struct uld_ctx *ctx)
 static void c4iw_remove(struct uld_ctx *ctx)
 {
 	pr_debug("c4iw_dev %p\n", ctx->dev);
-        ctx->dev->ib_active = false;
 	debugfs_remove_recursive(ctx->dev->debugfs_root);
 	c4iw_unregister_device(ctx->dev);
 	c4iw_dealloc(ctx);
@@ -1081,6 +1029,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 					c4iw_debugfs_root);
 		setup_debugfs(devp);
 	}
+
 
 	return devp;
 }
@@ -1265,17 +1214,13 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 	case CXGB4_STATE_START_RECOVERY:
 		pr_info("%s: Fatal Error\n", pci_name(ctx->lldi.pdev));
 		if (ctx->dev)
-                {
 			ctx->dev->rdev.flags |= T4_FATAL_ERROR;
-                }
 		fallthrough;
 	case CXGB4_STATE_DETACH:
 		pr_info("%s: Detach\n", pci_name(ctx->lldi.pdev));
-		if (ctx->dev && ctx->dev->ib_active) {
+		if (ctx->dev) {
 			struct ib_event event = {};
 
-			ctx->dev->rdev.flags |= T4_FATAL_ERROR;
-                        ctx->dev->ib_active = false;
 			event.event  = IB_EVENT_DEVICE_FATAL;
 			event.device = &ctx->dev->ibdev;
 			ib_dispatch_event(&event);
@@ -1396,7 +1341,7 @@ static void recover_lost_dbs(struct uld_ctx *ctx, struct qp_list *qp_list)
 
 		xa_lock_irq(&qp->rhp->qps);
 		spin_lock(&qp->lock);
-		ret = cxgb4_sync_txq_pidx(qp->rhp->rdev.lldi.ports[0],
+		ret = cxgb4_uld_txq_sync_pidx(qp->rhp->rdev.lldi.ports[0],
 					  qp->wq.sq.qid,
 					  t4_sq_host_wq_pidx(&qp->wq),
 					  t4_sq_wq_size(&qp->wq));
@@ -1409,7 +1354,7 @@ static void recover_lost_dbs(struct uld_ctx *ctx, struct qp_list *qp_list)
 		}
 		qp->wq.sq.wq_pidx_inc = 0;
 
-		ret = cxgb4_sync_txq_pidx(qp->rhp->rdev.lldi.ports[0],
+		ret = cxgb4_uld_txq_sync_pidx(qp->rhp->rdev.lldi.ports[0],
 					  qp->wq.rq.qid,
 					  t4_rq_host_wq_pidx(&qp->wq),
 					  t4_rq_wq_size(&qp->wq));
@@ -1520,7 +1465,7 @@ static int c4iw_uld_control(void *handle, enum cxgb4_control control, ...)
 static struct cxgb4_uld_info c4iw_uld_info = {
 	.name = DRV_NAME,
 	.nrxq = MAX_ULD_QSETS,
-	.ntxq = MAX_ULD_QSETS,
+	.ntxq = MAX_RDMA_QUEUES,
 	.rxq_size = 511,
 	.ciq = true,
 	.lro = false,
@@ -1551,57 +1496,9 @@ struct c4iw_wr_wait *c4iw_alloc_wr_wait(gfp_t gfp)
 	return wr_waitp;
 }
 
-static void svc_setup_func_ptr(void)
-{
-    svc_kmalloc = &svc_default_kmalloc;
-    svc_kfree = &svc_default_kfree;
-    svc_dma_zalloc = &svc_default_dma_zalloc;
-    svc_dma_free = &svc_default_dma_free;
-      
-    return;
-}
-
-static void * svc_default_kmalloc( size_t size, int flag, void* qp_ptr)
-{
-    return kmalloc(size, GFP_KERNEL);
-}
-
-static void svc_default_kfree(void *ptr, void* qp_ptr)
-{
-    kfree(ptr);
-}
-
-static void * svc_default_dma_zalloc(struct device *dev, size_t size, dma_addr_t *dma_handle, int flag, void* qp_ptr)
-{
-    return dma_alloc_coherent(dev, size, dma_handle, flag);
-}
-
-static void svc_default_dma_free(struct device *dev, size_t size, void *ptr, dma_addr_t dma_handle, void* qp_ptr)
-{
-    dma_free_coherent(dev, size, ptr, dma_handle);
-}
-
-int setup_svc_mem_alloc_cxgb( void *(*svc_iser_kmalloc)(size_t,int,void*),
-                      void(*svc_iser_kfree)(void *,void*),
-                      void *(*svc_iser_dma_zalloc)(struct device*, size_t,dma_addr_t*,int,void*),
-                      void (*svc_iser_dma_free)(struct device*,size_t,void*, dma_addr_t,void*))
-{
-    svc_kmalloc = svc_iser_kmalloc;
-    svc_kfree = svc_iser_kfree;
-    svc_dma_zalloc = svc_iser_dma_zalloc;
-    svc_dma_free = svc_iser_dma_free;
-
-    return 1;
-}
-EXPORT_SYMBOL_GPL(setup_svc_mem_alloc_cxgb);
-
-
 static int __init c4iw_init_module(void)
 {
 	int err;
-
-    /* Initialize function pointers to default functions */
-    svc_setup_func_ptr();
 
 	err = c4iw_cm_init();
 	if (err)

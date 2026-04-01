@@ -290,7 +290,7 @@ static int write_tpt_entry(struct c4iw_rdev *rdev, u32 reset_tpt_entry,
 	stag_idx = (*stag) >> 8;
 
 	if ((!reset_tpt_entry) && (*stag == T4_STAG_UNSET)) {
-		stag_idx = c4iw_get_resource(&rdev->resource.tpt_table);
+		stag_idx = cxgb4_uld_get_resource(&rdev->resource.tpt_table);
 		if (!stag_idx) {
 			mutex_lock(&rdev->stats.lock);
 			rdev->stats.stag.fail++;
@@ -334,7 +334,7 @@ static int write_tpt_entry(struct c4iw_rdev *rdev, u32 reset_tpt_entry,
 				sizeof(*tpt), tpt, skb, wr_waitp);
 
 	if (reset_tpt_entry) {
-		c4iw_put_resource(&rdev->resource.tpt_table, stag_idx);
+		cxgb4_uld_put_resource(&rdev->resource.tpt_table, stag_idx);
 		mutex_lock(&rdev->stats.lock);
 		rdev->stats.stag.cur -= 32;
 		mutex_unlock(&rdev->stats.lock);

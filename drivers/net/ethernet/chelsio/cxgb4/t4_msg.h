@@ -51,6 +51,8 @@ enum {
 	CPL_RX_DATA_ACK       = 0xD,
 	CPL_TX_PKT            = 0xE,
 	CPL_L2T_WRITE_REQ     = 0x12,
+	CPL_GRE_TABLE_REQ     = 0x1b,
+	CPL_GRE_TABLE_RPL     = 0xbb,
 	CPL_SMT_WRITE_REQ     = 0x14,
 	CPL_TID_RELEASE       = 0x1A,
 	CPL_SRQ_TABLE_REQ     = 0x1C,
@@ -88,6 +90,7 @@ enum {
 
 	CPL_RDMA_READ_REQ     = 0x60,
 
+	CPL_SET_LE_REQ        = 0x80,
 	CPL_PASS_OPEN_REQ6    = 0x81,
 	CPL_ACT_OPEN_REQ6     = 0x83,
 
@@ -95,6 +98,7 @@ enum {
 	CPL_TX_TLS_SFO        = 0x89,
 	CPL_TX_SEC_PDU        = 0x8A,
 	CPL_TX_TLS_ACK        = 0x8B,
+	CPL_TX_QUIC_ENC       = 0x8d,
 
 	CPL_RDMA_TERMINATE    = 0xA2,
 	CPL_RDMA_WRITE        = 0xA4,
@@ -104,6 +108,7 @@ enum {
 	CPL_TRACE_PKT         = 0xB0,
 	CPL_TLS_DATA          = 0xB1,
 	CPL_ISCSI_DATA	      = 0xB2,
+	CPL_NVMT_CMP          = 0xB5,
 
 	CPL_FW4_MSG           = 0xC0,
 	CPL_FW4_PLD           = 0xC1,
@@ -147,6 +152,20 @@ enum CPL_error {
 	CPL_CONTAINS_WRITE_RPL     = 61,
 };
 
+/*
+ * Some of the error codes above implicitly indicate that there is no TID
+ * allocated with the result of an ACT_OPEN.  We use this predicate to make
+ * that explicit.
+ */
+static inline int act_open_has_tid(int status)
+{
+	return (status != CPL_ERR_TCAM_PARITY &&
+		status != CPL_ERR_TCAM_MISS &&
+		status != CPL_ERR_TCAM_FULL &&
+		status != CPL_ERR_CONN_EXIST_SYNRECV &&
+		status != CPL_ERR_CONN_EXIST);
+}
+
 enum {
 	CPL_CONN_POLICY_AUTO = 0,
 	CPL_CONN_POLICY_ASK  = 1,
@@ -161,6 +180,7 @@ enum {
 	ULP_MODE_TCPDDP	       = 5,
 	ULP_MODE_FCOE          = 6,
 	ULP_MODE_TLS           = 8,
+	ULP_MODE_NVMET         = 11,
 };
 
 enum {
@@ -185,6 +205,20 @@ enum {                     /* TX_PKT_XT checksum types */
 	TX_CSUM_TCPIP6 = 10,
 	TX_CSUM_UDPIP6 = 11,
 	TX_CSUM_IP     = 12,
+};
+
+enum {                     /* LE commands */
+        LE_CMD_READ  = 0x4,
+        LE_CMD_WRITE = 0xb
+};
+
+enum {                     /* LE request size */
+        LE_SZ_NONE = 0,
+        LE_SZ_33   = 1,
+        LE_SZ_66   = 2,
+        LE_SZ_132  = 3,
+        LE_SZ_264  = 4,
+        LE_SZ_528  = 5
 };
 
 union opcode_tid {
@@ -273,6 +307,14 @@ struct work_request_hdr {
 #define KEEP_ALIVE_V(x) ((__u64)(x) << KEEP_ALIVE_S)
 #define KEEP_ALIVE_F    KEEP_ALIVE_V(1ULL)
 
+#define MAX_RT_S    55
+#define MAX_RT_M    0xF
+#define MAX_RT_V(x) ((__u64)(x) << MAX_RT_S)
+
+#define MAX_RT_OVERRIDE_S    59
+#define MAX_RT_OVERRIDE_V(x) ((__u64)(x) << MAX_RT_OVERRIDE_S)
+#define MAX_RT_OVERRIDE_F    MAX_RT_OVERRIDE_V(1ULL)
+
 #define MSS_IDX_S    60
 #define MSS_IDX_M    0xF
 #define MSS_IDX_V(x) ((__u64)(x) << MSS_IDX_S)
@@ -355,6 +397,16 @@ struct cpl_pass_open_req {
 
 #define CONN_POLICY_S    22
 #define CONN_POLICY_V(x) ((x) << CONN_POLICY_S)
+
+#define T5_FILT_INFO_S    24
+#define T5_FILT_INFO_M    0xffffffffffULL
+#define T5_FILT_INFO_V(x) ((x) << T5_FILT_INFO_S)
+#define T5_FILT_INFO_G(x) (((x) >> T5_FILT_INFO_S) & T5_FILT_INFO_M)
+
+#define FILT_INFO_S    28
+#define FILT_INFO_M    0xfffffffffULL
+#define FILT_INFO_V(x) ((x) << FILT_INFO_S)
+#define FILT_INFO_G(x) (((x) >> FILT_INFO_S) & FILT_INFO_M)
 
 struct cpl_pass_open_req6 {
 	WR_HDR;
@@ -544,6 +596,26 @@ struct cpl_t6_act_open_req {
 	__be32 opt3;
 };
 
+struct cpl_t7_act_open_req {
+        WR_HDR;
+        union opcode_tid ot;
+        __be16 local_port;
+        __be16 peer_port;
+        __be32 local_ip;
+        __be32 peer_ip;
+        __be64 opt0;
+        __be32 iss;
+        __be32 opt2;
+        __be64 params;
+        __be32 rsvd2;
+        __be32 opt3;
+};
+
+#define T7_FILTER_TUPLE_S       1
+#define T7_FILTER_TUPLE_M       0x7FFFFFFFFFFFFFFFULL
+#define T7_FILTER_TUPLE_V(x)    ((x) << T7_FILTER_TUPLE_S)
+#define T7_FILTER_TUPLE_G(x)    (((x) >> T7_FILTER_TUPLE_S) & T7_FILTER_TUPLE_M)
+
 struct cpl_act_open_req6 {
 	WR_HDR;
 	union opcode_tid ot;
@@ -588,6 +660,23 @@ struct cpl_t6_act_open_req6 {
 	__be64 params;
 	__be32 rsvd2;
 	__be32 opt3;
+};
+
+struct cpl_t7_act_open_req6 {
+        WR_HDR;
+        union opcode_tid ot;
+        __be16 local_port;
+        __be16 peer_port;
+        __be64 local_ip_hi;
+        __be64 local_ip_lo;
+        __be64 peer_ip_hi;
+        __be64 peer_ip_lo;
+        __be64 opt0;
+        __be32 iss;
+        __be32 opt2;
+        __be64 params;
+        __be32 rsvd2;
+        __be32 opt3;
 };
 
 struct cpl_act_open_rpl {
@@ -682,9 +771,19 @@ struct cpl_get_tcb {
 #define QUEUENO_S    0
 #define QUEUENO_V(x) ((x) << QUEUENO_S)
 
+#define T7_QUEUENO_S    0
+#define T7_QUEUENO_M    0xFFF
+#define T7_QUEUENO_V(x) ((x) << T7_QUEUENO_S)
+#define T7_QUEUENO_G(x) (((x) >> T7_QUEUENO_S) & T7_QUEUENO_M)
+
 #define REPLY_CHAN_S    14
 #define REPLY_CHAN_V(x) ((x) << REPLY_CHAN_S)
 #define REPLY_CHAN_F    REPLY_CHAN_V(1U)
+
+#define T7_REPLY_CHAN_S         12
+#define T7_REPLY_CHAN_M         0x7
+#define T7_REPLY_CHAN_V(x)      ((x) << T7_REPLY_CHAN_S)
+#define T7_REPLY_CHAN_G(x)      (((x) >> T7_REPLY_CHAN_S) & T7_REPLY_CHAN_M)
 
 #define NO_REPLY_S    15
 #define NO_REPLY_V(x) ((x) << NO_REPLY_S)
@@ -1363,6 +1462,147 @@ struct cpl_smt_write_rpl {
 #define SMTW_NORPL_V(x)	((x) << SMTW_NORPL_S)
 #define SMTW_NORPL_F	SMTW_NORPL_V(1U)
 
+struct cpl_rdma_cqe_err {
+	union opcode_tid ot;
+	__be32 tid_flitcnt;
+	__be32 qpid_to_wr_type;
+	__be32 length;
+	__be32 tag;
+	__be32 msn;
+};
+
+#define CPL_RDMA_CQE_ERR_QPID_S		12
+#define CPL_RDMA_CQE_ERR_QPID_M		0xfffff
+#define CPL_RDMA_CQE_ERR_QPID_G(x)	\
+    (((x) >> CPL_RDMA_CQE_ERR_QPID_S) & CPL_RDMA_CQE_ERR_QPID_M)
+
+#define CPL_RDMA_CQE_ERR_STATUS_S	5
+#define CPL_RDMA_CQE_ERR_STATUS_M	0x1f
+#define CPL_RDMA_CQE_ERR_STATUS_G(x)	\
+    (((x) >> CPL_RDMA_CQE_ERR_STATUS_S) & CPL_RDMA_CQE_ERR_STATUS_M)
+
+struct cpl_set_le_req {
+        WR_HDR;
+        union opcode_tid ot;
+        __be16 reply_ctrl;
+        __be16 params;
+        __be64 mask_hi;
+        __be64 mask_lo;
+        __be64 val_hi;
+        __be64 val_lo;
+};
+
+/* cpl_set_le_req.reply_ctrl additional fields */
+#define LE_REQ_RXCHANNEL_S      14
+#define LE_REQ_RXCHANNEL_M      0x1
+#define LE_REQ_RXCHANNEL_V(x)   ((x) << LE_REQ_RXCHANNEL_S)
+#define LE_REQ_RXCHANNEL_G(x)   \
+    (((x) >> LE_REQ_RXCHANNEL_S) & LE_REQ_RXCHANNEL_M)
+#define LE_REQ_RXCHANNEL_F      LE_REQ_RXCHANNEL_V(1U)
+
+#define LE_REQ_IP6_S    13
+#define LE_REQ_IP6_V(x) ((x) << LE_REQ_IP6_S)
+#define LE_REQ_IP6_F    LE_REQ_IP6_V(1U)
+
+/* cpl_set_le_req.params fields */
+#define LE_CHAN_S    0
+#define LE_CHAN_M    0x3
+#define LE_CHAN_V(x) ((x) << LE_CHAN_S)
+#define LE_CHAN_G(x) (((x) >> LE_CHAN_S) & LE_CHAN_M)
+
+#define LE_OFFSET_S    5
+#define LE_OFFSET_M    0x7
+#define LE_OFFSET_V(x) ((x) << LE_OFFSET_S)
+#define LE_OFFSET_G(x) (((x) >> LE_OFFSET_S) & LE_OFFSET_M)
+
+#define LE_MORE_S    8
+#define LE_MORE_V(x) ((x) << LE_MORE_S)
+#define LE_MORE_F    LE_MORE_V(1U)
+
+#define LE_REQSIZE_S    9
+#define LE_REQSIZE_M    0x7
+#define LE_REQSIZE_V(x) ((x) << LE_REQSIZE_S)
+#define LE_REQSIZE_G(x) (((x) >> LE_REQSIZE_S) & LE_REQSIZE_M)
+
+#define LE_REQCMD_S    12
+#define LE_REQCMD_M    0xF
+#define LE_REQCMD_V(x) ((x) << LE_REQCMD_S)
+#define LE_REQCMD_G(x) (((x) >> LE_REQCMD_S) & LE_REQCMD_M)
+
+struct cpl_t7_set_le_req {
+        WR_HDR;
+        union opcode_tid ot;
+        __be32 noreply_to_channel;
+        __be32 mask1[2];
+        __be32 mask0[2];
+        __be32 value1[2];
+        __be32 value0[2];
+};
+
+#define CPL_T7_SET_LE_REQ_INDEX_S       0
+#define CPL_T7_SET_LE_REQ_INDEX_M       0xffffff
+#define CPL_T7_SET_LE_REQ_INDEX_V(x)    ((x) << CPL_T7_SET_LE_REQ_INDEX_S)
+#define CPL_T7_SET_LE_REQ_INDEX_G(x)    \
+    (((x) >> CPL_T7_SET_LE_REQ_INDEX_S) & CPL_T7_SET_LE_REQ_INDEX_M)
+
+#define CPL_T7_SET_LE_REQ_NOREPLY_S     31
+#define CPL_T7_SET_LE_REQ_NOREPLY_M     0x1
+#define CPL_T7_SET_LE_REQ_NOREPLY_V(x)  ((x) << CPL_T7_SET_LE_REQ_NOREPLY_S)
+#define CPL_T7_SET_LE_REQ_NOREPLY_G(x)  \
+    (((x) >> CPL_T7_SET_LE_REQ_NOREPLY_S) & CPL_T7_SET_LE_REQ_NOREPLY_M)
+#define CPL_T7_SET_LE_REQ_NOREPLY_F     CPL_T7_SET_LE_REQ_NOREPLY_V(1U)
+
+#define CPL_T7_SET_LE_REQ_RXCHANNEL_S           28
+#define CPL_T7_SET_LE_REQ_RXCHANNEL_M           0x7
+#define CPL_T7_SET_LE_REQ_RXCHANNEL_V(x)        \
+    ((x) << CPL_T7_SET_LE_REQ_RXCHANNEL_S)
+#define CPL_T7_SET_LE_REQ_RXCHANNEL_G(x)        \
+    (((x) >> CPL_T7_SET_LE_REQ_RXCHANNEL_S) & CPL_T7_SET_LE_REQ_RXCHANNEL_M)
+
+#define CPL_T7_SET_LE_REQ_QUEUE_S       16
+#define CPL_T7_SET_LE_REQ_QUEUE_M       0xfff
+#define CPL_T7_SET_LE_REQ_QUEUE_V(x)    ((x) << CPL_T7_SET_LE_REQ_QUEUE_S)
+#define CPL_T7_SET_LE_REQ_QUEUE_G(x)    \
+    (((x) >> CPL_T7_SET_LE_REQ_QUEUE_S) & CPL_T7_SET_LE_REQ_QUEUE_M)
+
+#define CPL_T7_SET_LE_REQ_REQCMD_S      12
+#define CPL_T7_SET_LE_REQ_REQCMD_M      0xf
+#define CPL_T7_SET_LE_REQ_REQCMD_V(x)   ((x) << CPL_T7_SET_LE_REQ_REQCMD_S)
+#define CPL_T7_SET_LE_REQ_REQCMD_G(x)   \
+    (((x) >> CPL_T7_SET_LE_REQ_REQCMD_S) & CPL_T7_SET_LE_REQ_REQCMD_M)
+
+#define CPL_T7_SET_LE_REQ_REQSIZE_S     9
+#define CPL_T7_SET_LE_REQ_REQSIZE_M     0x7
+#define CPL_T7_SET_LE_REQ_REQSIZE_V(x)  ((x) << CPL_T7_SET_LE_REQ_REQSIZE_S)
+#define CPL_T7_SET_LE_REQ_REQSIZE_G(x)  \
+    (((x) >> CPL_T7_SET_LE_REQ_REQSIZE_S) & CPL_T7_SET_LE_REQ_REQSIZE_M)
+
+#define CPL_T7_SET_LE_REQ_MORE_S        8
+#define CPL_T7_SET_LE_REQ_MORE_M        0x1
+#define CPL_T7_SET_LE_REQ_MORE_V(x)     ((x) << CPL_T7_SET_LE_REQ_MORE_S)
+#define CPL_T7_SET_LE_REQ_MORE_G(x)     \
+    (((x) >> CPL_T7_SET_LE_REQ_MORE_S) & CPL_T7_SET_LE_REQ_MORE_M)
+#define CPL_T7_SET_LE_REQ_MORE_F        CPL_T7_SET_LE_REQ_MORE_V(1U)
+
+#define CPL_T7_SET_LE_REQ_OFFSET_S      5
+#define CPL_T7_SET_LE_REQ_OFFSET_M      0x7
+#define CPL_T7_SET_LE_REQ_OFFSET_V(x)   ((x) << CPL_T7_SET_LE_REQ_OFFSET_S)
+#define CPL_T7_SET_LE_REQ_OFFSET_G(x)   \
+    (((x) >> CPL_T7_SET_LE_REQ_OFFSET_S) & CPL_T7_SET_LE_REQ_OFFSET_M)
+
+#define CPL_T7_SET_LE_REQ_REQTYPE_S     4
+#define CPL_T7_SET_LE_REQ_REQTYPE_M     0x1
+#define CPL_T7_SET_LE_REQ_REQTYPE_V(x)  ((x) << CPL_T7_SET_LE_REQ_REQTYPE_S)
+#define CPL_T7_SET_LE_REQ_REQTYPE_G(x)  \
+    (((x) >> CPL_T7_SET_LE_REQ_REQTYPE_S) & CPL_T7_SET_LE_REQ_REQTYPE_M)
+#define CPL_T7_SET_LE_REQ_REQTYPE_F     CPL_T7_SET_LE_REQ_REQTYPE_V(1U)
+
+#define CPL_T7_SET_LE_REQ_CHANNEL_S     0
+#define CPL_T7_SET_LE_REQ_CHANNEL_M     0x3
+#define CPL_T7_SET_LE_REQ_CHANNEL_V(x)  ((x) << CPL_T7_SET_LE_REQ_CHANNEL_S)
+#define CPL_T7_SET_LE_REQ_CHANNEL_G(x)  \
+    (((x) >> CPL_T7_SET_LE_REQ_CHANNEL_S) & CPL_T7_SET_LE_REQ_CHANNEL_M)
+
 struct cpl_rdma_terminate {
 	union opcode_tid ot;
 	__be16 rsvd;
@@ -1387,6 +1627,7 @@ enum {
 	FW_TYPE_CQE = 2,
 	FW_TYPE_OFLD_CONNECTION_WR_RPL = 3,
 	FW_TYPE_RSSCPL = 4,
+	FW_TYPE_IPSEC_SA = 8,
 };
 
 struct cpl_fw4_pld {
@@ -1468,6 +1709,9 @@ struct cpl_tx_data {
 };
 
 /* cpl_tx_data.flags field */
+#define TX_ULP_SUBMODE_S    6
+#define TX_ULP_SUBMODE_V(x) ((x) << TX_ULP_SUBMODE_S)
+
 #define TX_FORCE_S	13
 #define TX_FORCE_V(x)	((x) << TX_FORCE_S)
 
@@ -1547,6 +1791,14 @@ struct ulptx_idata {
 	__be32 len;
 };
 
+/* ULP_TXPKT field values */
+enum {
+        ULP_TXPKT_DEST_TP = 0,
+        ULP_TXPKT_DEST_SGE,
+        ULP_TXPKT_DEST_UP,
+        ULP_TXPKT_DEST_DEVNULL,
+};
+
 struct ulp_txpkt {
 	__be32 cmd_dest;
 	__be32 len;
@@ -1580,13 +1832,15 @@ enum cpl_tx_tnl_lso_type {
 	TX_TNL_TYPE_NVGRE,
 	TX_TNL_TYPE_VXLAN,
 	TX_TNL_TYPE_GENEVE,
+	TX_TNL_TYPE_IPSEC,
 };
 
 struct cpl_tx_tnl_lso {
 	__be32 op_to_IpIdSplitOut;
 	__be16 IpIdOffsetOut;
 	__be16 UdpLenSetOut_to_TnlHdrLen;
-	__be64 r1;
+	__be32 ipsecen_to_rocev2;
+	__be32 roce_eth;
 	__be32 Flow_to_TcpHdrLen;
 	__be16 IpIdOffset;
 	__be16 IpIdSplit_to_Mss;
@@ -1719,11 +1973,11 @@ struct cpl_tx_tnl_lso {
 #define CPL_TX_TNL_LSO_TNLTYPE_G(x)	\
 	(((x) >> CPL_TX_TNL_LSO_TNLTYPE_S) & CPL_TX_TNL_LSO_TNLTYPE_M)
 
-#define S_CPL_TX_TNL_LSO_ETHHDRLEN	16
-#define M_CPL_TX_TNL_LSO_ETHHDRLEN	0xf
-#define V_CPL_TX_TNL_LSO_ETHHDRLEN(x)	((x) << S_CPL_TX_TNL_LSO_ETHHDRLEN)
-#define G_CPL_TX_TNL_LSO_ETHHDRLEN(x)	\
-	(((x) >> S_CPL_TX_TNL_LSO_ETHHDRLEN) & M_CPL_TX_TNL_LSO_ETHHDRLEN)
+#define CPL_TX_TNL_LSO_ETHHDRLEN_S	16
+#define CPL_TX_TNL_LSO_ETHHDRLEN_M	0xf
+#define CPL_TX_TNL_LSO_ETHHDRLEN_V(x)	((x) << CPL_TX_TNL_LSO_ETHHDRLEN_S)
+#define CPL_TX_TNL_LSO_ETHHDRLEN_G(x)	\
+	(((x) >> CPL_TX_TNL_LSO_ETHHDRLEN_S) & CPL_TX_TNL_LSO_ETHHDRLEN_M)
 
 #define CPL_TX_TNL_LSO_TNLHDRLEN_S      0
 #define CPL_TX_TNL_LSO_TNLHDRLEN_M      0xfff
@@ -1778,6 +2032,9 @@ struct ulp_mem_io {
 /* ulp_mem_io.dlen fields */
 #define ULP_MEMIO_DATA_LEN_S    0
 #define ULP_MEMIO_DATA_LEN_V(x) ((x) << ULP_MEMIO_DATA_LEN_S)
+
+#define T7_ULP_MEMIO_DATA_LEN_S    0
+#define T7_ULP_MEMIO_DATA_LEN_V(x) ((x) << T7_ULP_MEMIO_DATA_LEN_S)
 
 #define ULPTX_NSGE_S    0
 #define ULPTX_NSGE_M    0xFFFF
@@ -2202,10 +2459,10 @@ struct cpl_rx_mps_pkt {
 	(((x) >> CPL_RX_MPS_PKT_TYPE_S) & CPL_RX_MPS_PKT_TYPE_M)
 
 enum {
-	X_CPL_RX_MPS_PKT_TYPE_PAUSE = 1 << 0,
-	X_CPL_RX_MPS_PKT_TYPE_PPP   = 1 << 1,
-	X_CPL_RX_MPS_PKT_TYPE_QFC   = 1 << 2,
-	X_CPL_RX_MPS_PKT_TYPE_PTP   = 1 << 3
+	CPL_RX_MPS_PKT_TYPE_PAUSE_X = 1 << 0,
+	CPL_RX_MPS_PKT_TYPE_PPP_X   = 1 << 1,
+	CPL_RX_MPS_PKT_TYPE_QFC_X   = 1 << 2,
+	CPL_RX_MPS_PKT_TYPE_PTP_X   = 1 << 3
 };
 
 struct cpl_srq_table_req {
@@ -2349,4 +2606,14 @@ struct cpl_rx_tls_cmp {
 #define CPL_RX_TLS_CMP_LENGTH_V(x)      ((x) << CPL_RX_TLS_CMP_LENGTH_S)
 #define CPL_RX_TLS_CMP_LENGTH_G(x)      \
 	(((x) >> CPL_RX_TLS_CMP_LENGTH_S) & CPL_RX_TLS_CMP_LENGTH_M)
+
+struct cpl_nvmt_cmp {
+	union opcode_tid ot;
+	__be16 crch;
+	__be16 length;
+	__be32 seq;
+	__u8   t10status;
+	__u8   status;
+	__be16 crcl;
+};
 #endif  /* __T4_MSG_H */

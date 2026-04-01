@@ -7,6 +7,7 @@
 #define __CXGB4_CUDBG_H__
 
 #include <asm/cpufeature.h>
+
 #include "cudbg_if.h"
 #include "cudbg_lib_common.h"
 #include "cudbg_entity.h"
@@ -32,46 +33,46 @@ enum CXGB4_ETHTOOL_DUMP_FLAGS {
 };
 
 typedef struct {
-       u64 a, b, c, d;
+	u64 a, b, c, d;
 } __u256;
 typedef __u256 u256, __le256;
 
 static inline int cxgb4_has_avx(void)
 {
-       return boot_cpu_has(X86_FEATURE_AVX);
+	return boot_cpu_has(X86_FEATURE_AVX);
 }
 
 static inline u256 readqq(const volatile void __iomem *addr)
 {
-       u256 ret;
+	u256 ret;
 
-       if (!cxgb4_has_avx()) {
-               const volatile u64 __iomem *p = addr;
+	if (!cxgb4_has_avx()) {
+		const volatile u64 __iomem *p = addr;
 
-               ret.a = readq(p);
-               ret.b = readq(p + 1);
-               ret.c = readq(p + 2);
-               ret.d = readq(p + 3);
+		ret.a = readq(p);
+		ret.b = readq(p + 1);
+		ret.c = readq(p + 2);
+		ret.d = readq(p + 3);
 
-               return ret;
-       }
+		return ret;
+	}
 
-       asm volatile("vmovdqu %0, %%ymm0" :
-                    : "m" (*(volatile u256 __force *)addr));
-       asm volatile("vmovdqu %%ymm0, %0" : "=m" (ret) : : "memory");
-       return ret;
+	asm volatile("vmovdqu %0, %%ymm0" :
+		     : "m" (*(volatile u256 __force *)addr));
+	asm volatile("vmovdqu %%ymm0, %0" : "=m" (ret) : : "memory");
+	return ret;
 }
 
 static inline u256 le256_to_cpu(__le256 val)
 {
-       u256 ret;
+	u256 ret;
 
-       ret.a = le64_to_cpu(val.a);
-       ret.b = le64_to_cpu(val.b);
-       ret.c = le64_to_cpu(val.c);
-       ret.d = le64_to_cpu(val.d);
+	ret.a = le64_to_cpu(val.a);
+	ret.b = le64_to_cpu(val.b);
+	ret.c = le64_to_cpu(val.c);
+	ret.d = le64_to_cpu(val.d);
 
-       return ret;
+	return ret;
 }
 
 #define CXGB4_ETH_DUMP_ALL (CXGB4_ETH_DUMP_MEM | CXGB4_ETH_DUMP_HW)

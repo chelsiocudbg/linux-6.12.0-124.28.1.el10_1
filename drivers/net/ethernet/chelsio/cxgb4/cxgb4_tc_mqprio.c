@@ -78,8 +78,8 @@ static int cxgb4_mqprio_validate(struct net_device *dev,
 		max_rate += (mqprio->max_rate[i] * 8);
 	}
 
-	if (qoffset >= adap->tids.neotids || qcount > adap->tids.neotids)
-		return -ENOMEM;
+//	if (qoffset >= adap->tids.neotids || qcount > adap->tids.neotids)
+//		return -ENOMEM;
 
 	if (min_rate > max_link_rate || max_rate > max_link_rate) {
 		netdev_err(dev,
@@ -109,8 +109,8 @@ static int cxgb4_init_eosw_txq(struct net_device *dev,
 	eosw_txq->ndesc = CXGB4_EOSW_TXQ_DEFAULT_DESC_NUM;
 	spin_lock_init(&eosw_txq->lock);
 	eosw_txq->state = CXGB4_EO_STATE_CLOSED;
-	eosw_txq->eotid = eotid;
-	eosw_txq->hwtid = adap->tids.eotid_base + eosw_txq->eotid;
+//	eosw_txq->eotid = eotid;
+//	eosw_txq->hwtid = adap->tids.eotid_base + eosw_txq->eotid;
 	eosw_txq->cred = adap->params.ofldq_wr_cred;
 	eosw_txq->hwqid = hwqid;
 	eosw_txq->netdev = dev;
@@ -176,7 +176,7 @@ static int cxgb4_mqprio_alloc_hw_resources(struct net_device *dev)
 		refcount_inc(&adap->tc_mqprio->refcnt);
 	}
 
-	if (!(adap->flags & CXGB4_USING_MSIX))
+	if (!(adap->flags & CXGB4_USING_INTR_MULTI))
 		msix = -((int)adap->sge.intrq.abs_id + 1);
 
 	for (i = 0; i < pi->nqsets; i++) {
@@ -205,22 +205,14 @@ static int cxgb4_mqprio_alloc_hw_resources(struct net_device *dev)
 
 		eorxq->fl.size = CXGB4_EOHW_FLQ_DEFAULT_DESC_NUM;
 
-		ret = t4_sge_alloc_rxq(adap, &eorxq->rspq, false,
-				       dev, msix, &eorxq->fl,
-				       cxgb4_ethofld_rx_handler,
-				       NULL, 0);
-		if (ret)
-			goto out_free_queues;
-
 		/* Allocate ETHOFLD hardware Txqs */
 		eotxq->q.size = CXGB4_EOHW_TXQ_DEFAULT_DESC_NUM;
-		ret = t4_sge_alloc_ethofld_txq(adap, eotxq, dev,
-					       eorxq->rspq.cntxt_id);
+		ret = 0;
 		if (ret)
 			goto out_free_queues;
 
 		/* Allocate IRQs, set IRQ affinity, and start Rx */
-		if (adap->flags & CXGB4_USING_MSIX) {
+		if (adap->flags & CXGB4_USING_INTR_MULTI) {
 			ret = request_irq(eorxq->msix->vec, t4_sge_intr_msix, 0,
 					  eorxq->msix->desc, &eorxq->rspq);
 			if (ret)
@@ -243,7 +235,7 @@ out_free_msix:
 		if (adap->flags & CXGB4_FULL_INIT_DONE)
 			cxgb4_quiesce_rx(&eorxq->rspq);
 
-		if (adap->flags & CXGB4_USING_MSIX) {
+		if (adap->flags & CXGB4_USING_INTR_MULTI) {
 			cxgb4_clear_msix_aff(eorxq->msix->vec,
 					     eorxq->msix->aff_mask);
 			free_irq(eorxq->msix->vec, &eorxq->rspq);
@@ -296,7 +288,7 @@ static void cxgb4_mqprio_free_hw_resources(struct net_device *dev)
 		if (!(adap->flags & CXGB4_SHUTTING_DOWN))
 			cxgb4_quiesce_rx(&eorxq->rspq);
 
-		if (adap->flags & CXGB4_USING_MSIX) {
+		if (adap->flags & CXGB4_USING_INTR_MULTI) {
 			cxgb4_clear_msix_aff(eorxq->msix->vec,
 					     eorxq->msix->aff_mask);
 			free_irq(eorxq->msix->vec, &eorxq->rspq);
@@ -387,7 +379,7 @@ static int cxgb4_mqprio_class_bind(struct net_device *dev,
 
 	init_completion(&eosw_txq->completion);
 
-	fe.tid = eosw_txq->eotid;
+	fe.tid = 0;
 	fe.class = tc;
 
 	ret = cxgb4_sched_class_bind(dev, &fe, SCHED_FLOWC);
@@ -415,7 +407,7 @@ static void cxgb4_mqprio_class_unbind(struct net_device *dev,
 	if (!(adap->flags & CXGB4_SHUTTING_DOWN))
 		init_completion(&eosw_txq->completion);
 
-	fe.tid = eosw_txq->eotid;
+	fe.tid = 0;
 	fe.class = tc;
 	cxgb4_sched_class_unbind(dev, &fe, SCHED_FLOWC);
 
@@ -445,7 +437,7 @@ static int cxgb4_mqprio_enable_offload(struct net_device *dev,
 		qoffset = mqprio->qopt.offset[i];
 		qcount = mqprio->qopt.count[i];
 		for (j = 0; j < qcount; j++) {
-			eotid = cxgb4_get_free_eotid(&adap->tids);
+			eotid = 0;
 			if (eotid < 0) {
 				ret = -ENOMEM;
 				goto out_free_eotids;
@@ -458,9 +450,6 @@ static int cxgb4_mqprio_enable_offload(struct net_device *dev,
 						  eotid, hwqid);
 			if (ret)
 				goto out_free_eotids;
-
-			cxgb4_alloc_eotid(&adap->tids, eotid, eosw_txq);
-
 			hwtc = tc_port_mqprio->tc_hwtc_map[i];
 			ret = cxgb4_mqprio_class_bind(dev, eosw_txq, hwtc);
 			if (ret)
@@ -519,7 +508,6 @@ out_free_eotids:
 			hwtc = tc_port_mqprio->tc_hwtc_map[i];
 			cxgb4_mqprio_class_unbind(dev, eosw_txq, hwtc);
 
-			cxgb4_free_eotid(&adap->tids, eosw_txq->eotid);
 			cxgb4_free_eosw_txq(dev, eosw_txq);
 		}
 	}
@@ -554,7 +542,6 @@ static void cxgb4_mqprio_disable_offload(struct net_device *dev)
 			hwtc = tc_port_mqprio->tc_hwtc_map[i];
 			cxgb4_mqprio_class_unbind(dev, eosw_txq, hwtc);
 
-			cxgb4_free_eotid(&adap->tids, eosw_txq->eotid);
 			cxgb4_free_eosw_txq(dev, eosw_txq);
 		}
 	}
@@ -653,7 +640,7 @@ int cxgb4_init_tc_mqprio(struct adapter *adap)
 {
 	struct cxgb4_tc_port_mqprio *tc_port_mqprio, *port_mqprio;
 	struct cxgb4_tc_mqprio *tc_mqprio;
-	struct sge_eosw_txq *eosw_txq;
+//	struct sge_eosw_txq *eosw_txq;
 	int ret = 0;
 	u8 i;
 
@@ -673,25 +660,11 @@ int cxgb4_init_tc_mqprio(struct adapter *adap)
 	tc_mqprio->port_mqprio = tc_port_mqprio;
 	for (i = 0; i < adap->params.nports; i++) {
 		port_mqprio = &tc_mqprio->port_mqprio[i];
-		eosw_txq = kcalloc(adap->tids.neotids, sizeof(*eosw_txq),
-				   GFP_KERNEL);
-		if (!eosw_txq) {
-			ret = -ENOMEM;
-			goto out_free_ports;
-		}
-		port_mqprio->eosw_txq = eosw_txq;
 	}
 
 	adap->tc_mqprio = tc_mqprio;
 	refcount_set(&adap->tc_mqprio->refcnt, 0);
 	return 0;
-
-out_free_ports:
-	for (i = 0; i < adap->params.nports; i++) {
-		port_mqprio = &tc_mqprio->port_mqprio[i];
-		kfree(port_mqprio->eosw_txq);
-	}
-	kfree(tc_port_mqprio);
 
 out_free_mqprio:
 	kfree(tc_mqprio);

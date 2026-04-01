@@ -152,6 +152,9 @@ int cxgb4_free_raw_mac_filt(struct adapter *adap,
 {
 	int ret = 0;
 
+	if (idx >= adap->rawf_start + adap->rawf_cnt)
+		return -ERANGE;
+
 	if (!cxgb4_mps_ref_dec(adap, idx))
 		ret = t4_free_raw_mac_filt(adap, viid, addr,
 					   mask, idx, lookup_type,
@@ -170,6 +173,9 @@ int cxgb4_alloc_raw_mac_filt(struct adapter *adap,
 			     bool sleep_ok)
 {
 	int ret;
+
+	if (idx >= adap->rawf_start + adap->rawf_cnt)
+		return -ERANGE;
 
 	ret = t4_alloc_raw_mac_filt(adap, viid, addr,
 				    mask, idx, lookup_type,

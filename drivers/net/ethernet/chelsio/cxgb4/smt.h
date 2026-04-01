@@ -58,6 +58,7 @@ struct smt_entry {
 	u16 state;
 	u16 idx;
 	u16 pfvf;
+	u16 hw_idx;
 	u8 src_mac[ETH_ALEN];
 	int refcnt;
 	spinlock_t lock;	/* protect smt entry add,removal */

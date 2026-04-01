@@ -287,8 +287,8 @@ static int cxgb4_matchall_del_filter(struct net_device *dev, u8 filter_type)
 	int ret;
 
 	tc_port_matchall = &adap->tc_matchall->port_matchall[pi->port_id];
-	ret = cxgb4_del_filter(dev, tc_port_matchall->ingress.tid[filter_type],
-			       &tc_port_matchall->ingress.fs[filter_type]);
+	ret = cxgb4_filter_delete(dev, tc_port_matchall->ingress.tid[filter_type],
+			       &tc_port_matchall->ingress.fs[filter_type], NULL, GFP_KERNEL);
 	if (ret)
 		return ret;
 
@@ -311,8 +311,7 @@ static int cxgb4_matchall_add_filter(struct net_device *dev,
 	 * rule. Only insert rule if its prio doesn't conflict with
 	 * existing rules.
 	 */
-	fidx = cxgb4_get_free_ftid(dev, filter_type ? PF_INET6 : PF_INET,
-				   false, cls->common.prio);
+	fidx = CXGB4_FILTER_ID_ANY & 0x0fffffff;
 	if (fidx < 0) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "No free LETCAM index available");
@@ -323,7 +322,7 @@ static int cxgb4_matchall_add_filter(struct net_device *dev,
 	fs = &tc_port_matchall->ingress.fs[filter_type];
 	memset(fs, 0, sizeof(*fs));
 
-	if (fidx < adap->tids.nhpftids)
+	if (fidx < adap->tidinfo.hpftids.size)
 		fs->prio = 1;
 	fs->tc_prio = cls->common.prio;
 	fs->tc_cookie = cls->cookie;
@@ -336,7 +335,7 @@ static int cxgb4_matchall_add_filter(struct net_device *dev,
 
 	cxgb4_process_flow_actions(dev, &cls->rule->action, fs);
 
-	ret = cxgb4_set_filter(dev, fidx, fs);
+	ret = cxgb4_filter_create(dev, fidx, fs, NULL, GFP_KERNEL);
 	if (ret)
 		return ret;
 
@@ -486,7 +485,7 @@ int cxgb4_tc_matchall_stats(struct net_device *dev,
 
 	ingress = &tc_port_matchall->ingress;
 	for (i = 0; i < CXGB4_FILTER_TYPE_MAX; i++) {
-		ret = cxgb4_get_filter_counters(dev, ingress->tid[i],
+		ret = cxgb4_filter_get_counters(dev, ingress->tid[i],
 						&tmp_packets, &tmp_bytes,
 						ingress->fs[i].hash);
 		if (ret)
