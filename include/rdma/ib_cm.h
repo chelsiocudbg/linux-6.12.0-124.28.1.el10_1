@@ -299,6 +299,7 @@ struct ib_cm_id {
 	__be32			local_id;
 	__be32			remote_id;
 	u32			remote_cm_qpn;  /* 1 unless redirected */
+	u32			port_num;
 };
 
 /**
@@ -343,6 +344,7 @@ void ib_destroy_cm_id(struct ib_cm_id *cm_id);
 int ib_cm_listen(struct ib_cm_id *cm_id, __be64 service_id);
 
 struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
+				     u8 port_num,
 				     ib_cm_handler cm_handler,
 				     __be64 service_id);
 

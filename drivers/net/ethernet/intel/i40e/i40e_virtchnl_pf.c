@@ -2163,8 +2163,8 @@ static int i40e_vc_get_vf_resources_msg(struct i40e_vf *vf, u8 *msg)
 		vfres->vf_cap_flags |= VIRTCHNL_VF_OFFLOAD_VLAN;
 
 	if (i40e_vf_client_capable(pf, vf->vf_id) &&
-	    (vf->driver_caps & VIRTCHNL_VF_OFFLOAD_IWARP)) {
-		vfres->vf_cap_flags |= VIRTCHNL_VF_OFFLOAD_IWARP;
+	    (vf->driver_caps & VIRTCHNL_VF_OFFLOAD_RDMA)) {
+		vfres->vf_cap_flags |= VIRTCHNL_VF_OFFLOAD_RDMA;
 		set_bit(I40E_VF_STATE_RDMAENA, &vf->vf_states);
 	} else {
 		clear_bit(I40E_VF_STATE_RDMAENA, &vf->vf_states);

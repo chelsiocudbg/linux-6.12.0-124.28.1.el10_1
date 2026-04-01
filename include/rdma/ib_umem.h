@@ -26,6 +26,7 @@ struct ib_umem {
 	u32 is_odp : 1;
 	u32 is_dmabuf : 1;
 	struct sg_append_table sgt_append;
+	struct list_head	pgmap_list;
 };
 
 struct ib_umem_dmabuf {

@@ -289,7 +289,7 @@ static const struct vm_operations_struct dax_vm_ops = {
 	.huge_fault = dev_dax_huge_fault,
 	.may_split = dev_dax_may_split,
 	.pagesize = dev_dax_pagesize,
-        .get_dev_pgmap = dev_dax_get_dev_pgmap,
+	.get_dev_pgmap = dev_dax_get_dev_pgmap,
 };
 
 static int dax_mmap(struct file *filp, struct vm_area_struct *vma)
