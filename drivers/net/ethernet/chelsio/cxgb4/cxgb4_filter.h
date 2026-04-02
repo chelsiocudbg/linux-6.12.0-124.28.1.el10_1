@@ -154,4 +154,6 @@ bool is_filter_exact_match(struct adapter *adap,
 			   struct ch_filter_specification *fs);
 void cxgb4_cleanup_ethtool_filters(struct adapter *adap);
 int cxgb4_init_ethtool_filters(struct adapter *adap);
+extern const struct file_operations filters_debugfs_fops;
+extern const struct file_operations hash_filters_debugfs_fops;
 #endif /* __CXGB4_FILTER_H */

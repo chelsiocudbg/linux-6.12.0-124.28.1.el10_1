@@ -406,6 +406,15 @@ void _c4iw_free_ep(struct kref *kref)
 
 	ep = container_of(kref, struct c4iw_ep, com.kref);
 	pr_debug("ep %p state %s\n", ep, states[ep->com.state]);
+
+	if (!list_empty(&ep->com.glist_entry)) {
+		mutex_lock(&ep->com.dev->rdev.ep_glist_lock);
+		pr_debug("deleting ep %p from glist\n", ep);
+		if (!list_empty(&ep->com.glist_entry))
+			list_del_init(&ep->com.glist_entry);
+		mutex_unlock(&ep->com.dev->rdev.ep_glist_lock);
+	}
+
 	if (test_bit(QP_REFERENCED, &ep->com.flags))
 		deref_qp(ep);
 	if (test_bit(RELEASE_RESOURCES, &ep->com.flags)) {

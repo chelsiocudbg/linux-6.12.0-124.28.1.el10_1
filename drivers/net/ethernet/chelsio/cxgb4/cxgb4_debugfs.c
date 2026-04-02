@@ -4631,6 +4631,8 @@ int cxgb4_setup_debugfs(struct adapter *adap)
 		{ "sge_qinfo", &sge_qinfo_debugfs_fops, 0400, 0 },
 		{ "clip_tbl", &clip_tbl_debugfs_fops, 0400, 0 },
 		{ "tids", &tid_info_debugfs_fops, 0400, 0 },
+		{ "filters", &filters_debugfs_fops, 0400, 0 },
+		{ "hash_filters", &hash_filters_debugfs_fops, 0400, 0 },
 		{ "trace0", &mps_trc_debugfs_fops, 0600, 0 },
 		{ "trace1", &mps_trc_debugfs_fops, 0600, 1 },
 		{ "trace2", &mps_trc_debugfs_fops, 0600, 2 },
