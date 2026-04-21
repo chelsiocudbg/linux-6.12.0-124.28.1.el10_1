@@ -692,7 +692,7 @@ static void get_dev_fw_str(struct ib_device *dev, char *str)
 static const struct ib_device_ops c4iw_common_dev_ops = {
 	.owner = THIS_MODULE,
 	.driver_id = RDMA_DRIVER_CXGB4,
-	.uverbs_abi_ver = C4IW_UVERBS_ABI_VERSION,
+	.uverbs_abi_ver = 8,
 
 	.alloc_hw_device_stats = c4iw_alloc_device_stats,
 	.get_hw_stats = c4iw_get_mib,

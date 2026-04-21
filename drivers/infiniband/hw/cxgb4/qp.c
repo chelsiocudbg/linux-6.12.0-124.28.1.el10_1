@@ -5235,6 +5235,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 		sq_key_mm->vaddr = qhp->wq.sq.queue;
 		sq_key_mm->dma_addr = qhp->wq.sq.dma_addr;
 		sq_key_mm->len = PAGE_ALIGN(qhp->wq.sq.memsize);
+		insert_flag_to_mmap(&rhp->rdev, sq_key_mm, sq_key_mm->addr);
 		insert_mmap(ucontext, sq_key_mm);
 		if (!attrs->srq) {
 			rq_key_mm->key = uresp.rq_key;
@@ -5242,6 +5243,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 			rq_key_mm->vaddr = qhp->wq.rq.queue;
 			rq_key_mm->dma_addr = qhp->wq.rq.dma_addr;
 			rq_key_mm->len = PAGE_ALIGN(qhp->wq.rq.memsize);
+			insert_flag_to_mmap(&rhp->rdev, rq_key_mm, rq_key_mm->addr);
 			insert_mmap(ucontext, rq_key_mm);
 		}
 		sq_db_key_mm->key = uresp.sq_db_gts_key;
@@ -5249,6 +5251,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 		sq_db_key_mm->vaddr = NULL;
 		sq_db_key_mm->dma_addr = 0;
 		sq_db_key_mm->len = PAGE_SIZE;
+		insert_flag_to_mmap(&rhp->rdev, sq_db_key_mm, sq_db_key_mm->addr);
 		insert_mmap(ucontext, sq_db_key_mm);
 		if (!attrs->srq) {
 			rq_db_key_mm->key = uresp.rq_db_gts_key;
@@ -5256,6 +5259,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 			rq_db_key_mm->len = PAGE_SIZE;
 			rq_db_key_mm->vaddr = NULL;
 			rq_db_key_mm->dma_addr = 0;
+			insert_flag_to_mmap(&rhp->rdev, rq_db_key_mm, rq_db_key_mm->addr);
 			insert_mmap(ucontext, rq_db_key_mm);
 		}
 		if (ma_sync_key_mm) {
@@ -5265,6 +5269,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 			ma_sync_key_mm->len = PAGE_SIZE;
 			ma_sync_key_mm->vaddr = NULL;
 			ma_sync_key_mm->dma_addr = 0;
+			insert_flag_to_mmap(&rhp->rdev, ma_sync_key_mm, ma_sync_key_mm->addr);
 			insert_mmap(ucontext, ma_sync_key_mm);
 		}
 
@@ -6267,12 +6272,14 @@ static int create_srq(struct ib_srq *ib_srq, struct ib_srq_init_attr *attrs,
 		srq_key_mm->len = PAGE_ALIGN(srq->wq.memsize);
 		srq_key_mm->vaddr = srq->wq.queue;
 		srq_key_mm->dma_addr = srq->wq.dma_addr;
+		insert_flag_to_mmap(&rhp->rdev, srq_key_mm, srq_key_mm->addr);
 		insert_mmap(ucontext, srq_key_mm);
 		srq_db_key_mm->key = uresp.srq_db_gts_key;
 		srq_db_key_mm->addr = srq->wq.db_pa;
 		srq_db_key_mm->len = PAGE_SIZE;
 		srq_db_key_mm->vaddr = NULL;
 		srq_db_key_mm->dma_addr = 0;
+		insert_flag_to_mmap(&rhp->rdev, srq_db_key_mm, srq_db_key_mm->addr);
 		insert_mmap(ucontext, srq_db_key_mm);
 	}
 

@@ -1503,6 +1503,7 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		mm->vaddr = chp->cq.queue;
 		mm->dma_addr = chp->cq.dma_addr;
 		mm->len = chp->cq.memsize;
+		insert_flag_to_mmap(&rhp->rdev, mm, mm->addr);
 		insert_mmap(ucontext, mm);
 
 		mm2->key = uresp.gts_key;
@@ -1510,6 +1511,7 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		mm2->len = PAGE_SIZE;
 		mm2->vaddr = NULL;
 		mm2->dma_addr = 0;
+		insert_flag_to_mmap(&rhp->rdev, mm2, mm2->addr);
 		insert_mmap(ucontext, mm2);
 	}
 
