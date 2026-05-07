@@ -2450,7 +2450,6 @@ static int cxgb_up(struct adapter *adap)
 			err = -ENOMEM;
 			goto irq_err;
 		}
-
 		err = request_irq(adap->msix_info[s->nd_msix_idx].vec,
 				  t4_nondata_intr, 0,
 				  adap->msix_info[s->nd_msix_idx].desc, adap);

@@ -5367,7 +5367,6 @@ static int t4_handle_intr_status(struct adapter *adapter, unsigned int reg,
 	int fatal = 0;
 	unsigned int mask = 0;
 	unsigned int status = t4_read_reg(adapter, reg);
-
 	for ( ; acts->mask; ++acts) {
 		if (!(status & acts->mask))
 			continue;
@@ -5383,7 +5382,7 @@ static int t4_handle_intr_status(struct adapter *adapter, unsigned int reg,
 		mask |= acts->mask;
 	}
 	status &= mask;
-	if (status)                           /* clear processed interrupts */
+	if (status)         /* clear processed interrupts */
 		t4_write_reg(adapter, reg, status);
 	return fatal;
 }
@@ -5572,6 +5571,43 @@ static void sge_intr_handler(struct adapter *adapter)
 		{ 0 }
 	};
 
+	static struct intr_info cause_sge_intr_info[] = {
+		{ ERR_FLM_DBP_F,
+                        "DBP pointer delivery for invalid context or QID", -1, 0, 0},
+                { ERR_FLM_IDMA1_F | ERR_FLM_IDMA0_F,
+                        "Invalid QID or header request by IDMA", -1, 0, 0 },
+                { ERR_FLM_HINT_F, "FLM hint is for invalid context or QID", -1, 0, 0 },
+                { ERR_PCIE_ERROR3_F, "SGE PCIe error for DBP thread 3", -1, 0, 0 },
+                { ERR_PCIE_ERROR2_F, "SGE PCIe error for DBP thread 2", -1, 0, 0 },
+                { ERR_PCIE_ERROR1_F, "SGE PCIe error for DBP thread 1", -1, 0, 0 },
+                { ERR_PCIE_ERROR0_F, "SGE PCIe error for DBP thread 0", -1, 0, 0 },
+                { ERR_TIMER_ABOVE_MAX_QID_F,
+                        "SGE GTS with timer 0-5 for IQID > 1023", -1, 0, 0 },
+                { ERR_CPL_EXCEED_IQE_SIZE_F,
+                        "SGE received CPL exceeding IQE size", -1, 0, 0 },
+                { ERR_INVALID_CIDX_INC_F, "SGE GTS CIDX increment too large", -1, 0, 0 },
+                { ERR_ITP_TIME_PAUSED_F, "SGE ITP error", -1, 0, 0 },
+                { ERR_CPL_OPCODE_0_F, "SGE received 0-length CPL", -1, 0, 0 },
+                { ERR_DROPPED_DB_F, "SGE DB dropped", -1, 0, 0 },
+                { ERR_DATA_CPL_ON_HIGH_QID1_F | ERR_DATA_CPL_ON_HIGH_QID0_F,
+                        "SGE IQID > 1023 received CPL for FL", -1, 0, 0 },
+                { ERR_BAD_DB_PIDX3_F | ERR_BAD_DB_PIDX2_F | ERR_BAD_DB_PIDX1_F |
+                        ERR_BAD_DB_PIDX0_F, "SGE DBP pidx increment too large", -1, 0, 0 },
+                { ERR_ING_PCIE_CHAN_F, "SGE Ingress PCIe channel mismatch", -1, 0, 0 },
+                { ERR_ING_CTXT_PRIO_F,
+                        "Ingress context manager priority user error", -1, 0, 0 },
+                { ERR_EGR_CTXT_PRIO_F,
+                        "Egress context manager priority user error", -1, 0, 0 },
+                { DBP_TBUF_FULL_F, "SGE DBP tbuf full", -1, 0, 0 },
+                { FATAL_WRE_LEN_F,
+                        "SGE WRE packet less than advertized length", -1, 0, 0},
+                { REG_ADDRESS_ERR_F, "Undefined SGE register accessed", -1, 0, 0 },
+                { INGRESS_SIZE_ERR_F, "SGE illegal ingress QID", -1 ,0, 0 },
+                { EGRESS_SIZE_ERR_F, "SGE illegal egress QID", -1, 0, 0 },
+                { 0x0000000f, "SGE context access for invalid queue", -1, 0, 0 },
+                { 0 }
+	};
+
 	perr = t4_read_reg(adapter, SGE_INT_CAUSE1_A);
 	if (perr) {
 		v |= perr;
@@ -5586,6 +5622,18 @@ static void sge_intr_handler(struct adapter *adapter)
 			  perr);
 	}
 
+	perr = t4_read_reg(adapter, SGE_INT_CAUSE4_A);
+	if (perr) {
+		v |= perr;
+		dev_alert(adapter->pdev_dev, "SGE Cause4 Parity Error %#x\n",
+			  perr);
+	}
+
+	v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE3_A, sge_intr_info);
+	if (CHELSIO_CHIP_VERSION(adapter->params.chip) <= CHELSIO_T5)
+		v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE3_A,
+					   t4t5_sge_intr_info);
+
 	if (CHELSIO_CHIP_VERSION(adapter->params.chip) >= CHELSIO_T5) {
 		perr = t4_read_reg(adapter, SGE_INT_CAUSE5_A);
 		/* Parity error (CRC) for err_T_RxCRC is trivial, ignore it */
@@ -5597,10 +5645,14 @@ static void sge_intr_handler(struct adapter *adapter)
 		}
 	}
 
-	v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE3_A, sge_intr_info);
-	if (CHELSIO_CHIP_VERSION(adapter->params.chip) <= CHELSIO_T5)
-		v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE3_A,
-					   t4t5_sge_intr_info);
+	if (CHELSIO_CHIP_VERSION(adapter->params.chip) >= CHELSIO_T6)
+		v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE6_A, cause_sge_intr_info);
+
+	if (CHELSIO_CHIP_VERSION(adapter->params.chip) >= CHELSIO_T7){
+		v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE7_A, cause_sge_intr_info);
+		v |= t4_handle_intr_status(adapter, SGE_INT_CAUSE8_A, cause_sge_intr_info);
+	}
+
 
 	err = t4_read_reg(adapter, SGE_ERROR_STATS_A);
 	if (err & ERROR_QID_VALID_F) {
@@ -5798,6 +5850,11 @@ static void cplsw_intr_handler(struct adapter *adapter)
 		t4_fatal_err(adapter);
 }
 
+#define T6_LE_PERRCRC_MASK (PIPELINEERR_F | CLIPTCAMACCFAIL_F | \
+	SRVSRAMACCFAIL_F | CLCAMCRCPARERR_F | CLCAMINTPERR_F | SSRAMINTPERR_F | \
+	SRVSRAMPERR_F | VFSRAMPERR_F | TCAMINTPERR_F | TCAMCRCERR_F | \
+	HASHTBLMEMACCERR_F | MAIFWRINTPERR_F | HASHTBLMEMCRCERR_F)
+
 /*
  * LE interrupt handler.
  */
@@ -5813,21 +5870,33 @@ static void le_intr_handler(struct adapter *adap)
 		{ 0 }
 	};
 
-	static struct intr_info t6_le_intr_info[] = {
-		{ T6_LIPMISS_F, "LE LIP miss", -1, 0 },
-		{ T6_LIP0_F, "LE 0 LIP error", -1, 0 },
-		{ CMDTIDERR_F, "LE cmd tid error", -1, 1 },
-		{ TCAMINTPERR_F, "LE parity error", -1, 1 },
-		{ T6_UNKNOWNCMD_F, "LE unknown command", -1, 1 },
+	static const struct intr_info t6_le_intr_details[] = {
+		{ CACHEINTPERR_F, "Parity error in cache module", -1, 1 },
+		{ CACHESRAMPERR_F, "Parity error in data sram ", -1, 1 },
+		{ CLIPSUBERR_F, "LE CLIP CAM reverse substitution error", -1, 1 },
+		{ CLCAMFIFOERR_F, "LE CLIP CAM internal FIFO error", -1, 1 },
+		{ CTCAMINVLDENT_F, "Invalid IPv6 CLIP TCAM entry", -1, 0 },
+		{ TCAMINVLDENT_F, "Invalid IPv6 TCAM entry", -1, 0 },
+		{ TOTCNTERR_F, "LE total active < TCAM count", -1, 1 },
+		{ CMDPRSRINTERR_F, "LE internal error in parser", -1, 1 },
+		{ CMDTIDERR_F, "Incorrect tid in LE command", -1, 1 },
 		{ T6_ACTRGNFULL_F, "LE active region full", -1, 0 },
-		{ SSRAMINTPERR_F, "LE request queue parity error", -1, 1 },
-		{ HASHTBLMEMCRCERR_F, "LE hash table mem crc error", -1, 0 },
+		{ T6_ACTCNTIPV6TZERO_F, "LE IPv6 active open TCAM counter -ve", -1, 0 },
+		{ T6_ACTCNTIPV4TZERO_F, "LE IPv4 active open TCAM counter -ve", -1, 0 },
+		{ T6_ACTCNTIPV6ZERO_F, "LE IPv6 active open counter -ve", -1, 0 },
+		{ T6_ACTCNTIPV4ZERO_F, "LE IPv4 active open counter -ve", -1, 0 },
+		{ HASHTBLACCFAIL_F, "Hash table read error (proto conflict)", -1, 1 },
+		{ TCAMACCFAIL_F, "LE TCAM access failure", -1, 1 },
+		{ T6_UNKNOWNCMD_F, "LE unknown command", -1, 1 },
+		{ T6_LIP0_F, "LE found 0 LIP during CLIP substitution", -1, 0 },
+		{ T6_LIPMISS_F, "LE CLIP lookup miss", -1, 0 },
+		{ T6_LE_PERRCRC_MASK, "LE parity/CRC error", -1, 1 },
 		{ 0 }
 	};
 
 	if (t4_handle_intr_status(adap, LE_DB_INT_CAUSE_A,
 				  (chip <= CHELSIO_T5) ?
-				  le_intr_info : t6_le_intr_info))
+				  le_intr_info : t6_le_intr_details))
 		t4_fatal_err(adap);
 }
 

@@ -4498,6 +4498,11 @@ enum fw_qp_transport_type {
 	FW_QP_TRANSPORT_TYPE_ISCSI,
 };
 
+/* some bits are free and can be used in future */
+enum fw_rocev2_flags {
+       FW_ROCEV2_IPV6 = 0x1<<0
+};
+
 struct fw_qp_res {
         union fw_qp_restype {
                 struct fw_qp_res_sqrq {

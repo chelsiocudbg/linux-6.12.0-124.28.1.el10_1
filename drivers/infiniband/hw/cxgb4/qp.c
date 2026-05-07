@@ -4373,6 +4373,7 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 			memcpy(&ud_hdr.ip4.saddr, &ahp->local_ip_addr[3], 4);
 			ud_hdr.ip4.check = ~ib_ud_ip4_csum(&ud_hdr);
 			ud_hdr.grh_present = 0;
+			wqe->u.rocev2_init.rocev2_flags = 0;
 		} else {
 			/* IPv6 header*/
 			ud_hdr.grh_present = 1;
@@ -4383,6 +4384,7 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 			ud_hdr.grh.traffic_class = grh->traffic_class;
 			memcpy(&ud_hdr.grh.destination_gid, &ahp->dest_ip_addr[0], sizeof(struct in6_addr));
 			memcpy(&ud_hdr.grh.source_gid, &ahp->local_ip_addr[0], sizeof(struct in6_addr));
+			wqe->u.rocev2_init.rocev2_flags = FW_ROCEV2_IPV6;
 		}
 
 		/* UDP header */

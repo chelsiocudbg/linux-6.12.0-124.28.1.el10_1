@@ -462,7 +462,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->max_send_sge = min(T4_MAX_SEND_SGE, T4_MAX_WRITE_SGE);
 	props->max_recv_sge = T4_MAX_RECV_SGE;
 	props->max_srq_sge = T4_MAX_RECV_SGE;
-	props->max_sge_rd = (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7) ? T7_MAX_RD_SGE : 1;
+	props->max_sge_rd = (roce_mode && (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7)) ? T7_MAX_RD_SGE : 1;
 	props->max_res_rd_atom = dev->rdev.lldi.max_ird_adapter;
 	props->max_qp_rd_atom = min(dev->rdev.lldi.max_ordird_qp,
 				    c4iw_max_read_depth);
