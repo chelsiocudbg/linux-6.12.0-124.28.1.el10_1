@@ -1989,8 +1989,6 @@ EXPORT_SYMBOL(cxgb4_flush_eq_cache);
 int cxgb4_read_tpte(struct net_device *dev, u32 stag, __be32 *tpte)
 {
 	struct adapter *adap = netdev2adap(dev);
-	unsigned long mtype = 0;//, maddr = 0;
-	u32 params[7], val[7];
 	u64 addr = adap->uld_inst.vres.stag.start + ((stag >> 8) * 32);
 	int ret;
 
@@ -1998,18 +1996,9 @@ int cxgb4_read_tpte(struct net_device *dev, u32 stag, __be32 *tpte)
 			adap->uld_inst.vres.stor_stag.size))
 		goto err;
 
-	params[0] = (FW_PARAMS_MNEM_V(FW_PARAMS_MNEM_DEV) |
-			FW_PARAMS_PARAM_X_V(FW_PARAMS_PARAM_DEV_CF));
-	ret = t4_query_params(adap, adap->mbox, adap->pf, 0, 1, params, val);
-	if (ret != 0)
-		goto err;
-
-	mtype = FW_PARAMS_PARAM_Y_G(val[0]);
-	//maddr = FW_PARAMS_PARAM_Z_G(val[0]) << 16;
-
 	spin_lock(&adap->win0_lock);
-	ret = t4_memory_rw(adap, MEMWIN_NIC, mtype, addr, 32, tpte,
-			T4_MEMORY_READ);
+	ret = t4_memory_rw_addr(adap, MEMWIN_NIC, addr, 32, tpte,
+				T4_MEMORY_READ);
 	spin_unlock(&adap->win0_lock);
 
 	return ret;

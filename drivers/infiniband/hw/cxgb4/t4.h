@@ -655,7 +655,7 @@ static inline void t4_ring_sq_db(struct t4_wq *wq, u16 inc, union t4_wr *wqe)
 	/* Flush host queue memory writes. */
 	wmb();
 	if (wq->sq.bar2_va) {
-		if (inc == 1 && wq->sq.bar2_qid == 0 && wqe) {
+		if (t5_en_wc && inc == 1 && wq->sq.bar2_qid == 0 && wqe) {
 			pr_debug("WC wq->sq.pidx = %d\n", wq->sq.pidx);
 			pio_copy((u64 __iomem *)
 				 (wq->sq.bar2_va + SGE_UDB_WCDOORBELL),
@@ -681,7 +681,7 @@ static inline void t4_ring_rq_db(struct t4_wq *wq, u16 inc,
 	/* Flush host queue memory writes. */
 	wmb();
 	if (wq->rq.bar2_va) {
-		if (inc == 1 && wq->rq.bar2_qid == 0 && wqe) {
+		if (t5_en_wc && inc == 1 && wq->rq.bar2_qid == 0 && wqe) {
 			pr_debug("WC wq->rq.pidx = %d\n", wq->rq.pidx);
 			pio_copy((u64 __iomem *)
 				 (wq->rq.bar2_va + SGE_UDB_WCDOORBELL),

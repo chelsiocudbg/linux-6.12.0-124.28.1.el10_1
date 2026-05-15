@@ -68,14 +68,10 @@ static int max_fr_immd = T4_MAX_FR_IMMD;
 module_param(max_fr_immd, int, 0644);
 MODULE_PARM_DESC(max_fr_immd, "fastreg threshold for using DSGL instead of immediate");
 
-#ifdef ARCH_HAS_IOREMAP_WC
-int t5_en_wc = 1;
-#else
 int t5_en_wc = 0;
-#endif
 
 module_param(t5_en_wc, int, 0644);
-MODULE_PARM_DESC(t5_en_wc, "Use BAR2/WC path for kernel users (default 1)");
+MODULE_PARM_DESC(t5_en_wc, "Use BAR2/WC path for kernel users (default 0)");
 
 u32 cxgb4_uld_ocqp_pool_alloc(struct net_device *dev, int size)
 {
