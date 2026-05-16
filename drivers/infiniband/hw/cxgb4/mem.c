@@ -51,13 +51,6 @@ static int inline_threshold = C4IW_INLINE_THRESHOLD;
 module_param(inline_threshold, int, 0644);
 MODULE_PARM_DESC(inline_threshold, "inline vs dsgl threshold (default=128)");
 
-static int mr_exceeds_hw_limits(struct c4iw_dev *dev, u64 length)
-{
-	return (is_t4(dev->rdev.lldi.adapter_type) ||
-		is_t5(dev->rdev.lldi.adapter_type)) &&
-		length >= 8*1024*1024*1024ULL;
-}
-
 static int _c4iw_write_mem_dma_aligned(struct c4iw_rdev *rdev, u32 addr,
 				       u32 len, dma_addr_t data,
 				       struct sk_buff *skb,
@@ -508,6 +501,7 @@ struct ib_mr *c4iw_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 {
 	__be64 *pages;
 	int shift, n, i;
+	unsigned long page_size;
 	int err = -ENOMEM;
 	struct ib_block_iter biter;
 	struct c4iw_dev *rhp;
@@ -524,9 +518,6 @@ struct ib_mr *c4iw_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 
 	php = to_c4iw_pd(pd);
 	rhp = php->rhp;
-
-	if (mr_exceeds_hw_limits(rhp, length))
-		return ERR_PTR(-EINVAL);
 
 	mhp = kzalloc(sizeof(*mhp), GFP_KERNEL);
 	if (!mhp)
@@ -545,9 +536,18 @@ struct ib_mr *c4iw_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	if (IS_ERR(mhp->umem))
 		goto err_free_skb;
 
-	shift = PAGE_SHIFT;
+	page_size = ib_umem_find_best_pgsz(mhp->umem,
+			(CHELSIO_CHIP_VERSION(rhp->rdev.lldi.adapter_type) < CHELSIO_T7) ? 
+					T4_PAGESIZE_MASK : T7_PAGESIZE_MASK, virt);
+	if (!page_size) {
+		pr_err("Find best page size failed, start %llu\n", virt);
+		err = -EINVAL;
+		goto err_umem_release;
+	}
 
-	n = ib_umem_num_dma_blocks(mhp->umem, 1 << shift);
+	shift = ilog2(page_size);
+
+	n = ib_umem_num_dma_blocks(mhp->umem, page_size);
 	err = alloc_pbl(mhp, n);
 	if (err)
 		goto err_umem_release;
@@ -560,7 +560,7 @@ struct ib_mr *c4iw_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 
 	i = n = 0;
 
-	rdma_umem_for_each_dma_block(mhp->umem, &biter, 1 << shift) {
+	rdma_umem_for_each_dma_block(mhp->umem, &biter, page_size) {
 		pages[i++] = cpu_to_be64(rdma_block_iter_dma_address(&biter));
 		if (i == PAGE_SIZE / sizeof(*pages)) {
 			err = write_pbl(&mhp->rhp->rdev, pages,

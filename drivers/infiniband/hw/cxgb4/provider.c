@@ -435,14 +435,15 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 			     struct ib_udata *uhw)
 {
 
-	struct c4iw_dev *dev;
+	struct c4iw_dev *dev = to_c4iw_dev(ibdev);
+	u32 chip_ver = CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type);
+
 
 	pr_debug("ibdev %p\n", ibdev);
 
 	if (uhw->inlen || uhw->outlen)
 		return -EINVAL;
 
-	dev = to_c4iw_dev(ibdev);
 	addrconf_addr_eui48((u8 *)&props->sys_image_guid,
 			    dev->rdev.lldi.ports[0]->dev_addr);
 	props->hw_ver = CHELSIO_CHIP_RELEASE(dev->rdev.lldi.adapter_type);
@@ -451,7 +452,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->kernel_cap_flags = IBK_LOCAL_DMA_LKEY;
 	if (fastreg_support)
 		props->device_cap_flags |= IB_DEVICE_MEM_MGT_EXTENSIONS;
-	props->page_size_cap = T4_PAGESIZE_MASK;
+	props->page_size_cap = (chip_ver >= CHELSIO_T7) ? T7_PAGESIZE_MASK : T4_PAGESIZE_MASK;
 	props->vendor_id = (u32)dev->rdev.lldi.pdev->vendor;
 	props->vendor_part_id = (u32)dev->rdev.lldi.pdev->device;
 	props->max_mr_size = T4_MAX_MR_SIZE;
@@ -462,7 +463,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->max_send_sge = min(T4_MAX_SEND_SGE, T4_MAX_WRITE_SGE);
 	props->max_recv_sge = T4_MAX_RECV_SGE;
 	props->max_srq_sge = T4_MAX_RECV_SGE;
-	props->max_sge_rd = (roce_mode && (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7)) ? T7_MAX_RD_SGE : 1;
+	props->max_sge_rd = (roce_mode && (chip_ver >= CHELSIO_T7)) ? T7_MAX_RD_SGE : 1;
 	props->max_res_rd_atom = dev->rdev.lldi.max_ird_adapter;
 	props->max_qp_rd_atom = min(dev->rdev.lldi.max_ordird_qp,
 				    c4iw_max_read_depth);

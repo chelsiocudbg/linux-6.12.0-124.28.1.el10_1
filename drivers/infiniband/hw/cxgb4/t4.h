@@ -40,6 +40,7 @@
 
 #define T4_MAX_MR_SIZE (~0ULL)
 #define T4_PAGESIZE_MASK 0xffff000  /* 4KB-128MB */
+#define T7_PAGESIZE_MASK 0x1fffff000 /* 4KB-4GB */
 #define T4_STAG_UNSET 0xffffffff
 #define T4_FW_MAJ 0
 #define PCIE_MA_SYNC_A 0x30b4
