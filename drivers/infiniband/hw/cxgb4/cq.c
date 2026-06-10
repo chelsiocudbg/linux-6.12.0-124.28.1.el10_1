@@ -1499,7 +1499,7 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 			goto err_free_mm2;
 
 		mm->key = uresp.key;
-		mm->addr = virt_to_phys(chp->cq.queue);
+		mm->addr = 0;
 		mm->vaddr = chp->cq.queue;
 		mm->dma_addr = chp->cq.dma_addr;
 		mm->len = chp->cq.memsize;

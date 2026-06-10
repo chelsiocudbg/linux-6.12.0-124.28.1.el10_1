@@ -954,8 +954,8 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 		goto err_destroy_pblpool;
 	}
 
-	rdev->status_page = dma_alloc_coherent(rdev->lldi.dev, PAGE_SIZE,
-			&rdev->daddr, GFP_KERNEL);
+	rdev->status_page = (struct t4_dev_status_page *)
+			     __get_free_page(GFP_KERNEL);
 	if (!rdev->status_page) {
 		pr_err("error allocating status page\n");
 		goto err_destroy_rrqtpool;
@@ -997,8 +997,9 @@ static int c4iw_rdev_open(struct c4iw_rdev *rdev)
 
 	return 0;
 err_free_status_page:
-	dma_free_coherent(rdev->lldi.dev, PAGE_SIZE, rdev->status_page,
-			rdev->daddr);
+	if (c4iw_wr_log && rdev->wr_log)
+		kfree(rdev->wr_log);
+	free_page((unsigned long)rdev->status_page);
 err_destroy_rrqtpool:
 	c4iw_rrqtpool_destroy(rdev);
 err_destroy_pblpool:
@@ -1015,8 +1016,7 @@ static void c4iw_rdev_close(struct c4iw_rdev *rdev)
 {
 	if (rdev->wr_log)
 		kfree(rdev->wr_log);
-	dma_free_coherent(rdev->lldi.dev, PAGE_SIZE, rdev->status_page,
-			rdev->daddr);
+	free_page((unsigned long)rdev->status_page);
 	kfree(rdev->fids);
 	c4iw_pblpool_destroy(rdev);
 	c4iw_rqtpool_destroy(rdev);

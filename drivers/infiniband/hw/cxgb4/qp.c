@@ -5229,7 +5229,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 		if (ret)
 			goto err_free_ma_sync_key;
 		sq_key_mm->key = uresp.sq_key;
-		sq_key_mm->addr = qhp->wq.sq.phys_addr;
+		sq_key_mm->addr = 0;
 		sq_key_mm->vaddr = qhp->wq.sq.queue;
 		sq_key_mm->dma_addr = qhp->wq.sq.dma_addr;
 		sq_key_mm->len = PAGE_ALIGN(qhp->wq.sq.memsize);
@@ -5237,7 +5237,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 		insert_mmap(ucontext, sq_key_mm);
 		if (!attrs->srq) {
 			rq_key_mm->key = uresp.rq_key;
-			rq_key_mm->addr = virt_to_phys(qhp->wq.rq.queue);
+			rq_key_mm->addr = 0;
 			rq_key_mm->vaddr = qhp->wq.rq.queue;
 			rq_key_mm->dma_addr = qhp->wq.rq.dma_addr;
 			rq_key_mm->len = PAGE_ALIGN(qhp->wq.rq.memsize);
@@ -5245,7 +5245,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 			insert_mmap(ucontext, rq_key_mm);
 		}
 		sq_db_key_mm->key = uresp.sq_db_gts_key;
-		sq_db_key_mm->addr = qhp->wq.sq.db_pa;
+		sq_db_key_mm->addr = (u64)(unsigned long)qhp->wq.sq.db_pa;
 		sq_db_key_mm->vaddr = NULL;
 		sq_db_key_mm->dma_addr = 0;
 		sq_db_key_mm->len = PAGE_SIZE;
@@ -5253,7 +5253,7 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 		insert_mmap(ucontext, sq_db_key_mm);
 		if (!attrs->srq) {
 			rq_db_key_mm->key = uresp.rq_db_gts_key;
-			rq_db_key_mm->addr = qhp->wq.rq.db_pa;
+			rq_db_key_mm->addr = (u64)(unsigned long)qhp->wq.rq.db_pa;
 			rq_db_key_mm->len = PAGE_SIZE;
 			rq_db_key_mm->vaddr = NULL;
 			rq_db_key_mm->dma_addr = 0;
