@@ -639,22 +639,19 @@ static struct cm_id_private *cm_insert_listen(struct cm_id_private *cm_id_priv,
 			link = &(*link)->rb_right;
 		else {
 			/*
-			 * Sharing an ib_cm_id with different handlers or specific and wildcard port is not
+			 * Sharing an ib_cm_id with different handlers is not
 			 * supported
 			 */
-			if ((cm_id_priv->id.port_num != cur_cm_id_priv->id.port_num && (!cm_id_priv->id.port_num || !cur_cm_id_priv->id.port_num)) ||
-			    (cur_cm_id_priv->id.cm_handler != shared_handler ||
+			if (cur_cm_id_priv->id.cm_handler != shared_handler ||
 			    cur_cm_id_priv->id.context ||
-			    WARN_ON(!cur_cm_id_priv->id.cm_handler))) {
+			    WARN_ON(!cur_cm_id_priv->id.cm_handler)) {
 				spin_unlock_irqrestore(&cm.lock, flags);
 				return NULL;
 			}
-			if (cm_id_priv->id.port_num  == cur_cm_id_priv->id.port_num) {
-				refcount_inc(&cur_cm_id_priv->refcount);
-				cur_cm_id_priv->listen_sharecount++;
-				spin_unlock_irqrestore(&cm.lock, flags);
-				return cur_cm_id_priv;
-			}
+			refcount_inc(&cur_cm_id_priv->refcount);
+			cur_cm_id_priv->listen_sharecount++;
+			spin_unlock_irqrestore(&cm.lock, flags);
+			return cur_cm_id_priv;
 		}
 	}
 	cm_id_priv->listen_sharecount++;
