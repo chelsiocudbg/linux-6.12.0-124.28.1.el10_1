@@ -4507,7 +4507,7 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 	}
 
 	if (attr_mask & ~IB_QP_ATTR_STANDARD_BITS) {
-		return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
 		goto out;
 	}
 	if (attr_mask & IB_QP_PKEY_INDEX) {
@@ -4525,6 +4525,12 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 	if (attr_mask & IB_QP_PATH_MTU) {
 		new_roce_attr.gsi_attr.snd_mss = ib_mtu_enum_to_int(attr->path_mtu);
 		pr_debug("snd_mss %u path_mtu %u\n", new_roce_attr.gsi_attr.snd_mss, attr->path_mtu);
+		if (new_roce_attr.gsi_attr.snd_mss > qhp->mtu) {
+			pr_err("invalid mtu (%d) > (%d)\n", new_roce_attr.gsi_attr.snd_mss, qhp->mtu);
+			ret = -EINVAL;
+			goto out;
+		}
+		qhp->mtu = new_roce_attr.gsi_attr.snd_mss;
 	}
 	if (attr_mask & IB_QP_SQ_PSN) {
 		new_roce_attr.gsi_attr.psn_nxt = attr->sq_psn & C4IW_ROCE_PSN_MASK;
@@ -6266,7 +6272,7 @@ static int create_srq(struct ib_srq *ib_srq, struct ib_srq_init_attr *attrs,
 		if (ret)
 			goto err_free_srq_db_key_mm;
 		srq_key_mm->key = uresp.srq_key;
-		srq_key_mm->addr = virt_to_phys(srq->wq.queue);
+		srq_key_mm->addr = 0;
 		srq_key_mm->len = PAGE_ALIGN(srq->wq.memsize);
 		srq_key_mm->vaddr = srq->wq.queue;
 		srq_key_mm->dma_addr = srq->wq.dma_addr;

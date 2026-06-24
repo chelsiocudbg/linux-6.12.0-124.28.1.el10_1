@@ -852,6 +852,8 @@ void c4iw_register_device(struct work_struct *work)
 				 &dev->rdev.lldi.pdev->dev);
 	if (ret)
 		goto err_dealloc_ctx;
+	if (roce_mode && (CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type) >= CHELSIO_T7))
+		rdma_roce_rescan_device(&dev->ibdev);
 	return;
 
 err_dealloc_ctx:
