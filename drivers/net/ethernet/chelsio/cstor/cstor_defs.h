@@ -102,7 +102,7 @@ static inline pgprot_t t4_pgprot_wc(pgprot_t prot)
 struct t4_sq {
 	void *queue;
 	dma_addr_t dma_addr;
-	u64 db_gts_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -112,7 +112,7 @@ struct t4_sq {
 struct t4_rq {
 	void *queue;
 	dma_addr_t dma_addr;
-	u64 db_gts_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -131,7 +131,7 @@ struct t4_wq {
 struct t4_srq {
 	void *queue;
 	dma_addr_t dma_addr;
-	u64 db_gts_pa;
+	u64 db_pa;
 	size_t memsize;
 	u32 bar2_qid;
 	u32 qid;
@@ -152,7 +152,7 @@ struct t4_cq {
 	dma_addr_t dma_addr;
 	void __iomem *gts;
 	struct t4_status_page *status;
-	u64 db_gts_pa;
+	u64 gts_pa;
 	size_t memsize;
 	unsigned long flags;
 	u32 cqid;
@@ -189,8 +189,8 @@ struct t4_fl {
  * and for which we must reserve space.
  */
 struct sge_opaque_hdr {
-        void *dev;
-        dma_addr_t addr[MAX_SKB_FRAGS + 1];
+	void *dev;
+	dma_addr_t addr[MAX_SKB_FRAGS + 1];
 };
 
 #endif

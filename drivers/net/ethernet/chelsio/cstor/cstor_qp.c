@@ -38,17 +38,15 @@ static void free_rc_queues(struct cstor_qp *qp, int has_rq)
 	struct t4_wq *wq = &qp->wq;
 
 	/*
-	 * uP clears EQ contexts when the connection exits rdma mode,
-	 * so no need to post a RESET WR for these EQs.
+	 * uP clears EQ contexts when the connection terminates.
 	 */
 	if (has_rq) {
-		dma_free_coherent(&cdev->lldi.pdev->dev, wq->rq.memsize, wq->rq.queue,
-				  wq->rq.dma_addr);
+		dma_free_coherent(cdev->lldi.dev, wq->rq.memsize, wq->rq.queue, wq->rq.dma_addr);
 		cxgb4_uld_free_rqtpool(cdev->rdma_res, wq->rq.rqt_hwaddr, wq->rq.rqt_size);
 		cxgb4_uld_put_qpid(&qp->uctx->d_uctx, wq->rq.qid);
 	}
 
-	dma_free_coherent(&cdev->lldi.pdev->dev, wq->sq.memsize, wq->sq.queue, wq->sq.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, wq->sq.memsize, wq->sq.queue, wq->sq.dma_addr);
 	cxgb4_uld_put_qpid(&qp->uctx->d_uctx, wq->sq.qid);
 }
 
@@ -61,26 +59,25 @@ cstor_get_db_gts_phys_addr(struct cstor_device *cdev, u32 qid, enum t4_bar2_qtyp
 
 	if (cdev->lldi.plat_dev) {
 		*db_gts_pa = cdev->lldi.db_gts_pa;
-	} else {
-		/*
-		 * Determine the BAR2 offset and qid. db_gts_pa is not NULL for user mapping
-		 * so compute the page-aligned physical address for mapping.
-		 */
-		ret = cxgb4_bar2_sge_qregs(cdev->lldi.ports[0], qid, (enum cxgb4_bar2_qtype)qtype,
-					   1, &bar2_qoffset, pbar2_qid);
-		if (ret) {
-			cstor_err(cdev, "cxgb4_bar2_sge_qregs() failed, ret %d\n", ret);
-			return ret;
-		}
-
-		*db_gts_pa = (cdev->bar2_pa + bar2_qoffset) & PAGE_MASK;
+		return 0;
 	}
 
+	/*
+	 * Determine the BAR2 offset and qid. db_gts_pa is not NULL for user mapping
+	 * so compute the page-aligned physical address for mapping.
+	 */
+	ret = cxgb4_bar2_sge_qregs(cdev->lldi.ports[0], qid, (enum cxgb4_bar2_qtype)qtype,
+				   1, &bar2_qoffset, pbar2_qid);
+	if (ret) {
+		cstor_err(cdev, "cxgb4_bar2_sge_qregs() failed, ret %d\n", ret);
+		return ret;
+	}
+
+	*db_gts_pa = (cdev->bar2_pa + bar2_qoffset) & PAGE_MASK;
 	return 0;
 }
 
-static int
-alloc_rc_queues(struct cstor_qp *qp, struct cstor_cq *rcq, struct cstor_cq *scq, int need_rq)
+static int alloc_rc_queues(struct cstor_qp *qp, int need_rq)
 {
 	struct cstor_device *cdev = qp->uctx->cdev;
 	struct t4_wq *wq = &qp->wq;
@@ -108,27 +105,29 @@ alloc_rc_queues(struct cstor_qp *qp, struct cstor_cq *rcq, struct cstor_cq *scq,
 		wq->rq.rqt_size = roundup_pow_of_two(max_t(u16, wq->rq.max_wr, 16));
 		wq->rq.rqt_hwaddr = cxgb4_uld_alloc_rqtpool(cdev->rdma_res, wq->rq.rqt_size);
 		if (!wq->rq.rqt_hwaddr) {
-			cstor_err(cdev, "failed to allocate rq rqt_hwaddr\n");
+			cstor_err(cdev, "failed to allocate rq rqt_hwaddr, rqt size %u\n",
+				  wq->rq.rqt_size);
 			goto err2;
 		}
 	}
 
 	cstor_debug(cdev, "sq qid %u, rq qid %u\n", wq->sq.qid, wq->rq.qid);
 
-	wq->sq.queue = dma_alloc_coherent(&cdev->lldi.pdev->dev, wq->sq.memsize, &wq->sq.dma_addr,
+	wq->sq.queue = dma_alloc_coherent(cdev->lldi.dev, wq->sq.memsize, &wq->sq.dma_addr,
 					  GFP_KERNEL);
 	if (!wq->sq.queue) {
-		cstor_err(cdev, "failed to allocate sq->queue\n");
+		cstor_err(cdev, "failed to allocate sq->queue, memsize %lu\n", wq->sq.memsize);
 		goto err3;
 	}
 
 	memset(wq->sq.queue, 0, wq->sq.memsize);
 
 	if (need_rq) {
-		wq->rq.queue = dma_alloc_coherent(&cdev->lldi.pdev->dev, wq->rq.memsize,
+		wq->rq.queue = dma_alloc_coherent(cdev->lldi.dev, wq->rq.memsize,
 						  &wq->rq.dma_addr, GFP_KERNEL);
 		if (!wq->rq.queue) {
-			cstor_err(cdev, "failed to allocate wq->rq.queue\n");
+			cstor_err(cdev, "failed to allocate wq->rq.queue, memsize %lu\n",
+				  wq->rq.memsize);
 			goto err4;
 		}
 	}
@@ -138,23 +137,23 @@ alloc_rc_queues(struct cstor_qp *qp, struct cstor_cq *rcq, struct cstor_cq *scq,
 		    wq->rq.queue, need_rq ? (u64)virt_to_phys(wq->rq.queue) : 0);
 
 	ret = cstor_get_db_gts_phys_addr(cdev, wq->sq.qid, T4_BAR2_QTYPE_EGRESS, &wq->sq.bar2_qid,
-					 &wq->sq.db_gts_pa);
+					 &wq->sq.db_pa);
 	if (ret) {
-		cstor_err(cdev, "failed to get bar2 addr for sqid %u, ret %d\n", wq->sq.qid, ret);
+		cstor_err(cdev, "failed to get doorbell phys addr for sqid %u, ret %d\n",
+			  wq->sq.qid, ret);
 		goto err5;
 	}
 
 	if (need_rq) {
 		ret = cstor_get_db_gts_phys_addr(cdev, wq->rq.qid, T4_BAR2_QTYPE_EGRESS,
-						 &wq->rq.bar2_qid, &wq->rq.db_gts_pa);
+						 &wq->rq.bar2_qid, &wq->rq.db_pa);
 		if (ret) {
-			cstor_err(cdev, "failed to get bar2 addr for rqid %u, ret %d\n",
+			cstor_err(cdev, "failed to get doorbell phys addr for rqid %u, ret %d\n",
 				  wq->rq.qid, ret);
 			goto err5;
 		}
 	}
 
-	/* build fw_ri_res_wr */
 	wr_len = sizeof(*res_wr) + sizeof(*res);
 	if (need_rq)
 		wr_len += sizeof(*res);
@@ -186,9 +185,7 @@ alloc_rc_queues(struct cstor_qp *qp, struct cstor_cq *rcq, struct cstor_cq *scq,
 	res->u.sqrq.fetchszm_to_iqid = cpu_to_be32(FW_RI_RES_WR_HOSTFCMODE_V(0) | /* no host cidx updates */
 					FW_RI_RES_WR_CPRIO_V(0) | /* don't keep in chip cache */
 					FW_RI_RES_WR_PCIECHN_V(0) | /* set by uP at ri_init time */
-					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering) |
-					//FW_RI_RES_WR_IQID_V(scq->cqid));
-					FW_RI_RES_WR_IQID_V(scq ? scq->q.cqid : 0));
+					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering));
 	res->u.sqrq.dcaen_to_eqsize = cpu_to_be32(FW_RI_RES_WR_DCAEN_V(0) |
 						  FW_RI_RES_WR_DCACPU_V(0) |
 						  FW_RI_RES_WR_FBMIN_V(2) |
@@ -210,9 +207,7 @@ alloc_rc_queues(struct cstor_qp *qp, struct cstor_cq *rcq, struct cstor_cq *scq,
 		res->u.sqrq.fetchszm_to_iqid = cpu_to_be32(FW_RI_RES_WR_HOSTFCMODE_V(0) | /* no host cidx updates */
 					FW_RI_RES_WR_CPRIO_V(0) | /* don't keep in chip cache */
 					FW_RI_RES_WR_PCIECHN_V(0) | /* set by uP at ri_init time */
-					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering) |
-					//FW_RI_RES_WR_IQID_V(rcq->cqid));
-					FW_RI_RES_WR_IQID_V(rcq ? rcq->q.cqid : 0));
+					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering));
 		res->u.sqrq.dcaen_to_eqsize = cpu_to_be32(FW_RI_RES_WR_DCAEN_V(0) |
 							  FW_RI_RES_WR_DCACPU_V(0) |
 							  FW_RI_RES_WR_FBMIN_V(2) |
@@ -241,10 +236,9 @@ err6:
 	xa_erase(&cdev->qps, qp->wq.sq.qid);
 err5:
 	if (need_rq)
-		dma_free_coherent(&cdev->lldi.pdev->dev, wq->rq.memsize, wq->rq.queue,
-				  wq->rq.dma_addr);
+		dma_free_coherent(cdev->lldi.dev, wq->rq.memsize, wq->rq.queue, wq->rq.dma_addr);
 err4:
-	dma_free_coherent(&cdev->lldi.pdev->dev, wq->sq.memsize, wq->sq.queue, wq->sq.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, wq->sq.memsize, wq->sq.queue, wq->sq.dma_addr);
 err3:
 	if (need_rq)
 		cxgb4_uld_free_rqtpool(cdev->rdma_res, wq->rq.rqt_hwaddr, wq->rq.rqt_size);
@@ -452,9 +446,12 @@ int cstor_destroy_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_qp *qp;
 	struct cstor_destroy_qp_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -485,8 +482,10 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 	u32 sqsize, rqsize = 0;
 	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -508,7 +507,7 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 		return -EINVAL;
 	}
 
-	pd = xa_load(&uctx->pds, cmd.pdid);
+	pd = xa_load(&cdev->pds, cmd.pdid);
 	if (!pd) {
 		cstor_err(cdev, "failed to find pd with pdid %u\n", cmd.pdid);
 		return -EINVAL;
@@ -568,7 +567,7 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	qp->uctx = uctx;
 
-	/* num of descriptors */
+	/* number of descriptors */
 	qp->wq.sq.size = sqsize * T4_SQ_NUM_SLOTS;
 	qp->wq.sq.memsize = (qp->wq.sq.size + cdev->hw_queue.t4_eq_status_entries) *
 			    (T4_EQ_ENTRY_SIZE) + (16 * sizeof(__be64));
@@ -583,7 +582,7 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 	if (need_rq)
 		qp->wq.rq.memsize = roundup(qp->wq.rq.memsize, PAGE_SIZE);
 
-	ret = alloc_rc_queues(qp, scq, rcq, need_rq);
+	ret = alloc_rc_queues(qp, need_rq);
 	if (ret) {
 		cstor_err(cdev, "alloc_rc_queues() failed, ret %d\n", ret);
 		if (ret == -ETIMEDOUT)
@@ -617,7 +616,8 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 
 			qp->attr.pbl_addr = cstor_pblpool_alloc(cdev, pbl_size);
 			if (!qp->attr.pbl_addr) {
-				cstor_err(cdev, "failed to allocate qp->attr.pbl_addr\n");
+				cstor_err(cdev, "failed to allocate qp->attr.pbl_addr, size %u\n",
+					  pbl_size);
 				goto err3;
 			}
 
@@ -679,10 +679,10 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 		uctx->key += PAGE_SIZE;
 	}
 
-	uresp.sq_db_gts_key = uctx->key;
+	uresp.sq_db_key = uctx->key;
 	uctx->key += PAGE_SIZE;
 	if (need_rq) {
-		uresp.rq_db_gts_key = uctx->key;
+		uresp.rq_db_key = uctx->key;
 		uctx->key += PAGE_SIZE;
 	}
 	spin_unlock(&uctx->mmap_lock);
@@ -690,7 +690,9 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 	_uresp = &((struct cstor_create_qp_cmd *)ubuf)->resp;
 	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
 	if (ret) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
+		ret = -EFAULT;
 		goto err8;
 	}
 
@@ -707,14 +709,14 @@ int cstor_create_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 		insert_mmap(uctx, rq_key_mm);
 	}
 
-	sq_db_key_mm->key = uresp.sq_db_gts_key;
-	sq_db_key_mm->addr = qp->wq.sq.db_gts_pa;
+	sq_db_key_mm->key = uresp.sq_db_key;
+	sq_db_key_mm->addr = qp->wq.sq.db_pa;
 	sq_db_key_mm->vaddr = NULL;
 	sq_db_key_mm->len = PAGE_SIZE;
 	insert_mmap(uctx, sq_db_key_mm);
 	if (need_rq) {
-		rq_db_key_mm->key = uresp.rq_db_gts_key;
-		rq_db_key_mm->addr = qp->wq.rq.db_gts_pa;
+		rq_db_key_mm->key = uresp.rq_db_key;
+		rq_db_key_mm->addr = qp->wq.rq.db_pa;
 		rq_db_key_mm->vaddr = NULL;
 		rq_db_key_mm->len = PAGE_SIZE;
 		insert_mmap(uctx, rq_db_key_mm);

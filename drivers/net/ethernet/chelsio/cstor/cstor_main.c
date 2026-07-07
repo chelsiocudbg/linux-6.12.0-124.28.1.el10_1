@@ -43,7 +43,7 @@
 #endif
 
 MODULE_AUTHOR("Chelsio Communications");
-MODULE_DESCRIPTION("Chelsio T7 User Space NVMe/TCP offload driver");
+MODULE_DESCRIPTION("Chelsio T7 User Space NVMe/TCP and iSCSI offload driver");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_VERSION(CSTOR_MODULE_VERSION);
 
@@ -106,10 +106,12 @@ int cstor_set_iscsi_region_status(struct cstor_ucontext *ucontext, void __user *
 {
 	struct cstor_ucontext *uctx;
 	struct cstor_set_iscsi_region_status_cmd cmd;
-	int ret = 0;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(ucontext->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(ucontext->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -141,7 +143,7 @@ void __cstor_dealloc_pd(struct cstor_pd *pd)
 	struct cstor_device *cdev = pd->uctx->cdev;
 
 	cstor_debug(cdev, "pdid %#x\n", pd->pdid);
-	xa_erase(&pd->uctx->pds, pd->pdid);
+	xa_erase(&cdev->pds, pd->pdid);
 	cxgb4_uld_put_pdid(cdev->rdma_res, pd->pdid);
 	kfree(pd);
 }
@@ -150,13 +152,16 @@ int cstor_dealloc_pd(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_pd *pd;
 	struct cstor_dealloc_pd_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
-	pd = xa_load(&uctx->pds, cmd.pdid);
+	pd = xa_load(&uctx->cdev->pds, cmd.pdid);
 	if (!pd) {
 		cstor_err(uctx->cdev, "unable to find pd with pdid %u\n", cmd.pdid);
 		return -EINVAL;
@@ -186,7 +191,7 @@ int cstor_alloc_pd(struct cstor_ucontext *uctx, void __user *ubuf)
 		goto err2;
 	}
 
-	ret = xa_insert(&uctx->pds, pd->pdid, pd, GFP_KERNEL);
+	ret = xa_insert(&cdev->pds, pd->pdid, pd, GFP_KERNEL);
 	if (ret) {
 		cstor_err(cdev, "xa_insert() failed with err %d\n", ret);
 		goto err3;
@@ -196,8 +201,10 @@ int cstor_alloc_pd(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	uresp.pdid = pd->pdid;
 	_uresp = &((struct cstor_alloc_pd_cmd *)ubuf)->resp;
-	if (copy_to_user(_uresp, &uresp, sizeof(uresp))) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
+	if (ret) {
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = -EFAULT;
 		goto err4;
 	}
@@ -205,7 +212,7 @@ int cstor_alloc_pd(struct cstor_ucontext *uctx, void __user *ubuf)
 	cstor_debug(cdev, "pdid %#x\n", pd->pdid);
 	return 0;
 err4:
-	xa_erase(&uctx->pds, pd->pdid);
+	xa_erase(&cdev->pds, pd->pdid);
 err3:
 	cxgb4_uld_put_pdid(cdev->rdma_res, pd->pdid);
 err2:
@@ -233,23 +240,27 @@ int cstor_query_device(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct _cstor_device_attr *attr;
 	struct cstor_query_device_resp uresp = {};
 	void __user *_uresp;
-	int i;
+	int i, ret;
 
 	attr = &uresp.attr;
 	/* common attributes */
 	snprintf(attr->name, sizeof(attr->name), "%s", pci_name(lldi->pdev));
 	attr->fw_ver = lldi->fw_vers;
-	for (i = 0; i < lldi->nports; i++)
+	for (i = 0; i < lldi->nports; i++) {
+		snprintf(attr->iface_name[i], sizeof(attr->iface_name[i]), "%s",
+			 lldi->ports[i]->name);
 		memcpy(&attr->mac_addr[i], lldi->ports[i]->dev_addr, 6);
+	}
 	attr->plat_dev = lldi->plat_dev;
 	attr->vendor_id = (u32)lldi->pdev->vendor;
 	attr->vendor_part_id = (u32)lldi->pdev->device;
+	attr->numa_node_id = lldi->nodeid < 0 ? _CSTOR_INVALID_NUMA_NODE_ID : lldi->nodeid;
 	attr->hw_ver = CHELSIO_CHIP_RELEASE(lldi->adapter_type);
 	attr->chip_ver = CHELSIO_CHIP_VERSION(lldi->adapter_type);
 	attr->qp_start = lldi->vr->qp.start;
 	attr->max_qp = lldi->vr->qp.size;
 	attr->max_qp_wr = cdev->hw_queue.t4_max_qp_depth;
-	attr->max_pd = 1;
+	attr->max_pd = T4_MAX_NUM_PD;
 	attr->max_lso_buf_size = 0;
 	attr->max_pdu_size = lldi->max_pdu_size;
 	attr->stid_base = lldi->uld_tids.stids.start;
@@ -296,8 +307,10 @@ int cstor_query_device(struct cstor_ucontext *uctx, void __user *ubuf)
 		attr->iscsi.ddr_ppod_per_bit[i] = ppod_per_bit[i];
 	}
 	_uresp = &((struct cstor_query_device_cmd *)ubuf)->resp;
-	if (copy_to_user(_uresp, &uresp, sizeof(uresp))) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
+	if (ret) {
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		return -EFAULT;
 	}
 
@@ -339,7 +352,7 @@ static void cstor_unregister_char_device(struct cstor_device *cdev)
 
 static int rdma_supported(const struct cxgb4_lld_info *lldi)
 {
-	return (lldi->vr->stor_stag.size > 0) && (lldi->vr->stor_pbl.size > 0) &&
+	return ((lldi->vr->stor_stag.size >> 5) > 0) && (lldi->vr->stor_pbl.size > 0) &&
 	       (lldi->vr->rq.size > 0) && (lldi->vr->qp.size > 0) &&
 	       (lldi->vr->cq.size > 0);
 }
@@ -360,7 +373,9 @@ static void cstor_free_device(struct cstor_device *cdev)
 		cstor_destroy_resource(cdev);
 
 	WARN_ON(!list_empty(&cdev->ucontext_list));
+	WARN_ON(!list_empty(&cdev->sock_list));
 	WARN_ON(!xa_empty(&cdev->cqs));
+	WARN_ON(!xa_empty(&cdev->sqs));
 	WARN_ON(!xa_empty(&cdev->qps));
 	WARN_ON(!xa_empty(&cdev->srqs));
 	WARN_ON(!xa_empty(&cdev->mrs));
@@ -369,7 +384,9 @@ static void cstor_free_device(struct cstor_device *cdev)
 	if (cdev->workq)
 		destroy_workqueue(cdev->workq);
 
+	xa_destroy(&cdev->pds);
 	xa_destroy(&cdev->cqs);
+	xa_destroy(&cdev->sqs);
 	xa_destroy(&cdev->qps);
 	xa_destroy(&cdev->srqs);
 	xa_destroy(&cdev->mrs);
@@ -419,7 +436,9 @@ static struct cstor_device *cstor_alloc_device(const struct cxgb4_lld_info *lldi
 	cdev->hw_queue.t4_max_cq_depth = cdev->hw_queue.t4_max_iq_size - 2;
 	cdev->hw_queue.t4_stat_len = lldi->sge_egrstatuspagesize;
 
+	xa_init(&cdev->pds);
 	xa_init(&cdev->cqs);
+	xa_init(&cdev->sqs);
 	xa_init(&cdev->qps);
 	xa_init(&cdev->srqs);
 	xa_init(&cdev->mrs);
@@ -431,6 +450,7 @@ static struct cstor_device *cstor_alloc_device(const struct cxgb4_lld_info *lldi
 	spin_lock_init(&cdev->slock);
 	mutex_init(&cdev->stats.lock);
 	INIT_LIST_HEAD(&cdev->ucontext_list);
+	INIT_LIST_HEAD(&cdev->sock_list);
 	mutex_init(&cdev->mlock);
 	mutex_init(&cdev->ucontext_list_lock);
 	init_completion(&cdev->wr_wait.completion);
@@ -494,13 +514,13 @@ static void *cstor_uld_add(const struct cxgb4_lld_info *lldi)
 {
 	struct cstor_device *cdev;
 
-	if ((CHELSIO_CHIP_VERSION(lldi->adapter_type) < CHELSIO_T7)) {
+	if (CHELSIO_CHIP_VERSION(lldi->adapter_type) < CHELSIO_T7) {
 		cstor_printk(KERN_ERR, "%s: unsupported adapter, chip version %u\n",
 			     pci_name(lldi->pdev), CHELSIO_CHIP_VERSION(lldi->adapter_type));
 		return ERR_PTR(-EINVAL);
 	}
 
-	cstor_printk(KERN_INFO, "dev %s: Chelsio T7 user space iSCSI and NVMe/TCP offload driver "
+	cstor_printk(KERN_INFO, "dev %s: Chelsio T7 user space NVMe/TCP and iSCSI offload driver "
 		     "- version %s\n", pci_name(lldi->pdev), CSTOR_MODULE_VERSION);
 
 	if (!rdma_supported(lldi)) {
@@ -541,14 +561,15 @@ static void *cstor_uld_add(const struct cxgb4_lld_info *lldi)
 		     "num stags %d pbl start %#x size %#x rq start %#x size %#x "
 		     "qp qid start %u size %u cq qid start %u size %u\n",
 		     pci_name(lldi->pdev), lldi->vr->stor_stag.start,
-		     lldi->vr->stor_stag.size, 128 /*cstor_num_stags(lldi)*/,
+		     lldi->vr->stor_stag.size, lldi->vr->stor_stag.size >> 5,
 		     lldi->vr->stor_pbl.start, lldi->vr->stor_pbl.size,
 		     lldi->vr->rq.start, lldi->vr->rq.size, lldi->vr->qp.start,
 		     lldi->vr->qp.size, lldi->vr->cq.start, lldi->vr->cq.size);
 
 	cdev = cstor_alloc_device(lldi);
 	if (IS_ERR(cdev)) {
-		cstor_printk(KERN_ERR, "cstor_alloc_device() failed\n");
+		cstor_printk(KERN_ERR, "cstor_alloc_device() failed, ret %ld\n",
+			     PTR_ERR(cdev));
 		return cdev;
 	}
 
@@ -626,18 +647,12 @@ build_iscsi_data_skb(struct cstor_device *cdev, const struct pkt_gl *gl, const _
 
 	ssi = skb_shinfo(skb);
 
-	skb_frag_fill_page_desc(&ssi->frags[0], gl->frags[0].page,
-				gl->frags[0].offset,
-				gl->frags[0].size);
-
-	for (i = 1; i < gl->nfrags; i++)
+	for (i = 0; i < gl->nfrags; i++)
 		skb_frag_fill_page_desc(&ssi->frags[i], gl->frags[i].page,
 					gl->frags[i].offset, gl->frags[i].size);
 
 	ssi->nr_frags = gl->nfrags;
-	skb->len += gl->tot_len;
-	skb->data_len += gl->tot_len;
-	skb->truesize += gl->tot_len;
+	skb_len_add(skb, gl->tot_len);
 
 	/* Get a reference for the last page, we don't own it */
 	get_page(gl->frags[gl->nfrags - 1].page);
@@ -940,14 +955,14 @@ static int __init cstor_init_module(void)
 #define T4_MAX_ADAPTER_NUM 4
 	ret = alloc_chrdev_region(&cstor_device, 0, T4_MAX_ADAPTER_NUM, CSTOR_DRIVER_NAME);
 	if (ret < 0) {
-		cstor_printk(KERN_ERR, "could not allocate major number\n");
+		cstor_printk(KERN_ERR, "failed to allocate major number, ret %d\n", ret);
 		return ret;
 	}
 
 	cstor_class = class_create(CSTOR_DRIVER_NAME);
 	if (IS_ERR(cstor_class)) {
-		cstor_printk(KERN_ERR, "failed to create class\n");
 		ret = PTR_ERR(cstor_class);
+		cstor_printk(KERN_ERR, "failed to create class, ret %d\n", ret);
 		goto err;
 	}
 
@@ -965,7 +980,7 @@ static int __init cstor_init_module(void)
 	cstor_printk(KERN_INFO, "dcb is enabled.\n");
 	ret = register_dcbevent_notifier(&cstor_dcbevent_nb);
 	if (ret < 0)
-		cstor_printk(KERN_WARNING, "failed to register dcb\n");
+		cstor_printk(KERN_WARNING, "failed to register dcb, ret %d\n", ret);
 #endif
 
 	return 0;

@@ -29,10 +29,10 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-#ifndef __CSTOR_USER_H__
-#define __CSTOR_USER_H__
+#ifndef __CSTOR_IOCTL_H__
+#define __CSTOR_IOCTL_H__
 
-#define CSTOR_MODULE_VERSION	"1.10.0"
+#define CSTOR_MODULE_VERSION	"2.0.0"
 #define CSTOR_MAX_ADAPTERS 64
 
 #define CSTOR_DRIVER_NAME "cstor"
@@ -42,7 +42,7 @@ struct t4_status_page {
 	__be16 qid;
 	__be16 cidx;
 	__be16 pidx;
-	u8 qp_err;	/* flit 1- sw owns */
+	u8 qp_err;	/* flit 1 - sw owns */
 	u8 cq_armed;
 	u8 pad[6];
 };
@@ -55,8 +55,6 @@ enum cstor_ioctl_cmd {
 	CSTOR_IOCTL_CMD_DEALLOC_PD,
 	CSTOR_IOCTL_CMD_REG_MR,
 	CSTOR_IOCTL_CMD_DEREG_MR,
-	CSTOR_IOCTL_CMD_DMA_MAP_MR,
-	CSTOR_IOCTL_CMD_DMA_UNMAP_MR,
 	CSTOR_IOCTL_CMD_CREATE_CQ,
 	CSTOR_IOCTL_CMD_DESTROY_CQ,
 	CSTOR_IOCTL_CMD_CREATE_SRQ,
@@ -128,13 +126,19 @@ struct _iscsi_device_attr {
 	__u8 num_ddr_zones;
 };
 
-struct _cstor_device_attr {
 #define _CSTOR_DEV_NAME_LEN 32
+#define _CSTOR_IFACE_NAME_LEN 16
+#define _CSTOR_MAX_PORTS 4
+#define _CSTOR_INVALID_NUMA_NODE_ID 0xffffffff
+
+struct _cstor_device_attr {
 	__u8 name[_CSTOR_DEV_NAME_LEN];
+	__u8 iface_name[_CSTOR_MAX_PORTS][_CSTOR_IFACE_NAME_LEN];
 	__u64 fw_ver;
-	__u64 mac_addr[4];
+	__u64 mac_addr[_CSTOR_MAX_PORTS];
 	__u32 vendor_id;
 	__u32 vendor_part_id;
+	__u32 numa_node_id;
 	__u32 hw_ver;
 	__u32 chip_ver;
 	__u32 qp_start;
@@ -250,14 +254,13 @@ _IOW(CSTOR_IOCTL_MAGIC, CSTOR_IOCTL_CMD_DESTROY_CQ, struct cstor_destroy_cq_cmd)
 
 struct cstor_create_srq_resp {
 	__u64 srq_key;
-	__u64 srq_db_gts_key;
+	__u64 srq_db_key;
 	__u64 srq_memsize;
 	__u32 srqid;
 	__u32 srq_size;
 	__u32 srq_max_wr;
 	__u32 rqt_abs_idx;
 	__u32 qid_mask;
-	__u32 flags;
 	__u32 max_wr;
 };
 
@@ -292,8 +295,8 @@ struct cstor_create_rxq_resp {
 	__u32 iqe_len;
 	__u32 flags;
 	__u32 qid_mask;
-	__u64 fl_bar2_key;
-	__u64 iq_bar2_key;
+	__u64 fl_db_key;
+	__u64 iq_gts_key;
 };
 
 struct cstor_create_rxq_cmd {
@@ -317,8 +320,8 @@ struct cstor_create_qp_resp {
 	__u64 ma_sync_key;
 	__u64 sq_key;
 	__u64 rq_key;
-	__u64 sq_db_gts_key;
-	__u64 rq_db_gts_key;
+	__u64 sq_db_key;
+	__u64 rq_db_key;
 	__u64 sq_memsize;
 	__u64 rq_memsize;
 	__u32 sqid;
@@ -381,7 +384,6 @@ struct cstor_create_listen_resp {
 struct cstor_create_listen_cmd {
 	__u8 ipv4;
 	__u8 protocol;
-	__u8 inaddr_any;
 	__be16 tcp_port;
 	__be32 ip_addr[4];
 	__u32 backlog;
@@ -500,40 +502,34 @@ enum cstor_uevent_type {
 	CSTOR_UEVENT_MAX,
 };
 
-struct _cstor_connect_req {
-	__u32 stid;
-	__u32 tid;
-	__u16 num_tags;
-	__u8 port_id;
+struct _cstor_conn_info {
 	__u8 ipv4;
-	__u8 protocol;
+	__u8 port_id;
 	__u16 vlan_id;
+	__u32 snd_nxt;
+	__u32 rcv_nxt;
 	__be16 lport;
 	__be16 rport;
 	__be32 laddr[4];
 	__be32 raddr[4];
-	__be32 rcv_nxt;
+};
+
+struct _cstor_connect_req {
+	__u32 stid;
+	__u32 tid;
+	struct _cstor_conn_info conn_info;
 };
 
 enum _cstor_connect_status {
-	_CSTOR_CONNECT_SUCCESS,
+	_CSTOR_CONNECT_SUCCESS = 1,
 	_CSTOR_CONNECT_FAILURE,
 };
 
 struct _cstor_connect_rpl {
 	__u32 tid;
 	__u32 atid;
-	__u16 num_tags;
-	__u8 port_id;
-	__u8 ipv4;
 	__u8 status;
-	__u16 vlan_id;
-	__be16 lport;
-	__be16 rport;
-	__be32 laddr[4];
-	__be32 raddr[4];
-	__be32 rcv_nxt;
-
+	struct _cstor_conn_info conn_info;
 };
 
 struct _cstor_iscsi_pdu_info {
@@ -604,7 +600,7 @@ struct cstor_find_device_cmd {
 _IOWR(CSTOR_IOCTL_MAGIC, CSTOR_IOCTL_CMD_FIND_DEVICE, struct cstor_find_device_cmd)
 
 enum cstor_iscsi_region_status {
-	CSTOR_ISCSI_REGION_INUSE,
+	CSTOR_ISCSI_REGION_INUSE = 1,
 	CSTOR_ISCSI_REGION_FREE,
 };
 
@@ -616,16 +612,10 @@ struct cstor_set_iscsi_region_status_cmd {
 _IOW(CSTOR_IOCTL_MAGIC, CSTOR_IOCTL_CMD_SET_ISCSI_REGION_STATUS,	\
      struct cstor_set_iscsi_region_status_cmd)
 
-struct _cstor_enable_iscsi_digest_attr {
-	__u8 hdgst;
-	__u8 ddgst;
-};
-
 struct cstor_enable_iscsi_digest_cmd {
 	__u32 tid;
-	union {
-		struct _cstor_enable_iscsi_digest_attr dgst;
-	};
+	__u8 hdgst;
+	__u8 ddgst;
 };
 
 #define CSTOR_IOCTL_ENABLE_ISCSI_DIGEST	\

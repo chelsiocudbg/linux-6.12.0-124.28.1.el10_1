@@ -55,6 +55,8 @@
 
 #include <net/net_namespace.h>
 
+#include <rdma/ib_umem.h>
+
 #include "l2t.h"
 #include "cxgb4.h"
 #include "cxgb4_rdma_resource.h"
@@ -89,7 +91,7 @@ extern bool enable_debug;
 			pr_debug(fmt, pci_name((cdev)->lldi.pdev), kbasename(__FILE__),		\
 				 __LINE__, __func__, ##__VA_ARGS__);				\
 		}										\
-	} while (0)										\
+	} while (0)
 
 #define cstor_warn_ratelimited(cdev, fmt, ...)							\
 	pr_warn_ratelimited(fmt, pci_name((cdev)->lldi.pdev), kbasename(__FILE__), __LINE__,	\
@@ -103,11 +105,6 @@ extern bool enable_debug;
 	} while (0)
 
 #define PBL_OFF(cdev_p, a) ((a) - (cdev_p)->lldi.vr->pbl.start)
-#define RQT_OFF(cdev_p, a) ((a) - (cdev_p)->lldi.vr->rq.start)
-
-#define T6_MAX_PAGE_SIZE 0x8000000
-
-#define CSTOR_LOOPBACK_PORT_SHIFT 4
 
 #define ISCSI_PGSZ_IDX_MAX	4
 #define ISCSI_PGSZ_BASE_SHIFT	12
@@ -169,7 +166,9 @@ struct cstor_device {
 	struct cstor_wr_wait wr_wait;
 	struct cstor_wr_wait *wr_waitp;
 	struct cstor_hw_queue hw_queue;
+	struct xarray pds;
 	struct xarray cqs;
+	struct xarray sqs;
 	struct xarray qps;
 	struct xarray srqs;
 	struct xarray rxqs;
@@ -177,6 +176,7 @@ struct cstor_device {
 	struct xarray stids;
 	struct xarray atids;
 	struct xarray tids;
+	struct list_head sock_list;
 	struct workqueue_struct *workq;
 	struct work_struct rx_work;
 	struct sk_buff_head rxq;
@@ -193,7 +193,6 @@ struct cstor_ucontext {
 	struct cstor_device *cdev;
 	struct list_head entry;
 	struct list_head mmaps;
-	struct xarray pds;
 	struct xarray event_channels;
 	struct cxgb4_dev_ucontext d_uctx;
 	spinlock_t mmap_lock;
@@ -248,11 +247,6 @@ union cstor_skb_cb {
 #define cstor_skcb_dcb_priority(skb)	(CSTOR_SKB_CB(skb)->rx.dcb.priority)
 #define cstor_skcb_dcb_port_id(skb)	(CSTOR_SKB_CB(skb)->rx.dcb.port_id)
 #define cstor_skcb_dcb_protocol(skb)	(CSTOR_SKB_CB(skb)->rx.dcb.protocol)
-
-static inline int cstor_num_stags(struct cstor_device *cdev)
-{
-	return (int)(cdev->lldi.vr->stor_stag.size >> 5);
-}
 
 #define CSTOR_WR_TO (60 * HZ)
 
@@ -361,7 +355,7 @@ struct tpt_attributes {
 
 struct cstor_mr {
 	struct cstor_ucontext *uctx;
-	struct cstor_umem *umem;
+	struct ib_umem *umem;
 	struct tpt_attributes attr;
 };
 
@@ -397,6 +391,13 @@ struct cstor_qp_attributes {
 	bool initiator;
 };
 
+#define CSTOR_INVALID_SQID 0xFFFFFFFF
+struct cstor_sq {
+	struct cstor_ucontext *uctx;
+	u32 sq_idx;
+	u8 port_id;
+};
+
 struct cstor_qp {
 	struct cstor_ucontext *uctx;
 	struct cstor_sock *csk;
@@ -413,7 +414,6 @@ struct cstor_srq {
 	struct t4_srq wq;
 	refcount_t refcnt;
 	int idx;
-	__u32 flags;
 	u32 pdid;
 };
 
@@ -470,18 +470,12 @@ enum cstor_qp_state {
 	CSTOR_QP_STATE_ERROR,
 };
 
-static inline u32 cstor_ib_to_tpt_access(int a)
+static inline u32 cstor_get_tpt_access_perms(int a)
 {
 	return ((a & _CSTOR_ACCESS_REMOTE_WRITE) ? FW_RI_MEM_ACCESS_REM_WRITE : 0) |
 	       ((a & _CSTOR_ACCESS_REMOTE_READ) ? FW_RI_MEM_ACCESS_REM_READ : 0) |
 	       ((a & _CSTOR_ACCESS_LOCAL_WRITE) ? FW_RI_MEM_ACCESS_LOCAL_WRITE : 0) |
 	       FW_RI_MEM_ACCESS_LOCAL_READ;
-}
-
-static inline u32 cstor_ib_to_tpt_bind_access(int acc)
-{
-	return ((acc & _CSTOR_ACCESS_REMOTE_WRITE) ? FW_RI_MEM_ACCESS_REM_WRITE : 0) |
-	       ((acc & _CSTOR_ACCESS_REMOTE_READ) ? FW_RI_MEM_ACCESS_REM_READ : 0);
 }
 
 enum cstor_sock_state {
@@ -513,29 +507,31 @@ enum cstor_sock_flags {
 	CSTOR_SOCK_F_FLOWC_SENT			= 12,
 	CSTOR_SOCK_F_CLIP_RELEASE		= 13,
 	CSTOR_SOCK_F_TXQ_VALID			= 14,
+	CSTOR_SOCK_F_QUEUED_IN_LIST		= 15,
+	CSTOR_SOCK_F_TX_SENDPATH		= 16,
 };
 
 enum cstor_sock_history {
-	CSTOR_SOCK_H_ACT_OPEN_REQ		= 1,
-	CSTOR_SOCK_H_ACT_ESTAB			= 2,
-	CSTOR_SOCK_H_ACT_OPEN_RPL		= 3,
-	CSTOR_SOCK_H_PASS_ACCEPT_REQ		= 4,
-	CSTOR_SOCK_H_PASS_ESTAB			= 5,
-	CSTOR_SOCK_H_ULP_ACCEPT			= 6,
-	CSTOR_SOCK_H_ULP_REJECT			= 7,
-	CSTOR_SOCK_H_TIMEDOUT			= 8,
-	CSTOR_SOCK_H_PEER_ABORT			= 9,
-	CSTOR_SOCK_H_PEER_CLOSE			= 10,
-	CSTOR_SOCK_H_CONNREQ_UPCALL		= 11,
-	CSTOR_SOCK_H_DISCONNECTED_UPCALL	= 12,
-	CSTOR_SOCK_H_DISC_ABORT			= 13,
-	CSTOR_SOCK_H_DISC_FAIL			= 14,
-	CSTOR_SOCK_H_CONN_RPL_UPCALL		= 15,
-	CSTOR_SOCK_H_CLOSE_CON_RPL		= 16,
-	CSTOR_SOCK_H_ULP_DISCONNECT		= 17,
-	CSTOR_SOCK_H_ULP_RELEASE		= 18,
-	CSTOR_SOCK_H_ULP_FREE_ATID		= 19,
-	CSTOR_SOCK_H_ULP_ATTACH_QP		= 20,
+	CSTOR_SOCK_H_ACT_OPEN_REQ		= 0,
+	CSTOR_SOCK_H_ACT_ESTAB			= 1,
+	CSTOR_SOCK_H_ACT_OPEN_RPL		= 2,
+	CSTOR_SOCK_H_PASS_ACCEPT_REQ		= 3,
+	CSTOR_SOCK_H_PASS_ESTAB			= 4,
+	CSTOR_SOCK_H_ULP_ACCEPT			= 5,
+	CSTOR_SOCK_H_ULP_REJECT			= 6,
+	CSTOR_SOCK_H_TIMEDOUT			= 7,
+	CSTOR_SOCK_H_PEER_ABORT			= 8,
+	CSTOR_SOCK_H_PEER_CLOSE			= 9,
+	CSTOR_SOCK_H_CONNREQ_UPCALL		= 10,
+	CSTOR_SOCK_H_DISCONNECTED_UPCALL	= 11,
+	CSTOR_SOCK_H_DISC_ABORT			= 12,
+	CSTOR_SOCK_H_DISC_FAIL			= 13,
+	CSTOR_SOCK_H_CONN_RPL_UPCALL		= 14,
+	CSTOR_SOCK_H_CLOSE_CON_RPL		= 15,
+	CSTOR_SOCK_H_ULP_DISCONNECT		= 16,
+	CSTOR_SOCK_H_ULP_RELEASE		= 17,
+	CSTOR_SOCK_H_ULP_FREE_ATID		= 18,
+	CSTOR_SOCK_H_ULP_ATTACH_QP		= 19,
 };
 
 enum conn_pre_alloc_buffers {
@@ -571,7 +567,6 @@ struct cstor_event_channel {
 	struct kref kref;
 	int efd;
 	int flag;
-
 };
 
 #define CSTOR_INVALID_STID 0xFFFFFFFF
@@ -597,8 +592,9 @@ struct cstor_listen_sock {
 
 struct cstor_sock {
 	struct cstor_ucontext *uctx;
-	struct cstor_event_channel *event_channel;
 	struct cstor_listen_sock *lcsk;
+	struct cstor_event_channel *event_channel;
+	struct cstor_sq *sq;
 	struct cstor_qp *qp;
 	struct l2t_entry *l2t;
 	struct dst_entry *dst;
@@ -610,14 +606,15 @@ struct cstor_sock {
 	struct sockaddr_storage raddr;
 	struct cstor_wr_wait wr_wait;
 	struct timer_list timer;
+	struct list_head entry;
 	struct list_head uevt_list;
 	struct mutex mutex;
 	struct kref kref;
 	enum cstor_sock_state state;
 	unsigned long flags;
 	unsigned long history;
-	int snd_win;
-	int rcv_win;
+	u32 snd_win;
+	u32 rcv_win;
 	u32 atid;
 	u32 tid;
 	u32 snd_wscale;
@@ -629,7 +626,6 @@ struct cstor_sock {
 	u32 smac_idx;
 	u32 tx_chan;
 	u32 rx_chan;
-	u32 tpt_idx;
 	u32 mtu;
 	u32 abort_neg_adv;
 	u16 emss;
@@ -659,7 +655,8 @@ extern unsigned int max_ddp_tag;
 extern unsigned int max_ddp_sge;
 extern unsigned int max_rt;
 extern bool enable_wc;
-extern char *states[];
+extern const char *cstor_protocol[];
+extern const char *states[];
 
 typedef void (*cstor_handler_func)(struct cstor_device *dev, struct sk_buff *skb);
 extern cstor_handler_func cstor_handlers[NUM_CPL_CMDS];
@@ -721,6 +718,7 @@ int __cstor_destroy_cq(struct cstor_cq *cq, bool reset_cq_ctx);
 int cstor_disable_cq(struct cstor_cq *cq);
 int __cstor_destroy_srq(struct cstor_srq *srq);
 int __cstor_destroy_rxq(struct cstor_rxq *rxq);
+void cstor_free_sq(struct cstor_sq *sq);
 int __cstor_destroy_qp(struct cstor_qp *qp);
 void _cstor_free_listen_sock(struct kref *kref);
 void _cstor_free_sock(struct kref *kref);
@@ -744,4 +742,8 @@ int cstor_ev_handler(struct cstor_device *cdev, u32 qid, u32 pidx);
 void cstor_ev_dispatch(struct cstor_device *cdev, void *err_cqe);
 void cstor_free_uevent_node(struct cstor_uevent_node *uevt_node);
 void _cstor_free_event_channel(struct kref *kref);
+
+struct ib_umem *cstor_umem_get(struct cstor_device *cdev, unsigned long addr,
+			       size_t size, int access);
+void cstor_umem_release(struct cstor_device *cdev, struct ib_umem *umem);
 #endif

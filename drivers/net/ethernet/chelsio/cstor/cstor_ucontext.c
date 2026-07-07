@@ -35,6 +35,7 @@
 static int
 cstor_destroy_ucontext_resources(struct cstor_device *cdev, struct cstor_ucontext *uctx)
 {
+	struct cstor_sq *sq;
 	struct cstor_qp *qp;
 	struct cstor_srq *srq;
 	struct cstor_cq *cq;
@@ -42,6 +43,11 @@ cstor_destroy_ucontext_resources(struct cstor_device *cdev, struct cstor_ucontex
 	struct cstor_rxq *rxq;
 	unsigned long index;
 	int ret;
+
+	xa_for_each(&cdev->sqs, index, sq) {
+		if (sq->uctx == uctx)
+			cstor_free_sq(sq);
+	}
 
 	xa_for_each(&cdev->qps, index, qp) {
 		if (qp->uctx == uctx) {
@@ -168,8 +174,10 @@ int cstor_dealloc_ucontext(struct cstor_ucontext *uctx)
 		goto out;
 	}
 
-	xa_for_each(&uctx->pds, index, pd)
-		__cstor_dealloc_pd(pd);
+	xa_for_each(&cdev->pds, index, pd) {
+		if (pd->uctx == uctx)
+			__cstor_dealloc_pd(pd);
+	}
 
 	list_for_each_entry_safe(mm, tmp, &uctx->mmaps, entry) {
 		list_del(&mm->entry);
@@ -204,7 +212,6 @@ struct cstor_ucontext *cstor_alloc_ucontext(struct cstor_device *cdev)
 
 	INIT_LIST_HEAD(&uctx->mmaps);
 	spin_lock_init(&uctx->mmap_lock);
-	xa_init(&uctx->pds);
 	xa_init(&uctx->event_channels);
 	cxgb4_uld_init_dev_ucontext(&uctx->d_uctx);
 	atomic_set(&uctx->num_csk, 0);

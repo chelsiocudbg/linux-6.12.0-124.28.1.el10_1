@@ -32,7 +32,7 @@
 
 #include "cstor.h"
 
-static int __destroy_srq_queue(struct cstor_srq *srq)
+static int cstor_send_srq_fw_ri_res_wr(struct cstor_srq *srq, bool create_srq)
 {
 	struct cstor_device *cdev = srq->uctx->cdev;
 	struct sk_buff *skb = cdev->skb;
@@ -54,18 +54,56 @@ static int __destroy_srq_queue(struct cstor_srq *srq)
 
 	res = res_wr->res;
 	res->u.srq.restype = FW_RI_RES_TYPE_SRQ;
-	res->u.srq.op = FW_RI_RES_OP_RESET;
 	res->u.srq.srqid = cpu_to_be32(srq->idx);
 	res->u.srq.eqid = cpu_to_be32(wq->qid);
 
+	if (create_srq) {
+		/*
+		 * eqsize is the number of 64B entries plus the status page size.
+		 */
+		int eqsize = wq->size + cdev->hw_queue.t4_eq_status_entries;
+
+		res->u.srq.op = FW_RI_RES_OP_WRITE;
+		res->u.srq.fetchszm_to_iqid = cpu_to_be32(FW_RI_RES_WR_HOSTFCMODE_V(0) | /* no host cidx updates */
+					FW_RI_RES_WR_CPRIO_V(0) | /* don't keep in chip cache */
+					FW_RI_RES_WR_PCIECHN_V(0) | /* set by uP at ri_init time */
+					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering));
+		res->u.srq.dcaen_to_eqsize = cpu_to_be32(FW_RI_RES_WR_DCAEN_V(0) |
+							 FW_RI_RES_WR_DCACPU_V(0) |
+							 FW_RI_RES_WR_FBMIN_V(2) |
+							 FW_RI_RES_WR_FBMAX_V(3) |
+							 FW_RI_RES_WR_CIDXFTHRESHO_V(0) |
+							 FW_RI_RES_WR_CIDXFTHRESH_V(0) |
+							 FW_RI_RES_WR_EQSIZE_V(eqsize));
+		res->u.srq.eqaddr = cpu_to_be64(wq->dma_addr);
+		res->u.srq.pdid = cpu_to_be32(srq->pdid);
+		res->u.srq.hwsrqsize = cpu_to_be32(wq->rqt_size);
+		res->u.srq.hwsrqaddr = cpu_to_be32(wq->rqt_hwaddr - cdev->lldi.vr->rq.start);
+	} else {
+		res->u.srq.op = FW_RI_RES_OP_RESET;
+	}
+
 	cstor_reinit_wr_wait(&cdev->wr_wait);
-	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, 0, __func__);
-	if (ret) {
+	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, wq->qid, __func__);
+	if (ret)
 		cstor_err(cdev, "cstor_send_wait() failed, ret %d\n", ret);
+
+	return ret;
+}
+
+static int __destroy_srq_queue(struct cstor_srq *srq)
+{
+	struct cstor_device *cdev = srq->uctx->cdev;
+	struct t4_srq *wq = &srq->wq;
+	int ret;
+
+	ret = cstor_send_srq_fw_ri_res_wr(srq, false);
+	if (ret) {
+		cstor_err(cdev, "cstor_send_srq_fw_ri_res_wr() failed, ret %d\n", ret);
 		return ret;
 	}
 
-	dma_free_coherent(&cdev->lldi.pdev->dev, wq->memsize, wq->queue, wq->dma_addr);
+	dma_free_coherent(cdev->lldi.dev, wq->memsize, wq->queue, wq->dma_addr);
 	cxgb4_uld_free_rqtpool(cdev->rdma_res, wq->rqt_hwaddr, wq->rqt_size);
 	xa_erase(&cdev->srqs, srq->wq.qid);
 	cxgb4_uld_put_qpid(&srq->uctx->d_uctx, wq->qid);
@@ -76,11 +114,6 @@ static int alloc_srq_queue(struct cstor_srq *srq)
 {
 	struct cstor_device *cdev = srq->uctx->cdev;
 	struct t4_srq *wq = &srq->wq;
-	struct sk_buff *skb = cdev->skb;
-	struct fw_ri_res_wr *res_wr;
-	struct fw_ri_res *res;
-	u32 wr_len = sizeof(*res_wr) + sizeof(*res);
-	int eqsize;
 	int ret = -ENOMEM;
 
 	wq->qid = cxgb4_uld_get_qpid(cdev->rdma_res, &srq->uctx->d_uctx);
@@ -92,24 +125,24 @@ static int alloc_srq_queue(struct cstor_srq *srq)
 	wq->rqt_size = wq->max_wr;
 	wq->rqt_hwaddr = cxgb4_uld_alloc_rqtpool(cdev->rdma_res, wq->rqt_size);
 	if (!wq->rqt_hwaddr) {
-		cstor_err(cdev, "failed to allocate memory from rqt pool, wq->rqt_size %d\n",
+		cstor_err(cdev, "failed to allocate memory from rqt pool, wq->rqt_size %u\n",
 			  wq->rqt_size);
 		goto err1;
 	}
 
 	wq->rqt_abs_idx = (wq->rqt_hwaddr - cdev->lldi.vr->rq.start) >> T4_RQT_ENTRY_SHIFT;
 
-	wq->queue = dma_alloc_coherent(&cdev->lldi.pdev->dev, wq->memsize, &wq->dma_addr,
-				       GFP_KERNEL);
+	wq->queue = dma_alloc_coherent(cdev->lldi.dev, wq->memsize, &wq->dma_addr, GFP_KERNEL);
 	if (!wq->queue) {
-		cstor_err(cdev, "failed to allocate wq->queue\n");
+		cstor_err(cdev, "failed to allocate wq->queue, memsize %lu\n", wq->memsize);
 		goto err1;
 	}
 
 	ret = cstor_get_db_gts_phys_addr(cdev, wq->qid, T4_BAR2_QTYPE_EGRESS, &wq->bar2_qid,
-					 &wq->db_gts_pa);
+					 &wq->db_pa);
 	if (ret) {
-		cstor_err(cdev, "failed to get bar2 addr for srqid %u, ret %d\n", wq->qid, ret);
+		cstor_err(cdev, "failed to get doorbell phys addr for srqid %u, ret %d\n",
+			  wq->qid, ret);
 		goto err1;
 	}
 
@@ -119,48 +152,10 @@ static int alloc_srq_queue(struct cstor_srq *srq)
 		goto err1;
 	}
 
-	/* build fw_ri_res_wr */
-	skb_trim(skb, 0);
-	skb_get(skb);
-	set_wr_txq(skb, CPL_PRIORITY_CONTROL, cdev->lldi.ctrlq_start);
-
-	res_wr = (struct fw_ri_res_wr *)__skb_put_zero(skb, wr_len);
-	res_wr->op_nres = cpu_to_be32(FW_WR_OP_V(FW_RI_RES_WR) |
-				      FW_RI_RES_WR_NRES_V(1) | FW_WR_COMPL_F);
-	res_wr->len16_pkd = cpu_to_be32(DIV_ROUND_UP(wr_len, 16));
-	res_wr->cookie = (uintptr_t)&cdev->wr_wait;
-
-	/*
-	 * eqsize is the number of 64B entries plus the status page size.
-	 */
-	eqsize = wq->size + cdev->hw_queue.t4_eq_status_entries;
-
-	res = res_wr->res;
-	res->u.srq.restype = FW_RI_RES_TYPE_SRQ;
-	res->u.srq.op = FW_RI_RES_OP_WRITE;
-	res->u.srq.eqid = cpu_to_be32(wq->qid);
-	res->u.srq.fetchszm_to_iqid = cpu_to_be32(FW_RI_RES_WR_HOSTFCMODE_V(0) | /* no host cidx updates */
-					FW_RI_RES_WR_CPRIO_V(0) | /* don't keep in chip cache */
-					FW_RI_RES_WR_PCIECHN_V(0) | /* set by uP at ri_init time */
-					FW_RI_RES_WR_FETCHRO_V(cdev->lldi.relaxed_ordering));
-	res->u.srq.dcaen_to_eqsize = cpu_to_be32(FW_RI_RES_WR_DCAEN_V(0) |
-						 FW_RI_RES_WR_DCACPU_V(0) |
-						 FW_RI_RES_WR_FBMIN_V(2) |
-						 FW_RI_RES_WR_FBMAX_V(3) |
-						 FW_RI_RES_WR_CIDXFTHRESHO_V(0) |
-						 FW_RI_RES_WR_CIDXFTHRESH_V(0) |
-						 FW_RI_RES_WR_EQSIZE_V(eqsize));
-	res->u.srq.eqaddr = cpu_to_be64(wq->dma_addr);
-	res->u.srq.srqid = cpu_to_be32(srq->idx);
-	res->u.srq.pdid = cpu_to_be32(srq->pdid);
-	res->u.srq.hwsrqsize = cpu_to_be32(wq->rqt_size);
-	res->u.srq.hwsrqaddr = cpu_to_be32(wq->rqt_hwaddr - cdev->lldi.vr->rq.start);
-
-	cstor_reinit_wr_wait(&cdev->wr_wait);
-
-	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, wq->qid, __func__);
+	ret = cstor_send_srq_fw_ri_res_wr(srq, true);
 	if (ret) {
-		cstor_err(cdev, "cstor_send_wait() failed, qid %u ret %d\n", wq->qid, ret);
+		cstor_err(cdev, "cstor_send_srq_fw_ri_res_wr() failed, qid %u ret %d\n",
+			  wq->qid, ret);
 		if (ret == -ETIMEDOUT)
 			return ret;
 		goto err2;
@@ -175,7 +170,7 @@ err2:
 	xa_erase(&cdev->srqs, srq->wq.qid);
 err1:
 	if (wq->queue)
-		dma_free_coherent(&cdev->lldi.pdev->dev, wq->memsize, wq->queue, wq->dma_addr);
+		dma_free_coherent(cdev->lldi.dev, wq->memsize, wq->queue, wq->dma_addr);
 
 	if (wq->rqt_hwaddr)
 		cxgb4_uld_free_rqtpool(cdev->rdma_res, wq->rqt_hwaddr, wq->rqt_size);
@@ -190,7 +185,8 @@ int __cstor_destroy_srq(struct cstor_srq *srq)
 	int ret;
 
 	if (refcount_read(&srq->refcnt) > 1) {
-		cstor_err(cdev, "srq with id %u is in use\n", srq->wq.qid);
+		cstor_err(cdev, "srq with id %u is in use, refcnt %u\n",
+			  srq->wq.qid, refcount_read(&srq->refcnt));
 		return -EINVAL;
 	}
 
@@ -198,7 +194,8 @@ int __cstor_destroy_srq(struct cstor_srq *srq)
 
 	ret = __destroy_srq_queue(srq);
 	if (ret) {
-		cstor_err(cdev, "error destroying srq with id %u\n", srq->wq.qid);
+		cstor_err(cdev, "error destroying srq with id %u, ret %d\n",
+			  srq->wq.qid, ret);
 		return ret;
 	}
 
@@ -212,9 +209,12 @@ int cstor_destroy_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_srq *srq;
 	struct cstor_destroy_srq_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -237,10 +237,12 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_create_srq_resp uresp = {};
 	void __user *_uresp;
 	int rqsize;
-	int ret = -ENOMEM;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -255,7 +257,7 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 		return -E2BIG;
 	}
 
-	pd = xa_load(&uctx->pds, cmd.pdid);
+	pd = xa_load(&cdev->pds, cmd.pdid);
 	if (!pd) {
 		cstor_err(cdev, "failed to find pd with pdid %u\n", cmd.pdid);
 		return -EINVAL;
@@ -268,6 +270,7 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 	 */
 	rqsize = roundup_pow_of_two(max_t(u16, cmd.max_wr + 1, 16));
 
+	ret = -ENOMEM;
 	srq = kzalloc(sizeof(*srq), GFP_KERNEL);
 	if (!srq) {
 		cstor_err(cdev, "srq allocation failed\n");
@@ -288,12 +291,13 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 		goto err;
 	}
 
-	srq->idx = cxgb4_uld_alloc_srq_idx(cdev->rdma_res);
-	if (srq->idx < 0) {
-		cstor_err(cdev, "failed to allocate srq idx\n");
+	ret = cxgb4_uld_alloc_srq_idx(cdev->rdma_res);
+	if (ret < 0) {
+		cstor_err(cdev, "failed to allocate srq idx, ret %d\n", ret);
 		goto err;
 	}
 
+	srq->idx = ret;
 	srq->uctx = uctx;
 	srq->pdid = pd->pdid;
 	srq->wq.max_wr = rqsize;
@@ -315,7 +319,6 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	uresp.max_wr = rqsize - 1;
 
-	uresp.flags = srq->flags;
 	uresp.qid_mask = cdev->rdma_res->qpmask;
 	uresp.srqid = srq->wq.qid;
 	uresp.srq_size = srq->wq.size;
@@ -326,14 +329,15 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 	spin_lock(&uctx->mmap_lock);
 	uresp.srq_key = uctx->key;
 	uctx->key += PAGE_SIZE;
-	uresp.srq_db_gts_key = uctx->key;
+	uresp.srq_db_key = uctx->key;
 	uctx->key += PAGE_SIZE;
 	spin_unlock(&uctx->mmap_lock);
 
 	_uresp = &((struct cstor_create_srq_cmd *)ubuf)->resp;
 	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
 	if (ret) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = __destroy_srq_queue(srq);
 		if (ret) {
 			cstor_err(cdev, "__destroy_srq_queue() failed, ret %d\n", ret);
@@ -352,8 +356,8 @@ int cstor_create_srq(struct cstor_ucontext *uctx, void __user *ubuf)
 	srq_key_mm->len = PAGE_ALIGN(srq->wq.memsize);
 	insert_mmap(uctx, srq_key_mm);
 
-	srq_db_key_mm->key = uresp.srq_db_gts_key;
-	srq_db_key_mm->addr = srq->wq.db_gts_pa;
+	srq_db_key_mm->key = uresp.srq_db_key;
+	srq_db_key_mm->addr = srq->wq.db_pa;
 	srq_db_key_mm->vaddr = NULL;
 	srq_db_key_mm->len = PAGE_SIZE;
 	insert_mmap(uctx, srq_db_key_mm);

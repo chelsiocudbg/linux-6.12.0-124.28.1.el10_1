@@ -130,13 +130,18 @@ static int cstor_copy_skbs_to_user(struct sk_buff *skb, void __user *ubuf, u32 b
 	void *ptr = NULL;
 	u32 dlen = skb->len - skb->data_len;
 	u32 offset = 0, i;
+	int ret;
 
 	if (buf_len < skb->len)
 		return -ENOBUFS;
 
 	if (dlen) {
-		if (copy_to_user((void __user *)(u8 *)ubuf, skb->data, dlen))
+		ret = copy_to_user((void __user *)(u8 *)ubuf, skb->data, dlen);
+		if (ret) {
+			cstor_printk(KERN_ERR, "copy_to_user() failed, dlen %u, ret %d\n",
+				     dlen, ret);
 			return -EFAULT;
+		}
 
 		offset += dlen;
 	}
@@ -145,8 +150,12 @@ static int cstor_copy_skbs_to_user(struct sk_buff *skb, void __user *ubuf, u32 b
 		ptr = skb_frag_address(&ssi->frags[i]);
 		dlen = skb_frag_size(&ssi->frags[i]);
 
-		if (copy_to_user((void __user *)((u8 *)ubuf + offset), ptr, dlen))
+		ret = copy_to_user((void __user *)((u8 *)ubuf + offset), ptr, dlen);
+		if (ret) {
+			cstor_printk(KERN_ERR, "copy_to_user() failed, dlen %u, ret %d\n",
+				     dlen, ret);
 			return -EFAULT;
+		}
 
 		offset += dlen;
 	}
@@ -161,10 +170,12 @@ int cstor_get_event(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_get_uevent_cmd cmd;
 	struct cstor_get_uevent_resp uresp;
 	void __user *_ubuf;
-	int ret = 0;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -194,16 +205,18 @@ int cstor_get_event(struct cstor_ucontext *uctx, void __user *ubuf)
 
 		ret = cstor_copy_skbs_to_user(uevt_node->skb, (void __user *)cmd.buf, cmd.buf_len);
 		if (ret) {
-			cstor_err(uctx->cdev, "cstor_copy_skbs_to_user() failed, len %u\n",
-				  cmd.buf_len);
+			cstor_err(uctx->cdev, "cstor_copy_skbs_to_user() failed, len %u, ret %d\n",
+				  cmd.buf_len, ret);
 			goto out;
 		}
 	}
 
 	memcpy(&uresp.uevt, &uevt_node->uevt, sizeof(struct cstor_uevent));
 	_ubuf = &((struct cstor_get_uevent_cmd *)ubuf)->resp;
-	if (copy_to_user(_ubuf, &uresp, sizeof(uresp))) {
-		cstor_err(uctx->cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = -EFAULT;
 		goto out;
 	}
@@ -218,9 +231,12 @@ int cstor_destroy_event_channel(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_event_channel *event_channel;
 	struct cstor_destroy_event_channel_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EINVAL;
 	}
 
@@ -231,7 +247,8 @@ int cstor_destroy_event_channel(struct cstor_ucontext *uctx, void __user *ubuf)
 	}
 
 	if (kref_read(&event_channel->kref) > 1) {
-		cstor_err(uctx->cdev, "event channel in use\n");
+		cstor_err(uctx->cdev, "event channel in use, refcnt %u\n",
+			  kref_read(&event_channel->kref));
 		return -EBUSY;
 	}
 
@@ -246,8 +263,10 @@ int cstor_create_event_channel(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_create_event_channel_cmd cmd;
 	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EINVAL;
 	}
 

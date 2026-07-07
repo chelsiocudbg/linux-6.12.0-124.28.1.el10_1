@@ -36,7 +36,7 @@
 #include <linux/vmalloc.h>
 #include <linux/sched.h>
 
-#include "umem.h"
+#include "cstor.h"
 
 struct cstor_debugfs_data {
 	struct cstor_device *cdev;
@@ -52,6 +52,7 @@ debugfs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	struct cstor_debugfs_data *d = file->private_data;
 	loff_t pos = *ppos;
 	loff_t avail;
+	int ret;
 
 	if (!d)
 		return 0;
@@ -76,8 +77,9 @@ debugfs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			return -EINVAL;
 		}
 
-		if (copy_to_user(buf, d->buf + pos, len)) {
-			cstor_err(d->cdev, "copy_to_user() failed, len %lu\n", len);
+		ret = copy_to_user(buf, d->buf + pos, len);
+		if (ret) {
+			cstor_err(d->cdev, "copy_to_user() failed, len %lu, ret %d\n", len, ret);
 			return -EFAULT;
 		}
 
@@ -111,35 +113,19 @@ dump_qp(struct cstor_debugfs_data *qpd, struct cstor_ucontext *uctx, int count)
 		if (qp->csk) {
 			struct cstor_sock *csk = qp->csk;
 
-			if (csk->laddr.ss_family == AF_INET) {
-				struct sockaddr_in *lsin = (struct sockaddr_in *)&csk->laddr;
-				struct sockaddr_in *rsin = (struct sockaddr_in *)&csk->raddr;
-
-				cc = snprintf(qpd->buf + qpd->pos, space,
-					      "rc qp sq id %5u %3s id %5u state %u "
-					      "tid %6u state %s (%d) %pI4:%u->%pI4:%u\n",
-					      qp->wq.sq.qid, qp->srq ? "srq" : "rq",
-					      qp->srq ? qp->srq->idx : qp->wq.rq.qid,
-					      qp->attr.state, csk->tid, states[csk->state],
-					      csk->state, &lsin->sin_addr,
-					      be16_to_cpu(lsin->sin_port), &rsin->sin_addr,
-					      be16_to_cpu(rsin->sin_port));
-			} else {
-				struct sockaddr_in6 *lsin6 = (struct sockaddr_in6 *)&csk->laddr;
-				struct sockaddr_in6 *rsin6 = (struct sockaddr_in6 *)&csk->laddr;
-
-				cc = snprintf(qpd->buf + qpd->pos, space,
-					      "rc qp sq id %5u rq id %5u state %u "
-					      "tid %6u state %s (%d) %pI6:%u->%pI6:%u\n",
-					      qp->wq.sq.qid, qp->wq.rq.qid, qp->attr.state,
-					      csk->tid, states[csk->state], csk->state,
-					      &lsin6->sin6_addr, be16_to_cpu(lsin6->sin6_port),
-					      &rsin6->sin6_addr, be16_to_cpu(rsin6->sin6_port));
-			}
+			cc = snprintf(qpd->buf + qpd->pos, space,
+				      "sq id %5u %3s id %5u state %u protocol %8s (%d) "
+				      "tid %6u csk state %s (%d) %pISpc <-> %pISpc\n",
+				      qp->wq.sq.qid, qp->srq ? "srq" : "rq",
+				      qp->srq ? qp->srq->idx : qp->wq.rq.qid,
+				      qp->attr.state, cstor_protocol[qp->attr.protocol],
+				      qp->attr.protocol, csk->tid, states[csk->state],
+				      csk->state, &csk->laddr, &csk->raddr);
 		} else {
 			cc = snprintf(qpd->buf + qpd->pos, space,
-				      "rc qp sq id %5u rq id %5u state %u\n",
-				      qp->wq.sq.qid, qp->wq.rq.qid, qp->attr.state);
+				      "sq id %5u rq id %5u state %u protocol %8s (%d)\n",
+				      qp->wq.sq.qid, qp->wq.rq.qid, qp->attr.state,
+				      cstor_protocol[qp->attr.protocol], qp->attr.protocol);
 		}
 
 		if (cc >= space)
@@ -338,8 +324,7 @@ dump_srq(struct cstor_debugfs_data *srqd, struct cstor_ucontext *uctx, int count
 			continue;
 
 		cc = snprintf(srqd->buf + srqd->pos, space,
-			      "srq qid %5u idx %4d flags %#x\n",
-			      srq->wq.qid, srq->idx, srq->flags);
+			      "srq qid %5u idx %4d\n", srq->wq.qid, srq->idx);
 
 		if (cc >= space)
 			break;
@@ -780,27 +765,18 @@ static int dump_sock(struct cstor_sock *csk, struct cstor_debugfs_data *cskd)
 	if (space == 0)
 		return 1;
 
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *lsin = (struct sockaddr_in *)&csk->laddr;
-		struct sockaddr_in *rsin = (struct sockaddr_in *)&csk->raddr;
+	cc = snprintf(cskd->buf + cskd->pos, space,
+		      "tid %6u port_id %d state %s (%d) protocol %8s (%d) "
+		      "flags %#4lx history %#5lx %pISpc <-> %pISpc\n",
+		      csk->tid, csk->port_id, states[csk->state], csk->state,
+		      cstor_protocol[csk->protocol], csk->protocol, csk->flags,
+		      csk->history, &csk->laddr, &csk->raddr);
 
-		cc = snprintf(cskd->buf + cskd->pos, space,
-			      "tid %6u port_id %d state %s (%d) flags %#4lx "
-			      "history %#5lx %pI4:%d <-> %pI4:%d\n",
-			      csk->tid, csk->port_id, states[csk->state], csk->state, csk->flags,
-			      csk->history, &lsin->sin_addr, be16_to_cpu(lsin->sin_port),
-			      &rsin->sin_addr, be16_to_cpu(rsin->sin_port));
-	} else {
-		struct sockaddr_in6 *lsin6 = (struct sockaddr_in6 *)&csk->laddr;
-		struct sockaddr_in6 *rsin6 = (struct sockaddr_in6 *)&csk->raddr;
-
-		cc = snprintf(cskd->buf + cskd->pos, space,
-			      "tid %6u port_id %d state %s (%d) flags %#4lx "
-			      "history %#5lx %pI6:%d <-> %pI6:%d\n", csk->tid, csk->port_id,
-			      states[csk->state], csk->state, csk->flags, csk->history,
-			      &lsin6->sin6_addr, be16_to_cpu(lsin6->sin6_port),
-			      &rsin6->sin6_addr, be16_to_cpu(rsin6->sin6_port));
-	}
+#ifdef CONFIG_CHELSIO_T4_DCB
+	cc -= 1;
+	cc += snprintf(cskd->buf + cskd->pos + cc, space - cc,
+		       " dcb priority %u\n", csk->dcb_priority);
+#endif
 
 	if (cc < space)
 		cskd->pos += cc;
@@ -993,21 +969,10 @@ dump_listen_sock(struct cstor_debugfs_data *lcskd, struct cstor_ucontext *uctx, 
 		if (lcsk->uctx != uctx)
 			continue;
 
-		if (lcsk->laddr.ss_family == AF_INET) {
-			struct sockaddr_in *lsin = (struct sockaddr_in *)&lcsk->laddr;
-
-			cc = snprintf(lcskd->buf + lcskd->pos, space,
-				      "stid %6u state %u %pI4:%d\n",
-				      lcsk->stid, (u32)lcsk->listen, &lsin->sin_addr,
-				      be16_to_cpu(lsin->sin_port));
-		} else {
-			struct sockaddr_in6 *lsin6 = (struct sockaddr_in6 *)&lcsk->laddr;
-
-			cc = snprintf(lcskd->buf + lcskd->pos, space,
-				      "stid %6u state %u %pI6:%d\n",
-				      lcsk->stid, (u32)lcsk->listen, &lsin6->sin6_addr,
-				      be16_to_cpu(lsin6->sin6_port));
-		}
+		cc = snprintf(lcskd->buf + lcskd->pos, space,
+			      "stid %6u state %u protocol %8s (%d) %pISpc\n",
+			      lcsk->stid, (u32)lcsk->listen, cstor_protocol[lcsk->protocol],
+			      lcsk->protocol, &lcsk->laddr);
 
 		if (cc >= space)
 			break;

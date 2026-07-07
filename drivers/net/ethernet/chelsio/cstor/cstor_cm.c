@@ -56,7 +56,12 @@
 #include "cstor.h"
 #include <clip_tbl.h>
 
-char *states[] = {
+const char *cstor_protocol[] = {
+	[_CSTOR_NVME_TCP_PROTOCOL]	= "NVMe/TCP",
+	[_CSTOR_ISCSI_PROTOCOL]		= "iSCSI",
+};
+
+const char *states[] = {
 	[CSTOR_SOCK_STATE_IDLE]			= "idle",
 	[CSTOR_SOCK_STATE_CONNECTING]		= "connecting",
 	[CSTOR_SOCK_STATE_CONNECTED]		= "connected",
@@ -71,7 +76,7 @@ char *states[] = {
 
 static bool nocong;
 module_param(nocong, bool, 0644);
-MODULE_PARM_DESC(nocong, "Turn of congestion control (default=0)");
+MODULE_PARM_DESC(nocong, "Turn off congestion control (default=0)");
 
 static bool enable_ecn = true;
 module_param(enable_ecn, bool, 0644);
@@ -97,17 +102,27 @@ static int sock_timeout_secs = 60;
 module_param(sock_timeout_secs, int, 0644);
 MODULE_PARM_DESC(sock_timeout_secs, "CM Endpoint operation timeout in seconds (default=60)");
 
-static int rcv_win = 1023 * SZ_1K;
-module_param(rcv_win, int, 0644);
+static unsigned int rcv_win = 1023 * SZ_1K;
+module_param(rcv_win, uint, 0644);
 MODULE_PARM_DESC(rcv_win, "TCP receive window in bytes (default=1023KB)");
 
-static int snd_win = 512 * SZ_1K;
-module_param(snd_win, int, 0644);
+static unsigned int snd_win = 1024 * SZ_1K;
+module_param(snd_win, uint, 0644);
 MODULE_PARM_DESC(snd_win, "TCP send window in bytes (default=512KB)");
 
-static bool adjust_win = true;
-module_param(adjust_win, bool, 0644);
-MODULE_PARM_DESC(adjust_win, "Adjust TCP window based on link speed (default=true)");
+static void cstor_fill_sockaddr_in(struct sockaddr_in *sin, __be32 addr, __be16 port)
+{
+	sin->sin_family = AF_INET;
+	sin->sin_port = port;
+	sin->sin_addr.s_addr = addr;
+}
+
+static void cstor_fill_sockaddr_in6(struct sockaddr_in6 *sin6, void *addr, __be16 port)
+{
+	sin6->sin6_family = AF_INET6;
+	sin6->sin6_port = port;
+	memcpy(sin6->sin6_addr.s6_addr, addr, 16);
+}
 
 static void sock_timeout(struct timer_list *t);
 
@@ -165,6 +180,23 @@ static void cstor_get_sock(struct cstor_sock *csk)
 	kref_get(&csk->kref);
 }
 
+static u16 cstor_find_tcp_port(struct sockaddr_storage *saddr)
+{
+	u16 tcp_port;
+
+	if (saddr->ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)saddr;
+
+		tcp_port = be16_to_cpu(sin->sin_port);
+	} else {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)saddr;
+
+		tcp_port = be16_to_cpu(sin6->sin6_port);
+	}
+
+	return tcp_port;
+}
+
 static void cstor_free_lport(struct cstor_sock *csk)
 {
 	struct cstor_device *cdev = csk->uctx->cdev;
@@ -173,15 +205,7 @@ static void cstor_free_lport(struct cstor_sock *csk)
 	if (!test_and_clear_bit(CSTOR_SOCK_F_LPORT_VALID, &csk->flags))
 		return;
 
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
-
-		lport = be16_to_cpu(sin->sin_port);
-	} else {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
-
-		lport = be16_to_cpu(sin6->sin6_port);
-	}
+	lport = cstor_find_tcp_port(&csk->laddr);
 
 	cxgb4_uld_put_resource(&cdev->resource.tcp_port_table, lport);
 }
@@ -193,7 +217,7 @@ static int cstor_get_lport(struct cstor_sock *csk, u16 *_lport)
 
 	lport = cxgb4_uld_get_resource(&cdev->resource.tcp_port_table);
 	if (!lport)
-		return -1;
+		return -ENOMEM;
 
 	if (csk->laddr.ss_family == AF_INET) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
@@ -239,7 +263,7 @@ cstor_l2t_send(struct cstor_device *cdev, struct sk_buff *skb, struct cstor_sock
 	ret = cxgb4_l2t_send(cdev->lldi.ports[0], skb, csk->l2t);
 	if (net_xmit_eval(ret) != NET_XMIT_SUCCESS) {
 		cstor_err(cdev, "cxgb4_l2t_send() failed, err %d\n", ret);
-		return -EINVAL;
+		return net_xmit_errno(ret);
 	}
 
 	return 0;
@@ -258,7 +282,7 @@ int cstor_ofld_send(struct cstor_device *cdev, struct sk_buff *skb)
 	ret = cxgb4_uld_xmit(cdev->lldi.ports[0], skb);
 	if (net_xmit_eval(ret) != NET_XMIT_SUCCESS) {
 		cstor_err(cdev, "cxgb4_uld_xmit() failed, err %d\n", ret);
-		return -EINVAL;
+		return net_xmit_errno(ret);
 	}
 
 	return 0;
@@ -273,11 +297,9 @@ static void release_tid(struct cstor_device *cdev, u32 tid, u16 port_id, struct 
 	skb_trim(skb, 0);
 	cxgb4_uld_tid_ctrlq_id_sel_update(cdev->lldi.ports[0], tid, &ctrlq_idx);
 	set_wr_txq(skb, CPL_PRIORITY_SETUP, ctrlq_idx);
-	t4_set_arp_err_handler(skb, NULL, NULL);
 
-	req = (struct cpl_tid_release *)skb_put(skb, sizeof(*req));
-	INIT_TP_WR(req, tid);
-	OPCODE_TID(req) = cpu_to_be32(MK_OPCODE_TID(CPL_TID_RELEASE, tid));
+	req = (struct cpl_tid_release *)__skb_put(skb, roundup(sizeof(*req), 16));
+	INIT_TP_WR_MIT_CPL(req, CPL_TID_RELEASE, tid);
 	req->rsvd = cpu_to_be32(0);
 	cstor_ofld_send(cdev, skb);
 }
@@ -378,6 +400,7 @@ static void *alloc_sock(struct cstor_ucontext *uctx, struct cstor_listen_sock *l
 
 	kref_init(&csk->kref);
 	mutex_init(&csk->mutex);
+	INIT_LIST_HEAD(&csk->entry);
 	init_completion(&csk->wr_wait.completion);
 
 	csk->uctx = uctx;
@@ -402,22 +425,26 @@ err1:
 	return NULL;
 }
 
-/*
- * Atomically lookup the csk ptr given the tid and grab a reference on the csk.
- */
 static struct cstor_sock *get_sock_from_tid(struct cstor_device *cdev, u32 tid)
 {
 	struct cstor_sock *csk;
 
 	xa_lock(&cdev->tids);
 	csk = xa_load(&cdev->tids, tid);
+	if (!csk) {
+		list_for_each_entry(csk, &cdev->sock_list, entry) {
+			if (csk->tid == tid) {
+				xa_unlock(&cdev->tids);
+				return csk;
+			}
+		}
+
+		csk = NULL;
+	}
 	xa_unlock(&cdev->tids);
 	return csk;
 }
 
-/*
- * Atomically lookup the csk ptr given the stid and grab a reference on the csk.
- */
 static struct cstor_listen_sock *get_listen_sock_from_stid(struct cstor_device *cdev, u32 stid)
 {
 	struct cstor_listen_sock *lcsk;
@@ -475,9 +502,12 @@ int cstor_free_atid(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_sock *csk;
 	struct cstor_free_atid_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -578,6 +608,80 @@ static int cstor_alloc_txq(struct cstor_sock *csk)
 	return 0;
 }
 
+void cstor_free_sq(struct cstor_sq *sq)
+{
+	struct cstor_device *cdev = sq->uctx->cdev;
+	struct net_device *ndev = cdev->lldi.ports[sq->port_id];
+	struct cxgb4_uld_txq_info txq_info = {};
+	int ret;
+
+	txq_info.lld_index = sq->sq_idx;
+	txq_info.cookie = (uintptr_t)&cdev->wr_wait;
+
+	cstor_reinit_wr_wait(&cdev->wr_wait);
+	cxgb4_uld_txq_free(ndev, CXGB4_ULD_TYPE_CSTOR, &txq_info);
+
+	ret = cstor_wait_for_reply(cdev, &cdev->wr_wait, 0, 0, __func__);
+	if (ret)
+		return;
+
+	if (sq->sq_idx != CSTOR_INVALID_SQID) {
+		xa_erase(&cdev->sqs, sq->sq_idx);
+		sq->sq_idx = CSTOR_INVALID_SQID;
+	}
+
+	kfree(sq);
+}
+
+static int cstor_alloc_sq(struct cstor_sock *csk)
+{
+	struct cstor_device *cdev = csk->uctx->cdev;
+	struct cstor_sq *sq;
+	struct net_device *ndev = cdev->lldi.ports[csk->port_id];
+	struct cxgb4_uld_txq_info txq_info = {};
+	int ret;
+
+	sq = kzalloc(sizeof(*sq), GFP_KERNEL);
+	if (!sq)
+		return -ENOMEM;
+
+	sq->uctx = csk->uctx;
+	sq->port_id = csk->port_id;
+	sq->sq_idx = CSTOR_INVALID_SQID;
+
+	txq_info.flags = CXGB4_ULD_TXQ_INFO_FLAG_SENDPATH;
+	txq_info.iqid = csk->rss_qid;
+	txq_info.cookie = (uintptr_t)&cdev->wr_wait;
+
+	cstor_reinit_wr_wait(&cdev->wr_wait);
+	ret = cxgb4_uld_txq_alloc(ndev, CXGB4_ULD_TYPE_CSTOR, &txq_info);
+	if (ret) {
+		cstor_err(cdev, "cxgb4_uld_txq_alloc() failed, ret %d\n", ret);
+		kfree(sq);
+		return ret;
+	}
+
+	ret = cstor_wait_for_reply(cdev, &cdev->wr_wait, 0, 0, __func__);
+	if (ret) {
+		cstor_err(cdev, "cstor_wait_for_reply() failed, ret %d\n", ret);
+		kfree(sq);
+		return ret;
+	}
+
+	ret = xa_insert(&cdev->sqs, txq_info.lld_index, sq, GFP_KERNEL);
+	if (ret) {
+		cstor_err(cdev, "xa_insert() failed, ret %d\n", ret);
+		cstor_free_sq(sq);
+		return ret;
+	}
+
+	sq->sq_idx = txq_info.lld_index;
+	csk->sq = sq;
+	set_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags);
+
+	return 0;
+}
+
 void _cstor_free_sock(struct kref *kref)
 {
 	struct cstor_device *cdev;
@@ -592,7 +696,13 @@ void _cstor_free_sock(struct kref *kref)
 		lcsk = csk->lcsk;
 
 	if (csk->tid != CSTOR_INVALID_TID) {
-		xa_erase(&cdev->tids, csk->tid);
+		xa_lock(&cdev->tids);
+		if (test_and_clear_bit(CSTOR_SOCK_F_QUEUED_IN_LIST, &csk->flags))
+			list_del(&csk->entry);
+		else
+			__xa_erase(&cdev->tids, csk->tid);
+		xa_unlock(&cdev->tids);
+
 		cxgb4_uld_tid_remove(cdev->lldi.ports[0], csk->ctrlq_idx,
 				     csk->laddr.ss_family, csk->tid);
 		atomic_dec(&csk->uctx->num_csk);
@@ -665,18 +775,18 @@ static struct net_device *cstor_get_real_dev(struct net_device *ndev)
 	return ndev;
 }
 
-static int our_interface(struct cstor_device *cdev, struct net_device *ndev)
+static bool our_interface(struct cstor_device *cdev, struct net_device *ndev)
 {
 	int i;
 
 	ndev = cstor_get_real_dev(ndev);
 	if (!ndev)
-		return 0;
+		return false;
 
 	for (i = 0; i < cdev->lldi.nports; i++)
 		if (cdev->lldi.ports[i] == ndev)
-			return 1;
-	return 0;
+			return true;
+	return false;
 }
 
 static struct dst_entry *
@@ -696,8 +806,8 @@ find_route6(struct cstor_device *cdev, struct sockaddr_in6 *saddr, __u8 *local_i
 
 	dst = ip6_route_output(&init_net, NULL, &fl6);
 	if (dst->error) {
-		cstor_err(cdev, "ip6_route_output() failed, daddr %pI6 sin6_scope_id %u\n",
-			  &fl6.daddr, sin6_scope_id);
+		cstor_err(cdev, "ip6_route_output() failed, daddr %pI6 sin6_scope_id %u, "
+			  "dst->error %d\n", &fl6.daddr, sin6_scope_id, dst->error);
 		dst_release(dst);
 		return NULL;
 	}
@@ -721,7 +831,7 @@ find_route6(struct cstor_device *cdev, struct sockaddr_in6 *saddr, __u8 *local_i
 						 &fl6.daddr, 0, &saddr->sin6_addr);
 			if (ret) {
 				cstor_err(cdev, "failed to get ipv6 source address to "
-					  "reach %pI6\n", &fl6.daddr);
+					  "reach %pI6, ret %d\n", &fl6.daddr, ret);
 				dst_release(dst);
 				return NULL;
 			}
@@ -729,7 +839,7 @@ find_route6(struct cstor_device *cdev, struct sockaddr_in6 *saddr, __u8 *local_i
 			saddr->sin6_addr = rt->rt6i_src.addr;
 		}
 
-		saddr->sin6_family = PF_INET6;
+		saddr->sin6_family = AF_INET6;
 	}
 #endif
 
@@ -748,8 +858,8 @@ find_route(struct cstor_device *cdev, struct sockaddr_in *saddr, __be32 local_ip
 				   peer_port, local_port, IPPROTO_TCP, tos, 0);
 	if (IS_ERR(rt)) {
 		cstor_err(cdev, "ip_route_output_ports() failed, laddr %pI4 raddr %pI4 "
-			  "lport %d rport %d tos %u\n", &local_ip, &peer_ip,
-			  be16_to_cpu(local_port), be16_to_cpu(peer_port), tos);
+			  "lport %d rport %d tos %u, ret %ld\n", &local_ip, &peer_ip,
+			  be16_to_cpu(local_port), be16_to_cpu(peer_port), tos, PTR_ERR(rt));
 		return NULL;
 	}
 
@@ -782,24 +892,8 @@ static void arp_failure_discard(void *handle, struct sk_buff *skb)
 {
 	struct cstor_sock *csk = handle;
 
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
-		struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure - tid %u, laddr %pI4 lport %u "
-			  "raddr %pI4 rport %u\n", csk->tid, &la->sin_addr.s_addr,
-			  be16_to_cpu(la->sin_port), &ra->sin_addr.s_addr,
-			  be16_to_cpu(ra->sin_port));
-	} else {
-		struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&csk->laddr;
-		struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure - tid %u, laddr %pI6 lport %u "
-			  "raddr %pI6 rport %u\n", csk->tid, la6->sin6_addr.s6_addr,
-			  be16_to_cpu(la6->sin6_port), ra6->sin6_addr.s6_addr,
-			  be16_to_cpu(ra6->sin6_port));
-	}
-
+	cstor_err(csk->uctx->cdev, "ARP failure - tid %u, laddr %pISpc raddr %pISpc\n",
+		  csk->tid, &csk->laddr, &csk->raddr);
 	kfree_skb(skb);
 }
 
@@ -810,59 +904,28 @@ static void _put_sock_safe(struct cstor_device *cdev, struct sk_buff *skb)
 
 /*
  * Fake up a special CPL opcode and call sched() so process_work() will call
- * _put_csk_safe() in a safe context to free the csk resources.  This is needed
- * because ARP error handlers are called in an ATOMIC context, and _cstor_free_csk()
- * needs to block.
+ * _put_sock_safe() to free csk in process context.
  */
 static void queue_arp_failure_cpl(struct cstor_sock *csk, struct sk_buff *skb, int cpl)
 {
 	struct cpl_act_establish *rpl = cplhdr(skb);
 
-	/*
-	 * Set our special ARP_FAILURE opcode.
-	 */
 	rpl->ot.opcode = cpl;
-
-	/*
-	 * Save csk in the skb->cb area, after where sched() will save the dev ptr.
-	 */
 	cstor_skcb_rx_csk(skb) = csk;
 	sched(csk->uctx->cdev, skb);
 }
 
-/*
- * Handle an ARP failure for an accept.
- */
 static void pass_accept_rpl_arp_failure(void *handle, struct sk_buff *skb)
 {
 	struct cstor_sock *csk = handle;
 
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
-		struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure during accept - dropping connection, "
-			  "tid %u, laddr %pI4 lport %u raddr %pI4 rport %u\n", csk->tid,
-			  &la->sin_addr.s_addr, be16_to_cpu(la->sin_port),
-			  &ra->sin_addr.s_addr, be16_to_cpu(ra->sin_port));
-	} else {
-		struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&csk->laddr;
-		struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure during accept - dropping connection, "
-			  "tid %u, laddr %pI6 lport %u raddr %pI6 rport %u\n", csk->tid,
-			  la6->sin6_addr.s6_addr, be16_to_cpu(la6->sin6_port),
-			  ra6->sin6_addr.s6_addr, be16_to_cpu(ra6->sin6_port));
-	}
+	cstor_err(csk->uctx->cdev, "ARP failure during accept - dropping connection, "
+		  "tid %u, laddr %pISpc raddr %pISpc\n", csk->tid, &csk->laddr, &csk->raddr);
 
 	csk->state = CSTOR_SOCK_STATE_DEAD;
 	queue_arp_failure_cpl(csk, skb, FAKE_CPL_PUT_SOCK_SAFE);
 }
 
-/*
- * Handle an ARP failure for a CPL_ABORT_REQ.  Change it into a no RST variant
- * and send it along.
- */
 static void abort_arp_failure(void *handle, struct sk_buff *skb)
 {
 	struct cstor_device *cdev;
@@ -871,23 +934,8 @@ static void abort_arp_failure(void *handle, struct sk_buff *skb)
 	int ret;
 
 	cdev = csk->uctx->cdev;
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
-		struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
-
-		cstor_err(cdev, "ARP failure during abort - tid %u, laddr %pI4 lport %u "
-			  "raddr %pI4 rport %u\n", csk->tid, &la->sin_addr.s_addr,
-			  be16_to_cpu(la->sin_port), &ra->sin_addr.s_addr,
-			  be16_to_cpu(ra->sin_port));
-	} else {
-		struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&csk->laddr;
-		struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&csk->raddr;
-
-		cstor_err(cdev, "ARP failure during abort - tid %u, laddr %pI6 lport %u "
-			  "raddr %pI6 rport %u\n", csk->tid, la6->sin6_addr.s6_addr,
-			  be16_to_cpu(la6->sin6_port), ra6->sin6_addr.s6_addr,
-			  be16_to_cpu(ra6->sin6_port));
-	}
+	cstor_err(cdev, "ARP failure during abort - tid %u, laddr %pISpc raddr %pISpc\n",
+		  csk->tid, &csk->laddr, &csk->raddr);
 
 	req->cmd = CPL_ABORT_NO_RST;
 	skb_get(skb);
@@ -897,6 +945,7 @@ static void abort_arp_failure(void *handle, struct sk_buff *skb)
 		return;
 	}
 
+	cstor_err(cdev, "tid %u, cstor_ofld_send() failed, ret %d\n", csk->tid, ret);
 	csk->state = CSTOR_SOCK_STATE_DEAD;
 	queue_arp_failure_cpl(csk, skb, FAKE_CPL_PUT_SOCK_SAFE);
 }
@@ -922,6 +971,9 @@ static int send_flowc(struct cstor_sock *csk)
 	if (vlan != CPL_L2T_VLAN_NONE)
 		nparams++;
 #endif
+
+	if (test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags))
+		nparams += 3;
 
 	flowclen = offsetof(struct fw_flowc_wr, mnemval[nparams]);
 	flowclen16 = DIV_ROUND_UP(flowclen, 16);
@@ -973,14 +1025,25 @@ static int send_flowc(struct cstor_sock *csk)
 		flowc->mnemval[index].val =
 			cpu_to_be32((vlan & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT);
 	}
+
+	index++;
 #else
 	if (vlan != CPL_L2T_VLAN_NONE) {
 		u16 pri = (vlan & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
 
 		flowc->mnemval[index].mnemonic = FW_FLOWC_MNEM_SCHEDCLASS;
-		flowc->mnemval[index].val = cpu_to_be32(pri);
+		flowc->mnemval[index++].val = cpu_to_be32(pri);
 	}
 #endif
+
+	if (test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		flowc->mnemval[index].mnemonic = FW_FLOWC_MNEM_ULP_MODE;
+		flowc->mnemval[index++].val = cpu_to_be32(ULP_MODE_ISCSI);
+		flowc->mnemval[index].mnemonic = FW_FLOWC_MNEM_EQID;
+		flowc->mnemval[index++].val = cpu_to_be32(csk->sq->sq_idx);
+		flowc->mnemval[index].mnemonic = FW_FLOWC_MNEM_TXDATAPLEN_MIN;
+		flowc->mnemval[index].val = cpu_to_be32(cdev->lldi.max_pdu_size);
+	}
 
 	set_wr_txq(skb, CPL_PRIORITY_DATA, csk->txq_idx);
 	ret = cstor_ofld_send(cdev, skb);
@@ -1006,6 +1069,14 @@ static int send_abort_req(struct cstor_sock *csk)
 	if (WARN_ON(!req_skb)) {
 		cstor_err(cdev, "tid %u, socket buffer list is empty\n", csk->tid);
 		return -ENOMEM;
+	}
+
+	if (test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		struct net_device *ndev = cdev->lldi.ports[csk->port_id];
+		struct cxgb4_uld_txq_info txq_info = {};
+
+		txq_info.lld_index = csk->sq->sq_idx;
+		cxgb4_uld_txq_purge(ndev, CXGB4_ULD_TYPE_CSTOR, &txq_info);
 	}
 
 	set_wr_txq(req_skb, CPL_PRIORITY_DATA, csk->txq_idx);
@@ -1073,6 +1144,35 @@ static void disconnected_upcall(struct cstor_sock *csk)
 	add_to_uevt_list(event_channel, uevt_node);
 }
 
+static void cstor_fill_conn_info(struct cstor_sock *csk, struct _cstor_conn_info *conn_info)
+{
+	conn_info->port_id = csk->port_id;
+	conn_info->vlan_id = csk->l2t->vlan;
+	conn_info->snd_nxt = csk->snd_nxt;
+	conn_info->rcv_nxt = csk->rcv_nxt;
+
+	if (csk->laddr.ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
+
+		conn_info->ipv4 = 1;
+		conn_info->lport = sin->sin_port;
+		conn_info->laddr[0] = sin->sin_addr.s_addr;
+
+		sin = (struct sockaddr_in *)&csk->raddr;
+		conn_info->rport = sin->sin_port;
+		conn_info->raddr[0] = sin->sin_addr.s_addr;
+	} else {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
+
+		conn_info->lport = sin6->sin6_port;
+		memcpy(conn_info->laddr, sin6->sin6_addr.s6_addr, 16);
+
+		sin6 = (struct sockaddr_in6 *)&csk->raddr;
+		conn_info->rport = sin6->sin6_port;
+		memcpy(conn_info->raddr, sin6->sin6_addr.s6_addr, 16);
+	}
+}
+
 static void connect_upcall(struct cstor_sock *csk, struct sk_buff *skb)
 {
 	struct cstor_listen_sock *lcsk = csk->lcsk;
@@ -1089,32 +1189,9 @@ static void connect_upcall(struct cstor_sock *csk, struct sk_buff *skb)
 	req = &uevt->u.req;
 	req->stid = lcsk->stid;
 	req->tid = csk->tid;
-	req->vlan_id = csk->l2t->vlan;
-	req->port_id = csk->port_id;
-	req->protocol = csk->protocol;
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
-
-		req->ipv4 = 1;
-		req->lport = sin->sin_port;
-		req->laddr[0] = sin->sin_addr.s_addr;
-
-		sin = (struct sockaddr_in *)&csk->raddr;
-		req->rport = sin->sin_port;
-		req->raddr[0] = sin->sin_addr.s_addr;
-	} else {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
-
-		req->lport = sin6->sin6_port;
-		memcpy(req->laddr, sin6->sin6_addr.s6_addr, 16);
-
-		sin6 = (struct sockaddr_in6 *)&csk->raddr;
-		req->rport = sin6->sin6_port;
-		memcpy(req->raddr, sin6->sin6_addr.s6_addr, 16);
-	}
+	cstor_fill_conn_info(csk, &req->conn_info);
 
 	uevt_node->skb = skb;
-	req->rcv_nxt = csk->rcv_nxt;
 
 	cstor_get_sock(csk);
 	set_bit(CSTOR_SOCK_F_APP_REF, &csk->flags);
@@ -1138,31 +1215,8 @@ static void active_connect_upcall(struct cstor_sock *csk, u8 status)
 	rpl = &uevt->u.rpl;
 	rpl->tid = csk->tid;
 	rpl->atid = csk->atid;
-	rpl->vlan_id = csk->l2t->vlan;
-	rpl->port_id = csk->port_id;
 	rpl->status = status;
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
-
-		rpl->ipv4 = 1;
-		rpl->lport = sin->sin_port;
-		rpl->laddr[0] = sin->sin_addr.s_addr;
-
-		sin = (struct sockaddr_in *)&csk->raddr;
-		rpl->rport = sin->sin_port;
-		rpl->raddr[0] = sin->sin_addr.s_addr;
-	} else {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
-
-		rpl->lport = sin6->sin6_port;
-		memcpy(rpl->laddr, sin6->sin6_addr.s6_addr, 16);
-
-		sin6 = (struct sockaddr_in6 *)&csk->raddr;
-		rpl->rport = sin6->sin6_port;
-		memcpy(rpl->raddr, sin6->sin6_addr.s6_addr, 16);
-	}
-
-	rpl->rcv_nxt = csk->rcv_nxt;
+	cstor_fill_conn_info(csk, &rpl->conn_info);
 
 	set_bit(CSTOR_SOCK_F_ACT_OPEN, &csk->flags);
 	set_bit(CSTOR_SOCK_H_CONN_RPL_UPCALL, &csk->history);
@@ -1206,8 +1260,7 @@ static int iscsi_pdu_upcall(struct cstor_sock *csk, struct sk_buff *skb, u32 sta
 	return 0;
 }
 
-#if 0
-void cstor_hexdump(void *buf, u32 len)
+static void cstor_hexdump(void *buf, u32 len)
 {
 	u32 *ptr = buf;
 	u32 i, count = len >> 4;
@@ -1225,7 +1278,6 @@ void cstor_hexdump(void *buf, u32 len)
 		cstor_printk(KERN_INFO, "%p: %08x %08x\n",
 			     ptr, be32_to_cpu(ptr[0]), be32_to_cpu(ptr[1]));
 }
-#endif
 
 static void rx_data(struct cstor_device *cdev, struct sk_buff *skb)
 {
@@ -1233,6 +1285,8 @@ static void rx_data(struct cstor_device *cdev, struct sk_buff *skb)
 	struct cpl_rx_data *hdr = cplhdr(skb);
 	u32 tid = GET_TID(hdr);
 	__u8 status = hdr->status;
+
+	cstor_hexdump(skb->data, min(skb->len - skb->data_len, 40U));
 
 	csk = get_sock_from_tid(cdev, tid);
 	if (!csk) {
@@ -1252,30 +1306,12 @@ static void rx_data(struct cstor_device *cdev, struct sk_buff *skb)
 	cstor_sock_disconnect(csk);
 }
 
-/*
- * Handle an ARP failure for an active open.
- */
 static void act_open_req_arp_failure(void *handle, struct sk_buff *skb)
 {
 	struct cstor_sock *csk = handle;
 
-	if (csk->laddr.ss_family == AF_INET) {
-		struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
-		struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure during connect - atid %u, "
-			  "laddr %pI4 lport %u raddr %pI4 rport %u\n", csk->atid,
-			  &la->sin_addr.s_addr, be16_to_cpu(la->sin_port),
-			  &ra->sin_addr.s_addr, be16_to_cpu(ra->sin_port));
-	} else {
-		struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&csk->laddr;
-		struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&csk->raddr;
-
-		cstor_err(csk->uctx->cdev, "ARP failure during connect - atid %u, "
-			  "laddr %pI6 lport %u raddr %pI6 rport %u\n", csk->atid,
-			  la6->sin6_addr.s6_addr, be16_to_cpu(la6->sin6_port),
-			  ra6->sin6_addr.s6_addr, be16_to_cpu(ra6->sin6_port));
-	}
+	cstor_err(csk->uctx->cdev, "ARP failure during connect - atid %u, "
+		  "laddr %pISpc raddr %pISpc\n", csk->atid, &csk->laddr, &csk->raddr);
 
 	atomic_dec(&csk->uctx->num_active_csk);
 
@@ -1285,7 +1321,7 @@ static void act_open_req_arp_failure(void *handle, struct sk_buff *skb)
 	queue_arp_failure_cpl(csk, skb, FAKE_CPL_PUT_SOCK_SAFE);
 }
 
-static void abort_rpl(struct cstor_device *cdev, struct sk_buff *skb)
+static void abort_rpl_rss(struct cstor_device *cdev, struct sk_buff *skb)
 {
 	struct cstor_sock *csk;
 	struct cpl_abort_rpl_rss6 *rpl = cplhdr(skb);
@@ -1304,7 +1340,8 @@ static void abort_rpl(struct cstor_device *cdev, struct sk_buff *skb)
 	case CSTOR_SOCK_STATE_ABORTING:
 		cstor_wake_up(&csk->wr_wait, -ECONNRESET);
 		csk->state = CSTOR_SOCK_STATE_DEAD;
-		if (test_bit(CSTOR_SOCK_F_NEG_ADV_DISCONNECT, &csk->flags))
+		if (test_bit(CSTOR_SOCK_F_NEG_ADV_DISCONNECT, &csk->flags) ||
+		    test_bit(CSTOR_SOCK_F_QUEUED_IN_LIST, &csk->flags))
 			active_connect_upcall(csk, _CSTOR_CONNECT_FAILURE);
 		else
 			disconnected_upcall(csk);
@@ -1322,9 +1359,6 @@ static void abort_rpl(struct cstor_device *cdev, struct sk_buff *skb)
 		cstor_put_sock(csk);
 }
 
-/*
- * Returns whether an ABORT_REQ_RSS message is a negative advice.
- */
 static int is_neg_adv(u32 status)
 {
 	return (status == CPL_ERR_RTX_NEG_ADVICE) ||
@@ -1346,18 +1380,6 @@ static char *neg_adv_str(u32 status)
 	}
 }
 
-static void set_tcp_window(struct cstor_sock *csk, struct port_info *pi)
-{
-	csk->snd_win = snd_win;
-	csk->rcv_win = rcv_win;
-	if (adjust_win && (pi->link_cfg.speed >= 40000)) {
-		csk->snd_win *= 4;
-		csk->rcv_win *= 4;
-	}
-
-	cstor_debug(csk->uctx->cdev, "snd_win %d rcv_win %d\n", csk->snd_win, csk->rcv_win);
-}
-
 #ifdef CONFIG_CHELSIO_T4_DCB
 static u8 cstor_get_dcb_state(struct net_device *ndev)
 {
@@ -1372,7 +1394,7 @@ static int cstor_select_priority(int pri_mask)
 	return (ffs(pri_mask) - 1);
 }
 
-static u8 cstor_get_dcb_priority(struct net_device *ndev, u16 dcb_port)
+static u8 cstor_get_dcb_priority(struct cstor_sock *csk, struct net_device *ndev, u16 dcb_port)
 {
 	int ret;
 	u8 caps;
@@ -1397,7 +1419,9 @@ static u8 cstor_get_dcb_priority(struct net_device *ndev, u16 dcb_port)
 		ret = dcb_getapp(ndev, &cstor_dcb_app);
 	}
 
-	cstor_printk(KERN_DEBUG, "priority is set to %u\n", cstor_select_priority(ret));
+	cstor_debug(csk->uctx->cdev, "priority set to %u for %s connection, laddr %pISpc, "
+		    "raddr %pISpc\n", cstor_select_priority(ret), cstor_protocol[csk->protocol],
+		    &csk->laddr, &csk->raddr);
 
 	return cstor_select_priority(ret);
 }
@@ -1434,18 +1458,18 @@ static struct net_device *cstor_ipv6_netdev(struct in6_addr *addr6)
 	return cstor_get_real_dev(ndev);
 }
 
-static int import_sock(struct cstor_sock *csk, int iptype, __u8 *peer_ip, u16 dcb_port, u8 tos)
+static int import_sock(struct cstor_sock *csk, int iptype, __u8 *peer_ip, u16 dcb_port)
 {
 	struct cstor_device *cdev = csk->uctx->cdev;
 	struct net_device *ndev = NULL;
 	struct port_info *pi;
 	struct neighbour *n;
 	int ret, step;
-	u8 priority = rt_tos2priority(tos);
+	u8 priority = rt_tos2priority(csk->tos);
 
 	n = dst_neigh_lookup(csk->dst, peer_ip);
 	if (!n) {
-		cstor_err(cdev, "dst_neigh_lookup() failed, raddr %pI4\n", peer_ip);
+		cstor_err(cdev, "dst_neigh_lookup() failed, raddr %pISpc\n", &csk->raddr);
 		return -ENODEV;
 	}
 
@@ -1476,7 +1500,7 @@ static int import_sock(struct cstor_sock *csk, int iptype, __u8 *peer_ip, u16 dc
 
 #ifdef CONFIG_CHELSIO_T4_DCB
 		if (cstor_get_dcb_state(ndev))
-			priority = cstor_get_dcb_priority(ndev, dcb_port);
+			priority = cstor_get_dcb_priority(csk, ndev, dcb_port);
 
 		csk->dcb_priority = priority;
 #endif
@@ -1505,7 +1529,11 @@ static int import_sock(struct cstor_sock *csk, int iptype, __u8 *peer_ip, u16 dc
 	csk->ctrlq_idx = cdev->lldi.ctrlq_start +
 			 (csk->port_id * cdev->lldi.num_up_cores);
 	csk->rss_qid = cdev->lldi.rxq_ids[csk->port_id * step];
-	set_tcp_window(csk, pi);
+	csk->snd_win = snd_win;
+	csk->rcv_win = rcv_win;
+
+	cstor_debug(cdev, "laddr %pISpc raddr %pISpc snd_win %u rcv_win %u\n",
+		    &csk->laddr, &csk->raddr, csk->snd_win, csk->rcv_win);
 
 	BUG_ON(!csk->smac_idx);
 out:
@@ -1644,10 +1672,11 @@ static void reject_cr(struct cstor_device *cdev, u32 tid, u16 port_id, struct sk
 	release_tid(cdev, tid, port_id, skb);
 }
 
-static void
+static int
 get_4tuple(struct cstor_sock *csk, struct cpl_pass_accept_req *req, int *iptype,
 	   u8 *local_ip, u8 *peer_ip, __be16 *local_port, __be16 *peer_port)
 {
+	struct cstor_device *cdev = csk->uctx->cdev;
 	struct iphdr *ip;
 	struct tcphdr *tcp;
 	int eth_len = T6_ETH_HDR_LEN_G(be32_to_cpu(req->hdr_len));
@@ -1656,19 +1685,45 @@ get_4tuple(struct cstor_sock *csk, struct cpl_pass_accept_req *req, int *iptype,
 	ip = (struct iphdr *)((u8 *)(req + 1) + eth_len);
 	tcp = (struct tcphdr *)((u8 *)ip + ip_len);
 	if (ip->version == 4) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
+
 		*iptype = 4;
-		memcpy(peer_ip, &ip->saddr, 4);
+
+		cstor_fill_sockaddr_in(sin, ip->daddr, tcp->dest);
 		memcpy(local_ip, &ip->daddr, 4);
+
+		sin = (struct sockaddr_in *)&csk->raddr;
+		cstor_fill_sockaddr_in(sin, ip->saddr, tcp->source);
+		memcpy(peer_ip, &ip->saddr, 4);
 	} else {
 		struct ipv6hdr *ip6 = (struct ipv6hdr *)ip;
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
+		int ret;
 
 		*iptype = 6;
-		memcpy(peer_ip, ip6->saddr.s6_addr, 16);
+
+		cstor_fill_sockaddr_in6(sin6, ip6->daddr.s6_addr, tcp->dest);
 		memcpy(local_ip, ip6->daddr.s6_addr, 16);
+
+		ret = cxgb4_clip_get(cdev->lldi.ports[0],
+				     (const u32 *)&sin6->sin6_addr.s6_addr, 1);
+		if (ret) {
+			cstor_err(cdev, "cxgb4_clip_get() failed, addr %pI6 ret %d\n",
+				  sin6->sin6_addr.s6_addr, ret);
+			return ret;
+		}
+
+		set_bit(CSTOR_SOCK_F_CLIP_RELEASE, &csk->flags);
+
+		sin6 = (struct sockaddr_in6 *)&csk->raddr;
+		cstor_fill_sockaddr_in6(sin6, ip6->saddr.s6_addr, tcp->source);
+		memcpy(peer_ip, ip6->saddr.s6_addr, 16);
 	}
 
 	*peer_port = tcp->source;
 	*local_port = tcp->dest;
+
+	return 0;
 }
 
 static void pass_accept_req(struct cstor_device *cdev, struct sk_buff *skb)
@@ -1709,97 +1764,48 @@ static void pass_accept_req(struct cstor_device *cdev, struct sk_buff *skb)
 		goto reject;
 	}
 
-	get_4tuple(csk, req, &iptype, local_ip, peer_ip, &local_port, &peer_port);
-
-	/* Find output route */
-	if (iptype == 4) {
-		cstor_debug(cdev, "tid %u stid %u laddr %pI4 raddr %pI4 lport %d "
-			    "rport %d peer_mss %d\n", tid, stid, local_ip, peer_ip,
-			    be16_to_cpu(local_port), be16_to_cpu(peer_port), peer_mss);
-
-		dst = find_route(cdev, NULL, *(__be32 *)local_ip, *(__be32 *)peer_ip,
-				 local_port, peer_port, tos);
-	} else {
-		cstor_debug(cdev, "tid %u stid %u laddr %pI6 raddr %pI6 lport%d "
-			    "rport %d peer_mss %d\n", tid, stid, local_ip, peer_ip,
-			    be16_to_cpu(local_port), be16_to_cpu(peer_port), peer_mss);
-
-		dst = find_route6(cdev, NULL, local_ip, peer_ip,
-				  ((struct sockaddr_in6 *)&lcsk->laddr)->sin6_scope_id);
+	ret = get_4tuple(csk, req, &iptype, local_ip, peer_ip, &local_port, &peer_port);
+	if (ret) {
+		cstor_err(cdev, "get_4tuple() failed, stid %u tid %u ret %d\n",
+			  stid, tid, ret);
+		goto reject;
 	}
 
+	cstor_debug(cdev, "tid %u stid %u laddr %pISpc raddr %pISpc peer_mss %d\n",
+		    tid, stid, &csk->laddr, &csk->raddr, peer_mss);
+
+	if (iptype == 4)
+		dst = find_route(cdev, NULL, *(__be32 *)local_ip, *(__be32 *)peer_ip,
+				 local_port, peer_port, tos);
+	else
+		dst = find_route6(cdev, NULL, local_ip, peer_ip,
+				  ((struct sockaddr_in6 *)&lcsk->laddr)->sin6_scope_id);
+
 	if (!dst) {
-		if (iptype == 4)
-			cstor_err(cdev, "find_route() failed, tid %u stid %u laddr %pI4 "
-				  "raddr %pI4 lport %d rport %d\n", tid, stid, local_ip, peer_ip,
-				  be16_to_cpu(local_port), be16_to_cpu(peer_port));
-		else
-			cstor_err(cdev, "find_route6() failed, tid %u stid %u laddr %pI6 "
-				  "raddr %pI6 lport %d rport %d\n", tid, stid, local_ip, peer_ip,
-				  be16_to_cpu(local_port), be16_to_cpu(peer_port));
+		cstor_err(cdev, "%s failed, tid %u stid %u laddr %pISpc raddr %pISpc\n",
+			  (iptype == 4) ? "find_route()" : "find_route6()", tid, stid,
+			  &csk->laddr, &csk->raddr);
 		goto reject;
 	}
 
 	csk->dst = dst;
+	csk->tos = tos;
+	csk->protocol = lcsk->protocol;
 
-	ret = import_sock(csk, iptype, peer_ip, be16_to_cpu(local_port), tos);
+	ret = import_sock(csk, iptype, peer_ip, be16_to_cpu(local_port));
 	if (ret) {
-		if (iptype == 4)
-			cstor_err(cdev, "import_sock() failed, tid %u stid %u raddr %pI4 "
-				  "lport %d tos %u ret %d\n", tid, stid, peer_ip,
-				  be16_to_cpu(local_port), tos, ret);
-		else
-			cstor_err(cdev, "import_sock() failed, tid %u stid %u raddr %pI6 "
-				  "lport %d tos %u ret %d\n", tid, stid, peer_ip,
-				  be16_to_cpu(local_port), tos, ret);
-
+		cstor_err(cdev, "import_sock() failed, tid %u stid %u laddr %pISpc raddr %pISpc "
+			  "tos %u ret %d\n", tid, stid, &csk->laddr, &csk->raddr, tos, ret);
 		goto reject;
 	}
 
+	csk->event_channel = lcsk->event_channel;
 	csk->state = CSTOR_SOCK_STATE_CONNECTING;
 
+	csk->tid = tid;
 	cxgb4_uld_tid_ctrlq_id_sel_update(cdev->lldi.ports[0], tid, &csk->ctrlq_idx);
 	cxgb4_uld_tid_qid_sel_update(cdev->lldi.ports[csk->port_id], CXGB4_ULD_TYPE_CSTOR,
 				     tid, &csk->txq_idx);
-
-	if (iptype == 4) {
-		struct sockaddr_in *sin = (struct sockaddr_in *)&csk->laddr;
-
-		sin->sin_family = PF_INET;
-		sin->sin_port = local_port;
-		sin->sin_addr.s_addr = *(__be32 *)local_ip;
-
-		sin = (struct sockaddr_in *)&csk->raddr;
-		sin->sin_family = PF_INET;
-		sin->sin_port = peer_port;
-		sin->sin_addr.s_addr = *(__be32 *)peer_ip;
-	} else {
-		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&csk->laddr;
-
-		sin6->sin6_family = PF_INET6;
-		sin6->sin6_port = local_port;
-		memcpy(sin6->sin6_addr.s6_addr, local_ip, 16);
-
-		ret = cxgb4_clip_get(cdev->lldi.ports[0],
-				     (const u32 *)&sin6->sin6_addr.s6_addr, 1);
-		if (ret) {
-			cstor_err(cdev, "tid %u, cxgb4_clip_get() failed, addr %pI6 ret %d\n",
-				  tid, sin6->sin6_addr.s6_addr, ret);
-			goto reject;
-		}
-
-		set_bit(CSTOR_SOCK_F_CLIP_RELEASE, &csk->flags);
-
-		sin6 = (struct sockaddr_in6 *)&csk->raddr;
-		sin6->sin6_family = PF_INET6;
-		sin6->sin6_port = peer_port;
-		memcpy(sin6->sin6_addr.s6_addr, peer_ip, 16);
-	}
-
-	csk->tos = tos;
-	csk->tid = tid;
-	csk->protocol = lcsk->protocol;
-	csk->event_channel = lcsk->event_channel;
 
 	kref_get(&csk->event_channel->kref);
 
@@ -1894,13 +1900,6 @@ static void peer_close(struct cstor_device *cdev, struct sk_buff *skb)
 		csk->state = CSTOR_SOCK_STATE_CLOSING;
 		break;
 	case CSTOR_SOCK_STATE_LOGIN_REQ_RCVD:
-
-		/*
-		 * We're gonna mark this puppy DEAD, but kecsk
-		 * the reference on it until the ULP accepts or
-		 * rejects the CR. Also wake up anyone waiting
-		 * in rdma connection migration (see cstor_accept_cr()).
-		 */
 		csk->state = CSTOR_SOCK_STATE_CLOSING;
 		break;
 	case CSTOR_SOCK_STATE_CONNECTED:
@@ -1938,7 +1937,7 @@ static void peer_close(struct cstor_device *cdev, struct sk_buff *skb)
 		cstor_put_sock(csk);
 }
 
-static void peer_abort(struct cstor_device *cdev, struct sk_buff *skb)
+static void abort_req_rss(struct cstor_device *cdev, struct sk_buff *skb)
 {
 	struct cstor_sock *csk;
 	struct cpl_abort_req_rss6 *req = cplhdr(skb);
@@ -1968,9 +1967,8 @@ static void peer_abort(struct cstor_device *cdev, struct sk_buff *skb)
 	set_bit(CSTOR_SOCK_H_PEER_ABORT, &csk->history);
 
 	/*
-	 * Wake up any threads in rdma_init() or rdma_fini().
-	 * However, this is not needed if com state is just
-	 * MPA_REQ_SENT
+	 * Wake up any threads waiting for completion
+	 * in cstor_enable_nvme_tcp_qp() or cstor_enable_iscsi_qp().
 	 */
 
 	cstor_wake_up(&csk->wr_wait, -ECONNRESET);
@@ -2011,6 +2009,25 @@ static void peer_abort(struct cstor_device *cdev, struct sk_buff *skb)
 		disconnected_upcall(csk);
 		release = 1;
 	}
+
+	if (!test_bit(CSTOR_SOCK_F_FLOWC_SENT, &csk->flags)) {
+		int ret;
+
+		ret = send_flowc(csk);
+		if (ret) {
+			cstor_err(cdev, "tid %u, send_flowc() failed, ret %d\n", csk->tid, ret);
+			mutex_unlock(&csk->mutex);
+			return;
+		}
+	}
+
+	if (test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		struct net_device *ndev = cdev->lldi.ports[csk->port_id];
+		struct cxgb4_uld_txq_info txq_info = {};
+
+		txq_info.lld_index = csk->sq->sq_idx;
+		cxgb4_uld_txq_purge(ndev, CXGB4_ULD_TYPE_CSTOR, &txq_info);
+	}
 	mutex_unlock(&csk->mutex);
 
 	skb_get(skb);
@@ -2027,50 +2044,6 @@ static void peer_abort(struct cstor_device *cdev, struct sk_buff *skb)
 		cstor_put_sock(csk);
 }
 
-static void close_con_rpl(struct cstor_device *cdev, struct sk_buff *skb)
-{
-	struct cstor_sock *csk;
-	struct cpl_close_con_rpl *rpl = cplhdr(skb);
-	u32 tid = GET_TID(rpl);
-	int release = 0;
-
-	csk = get_sock_from_tid(cdev, tid);
-	if (!csk) {
-		cstor_err(cdev, "get_sock_from_tid() failed, tid %u\n", tid);
-		return;
-	}
-
-	cstor_debug(cdev, "tid %u, state: %s (%d)\n", csk->tid, states[csk->state], csk->state);
-
-	mutex_lock(&csk->mutex);
-	set_bit(CSTOR_SOCK_H_CLOSE_CON_RPL, &csk->history);
-	switch (csk->state) {
-	case CSTOR_SOCK_STATE_CLOSING:
-		csk->state = CSTOR_SOCK_STATE_MORIBUND;
-		break;
-	case CSTOR_SOCK_STATE_MORIBUND:
-		csk->state = CSTOR_SOCK_STATE_DEAD;
-		disconnected_upcall(csk);
-		release = 1;
-		break;
-	case CSTOR_SOCK_STATE_ABORTING:
-	case CSTOR_SOCK_STATE_DEAD:
-		break;
-	default:
-		WARN_ONCE(1, "Bad endpoint state %u\n", csk->state);
-		break;
-	}
-	mutex_unlock(&csk->mutex);
-
-	if (release)
-		cstor_put_sock(csk);
-}
-
-/*
- * Upcall from the adapter indicating data has been transmitted.
- * For us its just the single MPA request or reply.  We can now free
- * the skb holding the mpa message.
- */
 static void fw4_ack(struct cstor_device *cdev, struct sk_buff *skb)
 {
 	struct cstor_sock *csk;
@@ -2088,6 +2061,16 @@ static void fw4_ack(struct cstor_device *cdev, struct sk_buff *skb)
 
 	mutex_lock(&csk->mutex);
 
+	if (!(hdr->seq_vld & CPL_FW4_ACK_FLAGS_FLOWC) &&
+	    test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		struct net_device *ndev = cdev->lldi.ports[csk->port_id];
+		u16 cidx = be64_to_cpu(hdr->rsvd1) & 0xffff;
+
+		cxgb4_uld_txq_cidx_update(ndev, csk->sq->sq_idx, cidx);
+		mutex_unlock(&csk->mutex);
+		return;
+	}
+
 	cstor_debug(cdev, "tid %u credits %u\n", csk->tid, credits);
 
 	if (credits == 0) {
@@ -2097,7 +2080,8 @@ static void fw4_ack(struct cstor_device *cdev, struct sk_buff *skb)
 	}
 
 	csk->wr_cred += credits;
-	if (!test_bit(CSTOR_SOCK_F_VALIDATE_CREDITS, &csk->flags))
+	if (!test_bit(CSTOR_SOCK_F_VALIDATE_CREDITS, &csk->flags) ||
+	    (hdr->seq_vld & CPL_FW4_ACK_FLAGS_FLOWC))
 		goto out;
 
 	while (credits) {
@@ -2154,9 +2138,12 @@ int cstor_sock_reject(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_reject_cr_cmd cmd;
 	struct cstor_sock *csk;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2220,8 +2207,10 @@ int cstor_sock_accept(struct cstor_ucontext *uctx, void __user *ubuf)
 	int ret;
 	u32 psz_idx;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2286,7 +2275,8 @@ int cstor_sock_accept(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	ret = cstor_modify_qp(qp, CSTOR_QP_STATE_ACTIVE);
 	if (ret) {
-		cstor_err(cdev, "tid %u qid %u, cstor_modify_qp() failed\n", csk->tid, cmd.qid);
+		cstor_err(cdev, "tid %u qid %u, cstor_modify_qp() failed, ret %d\n",
+			  csk->tid, cmd.qid, ret);
 		csk->qp = NULL;
 		qp->csk = NULL;
 		goto out;
@@ -2307,10 +2297,12 @@ int cstor_sock_attach_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_qp *qp;
 	struct cstor_sock_attach_qp_cmd cmd;
 	u32 psz_idx;
-	int ret = 0;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2358,6 +2350,15 @@ int cstor_sock_attach_qp(struct cstor_ucontext *uctx, void __user *ubuf)
 		return -EINVAL;
 	}
 
+	if (!test_bit(CSTOR_SOCK_F_FLOWC_SENT, &csk->flags)) {
+		ret = send_flowc(csk);
+		if (ret) {
+			cstor_err(cdev, "tid %u, send_flowc() failed, ret %d\n", csk->tid, ret);
+			mutex_unlock(&csk->mutex);
+			return ret;
+		}
+	}
+
 	csk->qp = qp;
 	qp->csk = csk;
 	qp->attr.initiator = true;
@@ -2396,8 +2397,10 @@ int _cstor_sock_disconnect(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_sock_disconnect_cmd cmd;
 	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2455,9 +2458,12 @@ int cstor_sock_release(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_sock *csk;
 	struct cstor_sock_release_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2490,6 +2496,9 @@ int cstor_sock_release(struct cstor_ucontext *uctx, void __user *ubuf)
 	set_bit(CSTOR_SOCK_H_ULP_RELEASE, &csk->history);
 	mutex_unlock(&csk->mutex);
 
+	if (test_and_clear_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags))
+		cstor_free_sq(csk->sq);
+
 	clear_bit(CSTOR_SOCK_F_APP_REF, &csk->flags);
 	cstor_put_sock(csk);
 	return 0;
@@ -2518,6 +2527,8 @@ static int create_server6(struct cstor_listen_sock *lcsk)
 				       sin6->sin6_port, 0, cdev->lldi.rxq_ids[0], NULL);
 	if (!ret)
 		ret = cstor_wait_for_reply(cdev, &lcsk->wr_wait, 0, 0, __func__);
+	else if (ret > 0)
+		ret = net_xmit_errno(ret);
 
 	return ret;
 }
@@ -2533,6 +2544,8 @@ static int create_server4(struct cstor_listen_sock *lcsk)
 				      sin->sin_port, 0, cdev->lldi.rxq_ids[0], NULL);
 	if (!ret)
 		ret = cstor_wait_for_reply(cdev, &lcsk->wr_wait, 0, 0, __func__);
+	else if (ret > 0)
+		ret = net_xmit_errno(ret);
 
 	return ret;
 }
@@ -2600,13 +2613,15 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_create_listen_cmd cmd;
 	struct cstor_create_listen_resp uresp;
 	void __user *_ubuf;
-	int ret = 0;
+	int ret;
 	u16 lport;
 	u8 port_id;
-	char laddr[40];
+	bool inaddr_any;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2623,7 +2638,7 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	lcsk = kzalloc(sizeof(*lcsk), GFP_KERNEL);
 	if (!lcsk) {
-		cstor_err(cdev, "cannot alloc lcsk\n");
+		cstor_err(cdev, "failed to allocate lcsk\n");
 		return -ENOMEM;
 	}
 
@@ -2655,22 +2670,18 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	if (cmd.ipv4) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&lcsk->laddr;
 
-		sin->sin_family = AF_INET;
-		sin->sin_port = cmd.tcp_port;
-		sin->sin_addr.s_addr = cmd.ip_addr[0];
-		snprintf(laddr, sizeof(laddr), "%pI4", cmd.ip_addr);
+		cstor_fill_sockaddr_in(sin, cmd.ip_addr[0], cmd.tcp_port);
+		inaddr_any = (sin->sin_addr.s_addr == cpu_to_be32(INADDR_ANY));
 	} else {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&lcsk->laddr;
 
-		sin6->sin6_family = AF_INET6;
-		sin6->sin6_port = cmd.tcp_port;
-		memcpy(sin6->sin6_addr.s6_addr, cmd.ip_addr, sizeof(cmd.ip_addr));
-		snprintf(laddr, sizeof(laddr), "%pI6", cmd.ip_addr);
+		cstor_fill_sockaddr_in6(sin6, cmd.ip_addr, cmd.tcp_port);
+		inaddr_any = ipv6_addr_any(&sin6->sin6_addr);
 	}
 
 	lport = be16_to_cpu(cmd.tcp_port);
 
-	if (cmd.inaddr_any) {
+	if (inaddr_any) {
 		port_id = _CSTOR_LCSK_INADDR_ANY_PORT_ID;
 	} else {
 		struct net_device *ndev;
@@ -2679,8 +2690,7 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 		ndev = cstor_find_ndev(&lcsk->laddr);
 		if (!ndev) {
 			rcu_read_unlock();
-			cstor_err(cdev, "net device not found, laddr %s, lport %u\n",
-				  laddr, lport);
+			cstor_err(cdev, "net device not found, laddr %pISpc\n", &lcsk->laddr);
 			ret = -ENODEV;
 			goto err;
 		}
@@ -2689,19 +2699,16 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 		rcu_read_unlock();
 
 		if (ret) {
-			cstor_err(cdev, "cstor_find_port_id() failed, laddr %s, "
-				  "lport %u, ret %d\n", laddr, lport, ret);
+			cstor_err(cdev, "cstor_find_port_id() failed, laddr %pISpc, ret %d\n",
+				  &lcsk->laddr, ret);
 			goto err;
 		}
 	}
 
-	/*
-	 * Allocate a server TID.
-	 */
 	ret = cxgb4_uld_stid_alloc(cdev->lldi.ports[0], lcsk->laddr.ss_family, lcsk);
 	if (ret < 0) {
-		cstor_err(cdev, "cannot alloc stid for laddr %s, lport %u, ret %d\n",
-			  laddr, lport, ret);
+		cstor_err(cdev, "cxgb4_uld_stid_alloc() failed for laddr %pISpc, ret %d\n",
+			  &lcsk->laddr, ret);
 		goto err;
 	}
 
@@ -2710,8 +2717,8 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	ret = __xa_insert(&cdev->stids, lcsk->stid, lcsk, GFP_KERNEL);
 	if (ret) {
 		xa_unlock(&cdev->stids);
-		cstor_err(cdev, "lcsk->stid %u, __xa_insert() failed for laddr %s, "
-			  "lport %u, ret %d\n", lcsk->stid, laddr, lport, ret);
+		cstor_err(cdev, "lcsk->stid %u, __xa_insert() failed for laddr %pISpc, ret %d\n",
+			  lcsk->stid, &lcsk->laddr, ret);
 		cxgb4_uld_stid_free(cdev->lldi.ports[0], lcsk->laddr.ss_family, lcsk->stid);
 		lcsk->stid = CSTOR_INVALID_STID;
 		goto err;
@@ -2729,8 +2736,8 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	if (ret) {
 		mutex_unlock(&lcsk->mutex);
-		cstor_err(cdev, "stid %u, failed to create server for laddr %s lport %u ret %d\n",
-			  lcsk->stid, laddr, lport, ret);
+		cstor_err(cdev, "stid %u, failed to create server for laddr %pISpc, ret %d\n",
+			  lcsk->stid, &lcsk->laddr, ret);
 		if (ret == -ETIMEDOUT)
 			return ret;
 
@@ -2741,9 +2748,11 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	uresp.stid = lcsk->stid;
 	uresp.port_id = port_id;
 
-	if (copy_to_user(_ubuf, &uresp, sizeof(uresp))) {
+	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
+	if (ret) {
 		mutex_unlock(&lcsk->mutex);
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = destroy_listen(lcsk);
 		if (ret == -ETIMEDOUT)
 			return -EFAULT;
@@ -2810,9 +2819,12 @@ int cstor_destroy_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_destroy_listen_cmd cmd;
 	struct cstor_listen_sock *lcsk;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -2884,8 +2896,10 @@ int cstor_sock_disconnect(struct cstor_sock *csk)
 
 	if (!test_bit(CSTOR_SOCK_F_FLOWC_SENT, &csk->flags)) {
 		ret = send_flowc(csk);
-		if (ret)
+		if (ret) {
+			cstor_err(cdev, "tid %u, send_flowc() failed, ret %d\n", csk->tid, ret);
 			goto out;
+		}
 	}
 
 	switch (csk->state) {
@@ -2922,6 +2936,7 @@ int cstor_sock_disconnect(struct cstor_sock *csk)
 	set_bit(CSTOR_SOCK_H_DISC_ABORT, &csk->history);
 	ret = send_abort_req(csk);
 	if (ret) {
+		cstor_err(cdev, "tid %u, failed to send abort request, ret %d\n", csk->tid, ret);
 		set_bit(CSTOR_SOCK_H_DISC_FAIL, &csk->history);
 		csk->state = CSTOR_SOCK_STATE_DEAD;
 		cstor_put_sock(csk);
@@ -2960,6 +2975,11 @@ void cstor_disconnect_all_sock(struct cstor_ucontext *uctx)
 	spin_unlock_bh(&cdev->slock);
 
 	flush_workqueue(cdev->workq);
+
+	list_for_each_entry(csk, &cdev->sock_list, entry) {
+		if (csk->uctx == uctx)
+			__cstor_disconnect_sock(csk);
+	}
 
 	xa_for_each(&cdev->tids, index, csk) {
 		if (csk->uctx == uctx)
@@ -3031,13 +3051,24 @@ static void act_establish(struct cstor_device *cdev, struct sk_buff *skb)
 
 	dst_confirm(csk->dst);
 
-	/* setup the tid for this connection */
 	csk->tid = tid;
 	cxgb4_uld_tid_insert(cdev->lldi.ports[0], csk->laddr.ss_family, tid, csk);
-	insert_csk_tid(csk);
 	cxgb4_uld_tid_ctrlq_id_sel_update(cdev->lldi.ports[0], tid, &csk->ctrlq_idx);
 	cxgb4_uld_tid_qid_sel_update(cdev->lldi.ports[csk->port_id], CXGB4_ULD_TYPE_CSTOR,
 				     tid, &csk->txq_idx);
+	if (insert_csk_tid(csk)) {
+		xa_lock(&cdev->tids);
+		list_add_tail(&csk->entry, &cdev->sock_list);
+		xa_unlock(&cdev->tids);
+
+		set_bit(CSTOR_SOCK_F_QUEUED_IN_LIST, &csk->flags);
+		atomic_inc(&csk->uctx->num_csk);
+		mutex_unlock(&csk->mutex);
+
+		cstor_sock_disconnect(csk);
+		atomic_dec(&csk->uctx->num_active_csk);
+		return;
+	}
 
 	atomic_dec(&csk->uctx->num_active_csk);
 
@@ -3048,11 +3079,6 @@ static void act_establish(struct cstor_device *cdev, struct sk_buff *skb)
 	set_emss(csk, be16_to_cpu(req->tcp_opt));
 
 	set_bit(CSTOR_SOCK_H_ACT_ESTAB, &csk->history);
-
-	if (send_flowc(csk)) {
-		mutex_unlock(&csk->mutex);
-		return;
-	}
 
 	csk->state = CSTOR_SOCK_STATE_CONNECTED;
 
@@ -3089,7 +3115,15 @@ static void act_open_rpl(struct cstor_device *cdev, struct sk_buff *skb)
 		mutex_unlock(&cdev->stats.lock);
 		csk->tid = tid;
 		cxgb4_uld_tid_insert(cdev->lldi.ports[0], csk->laddr.ss_family, tid, csk);
-		insert_csk_tid(csk);
+		if (insert_csk_tid(csk)) {
+			xa_lock(&cdev->tids);
+			list_add_tail(&csk->entry, &cdev->sock_list);
+			xa_unlock(&cdev->tids);
+
+			set_bit(CSTOR_SOCK_F_QUEUED_IN_LIST, &csk->flags);
+			atomic_inc(&csk->uctx->num_csk);
+		}
+
 		cxgb4_uld_tid_ctrlq_id_sel_update(cdev->lldi.ports[0], tid, &csk->ctrlq_idx);
 		cxgb4_uld_tid_qid_sel_update(cdev->lldi.ports[csk->port_id], CXGB4_ULD_TYPE_CSTOR,
 					     tid, &csk->txq_idx);
@@ -3110,25 +3144,9 @@ static void act_open_rpl(struct cstor_device *cdev, struct sk_buff *skb)
 	case CPL_ERR_CONN_TIMEDOUT:
 		break;
 	default:
-		if (csk->laddr.ss_family == AF_INET) {
-			struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
-			struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
-
-			cstor_err(cdev, "Active open failure - atid %u status %u "
-				  "errno %d %pI4:%u->%pI4:%u\n", atid, status,
-				  status2errno(status), &la->sin_addr.s_addr,
-				  be16_to_cpu(la->sin_port), &ra->sin_addr.s_addr,
-				  be16_to_cpu(ra->sin_port));
-		} else {
-			struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&csk->laddr;
-			struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&csk->raddr;
-
-			cstor_err(cdev, "Active open failure - atid %u status %u "
-				  "errno %d %pI6:%u->%pI6:%u\n", atid, status,
-				  status2errno(status), la6->sin6_addr.s6_addr,
-				  be16_to_cpu(la6->sin6_port), ra6->sin6_addr.s6_addr,
-				  be16_to_cpu(ra6->sin6_port));
-		}
+		cstor_err(cdev, "Active open failure - atid %u, status %u errno %d, "
+			  "laddr %pISpc, raddr %pISpc\n", atid, status, status2errno(status),
+			  &csk->laddr, &csk->raddr);
 	}
 
 	active_connect_upcall(csk, _CSTOR_CONNECT_FAILURE);
@@ -3189,7 +3207,7 @@ static void nvmt_cmp(struct cstor_device *cdev, struct sk_buff *skb)
 	}
 
 	hdr = (struct nvme_tcp_hdr *)skb->data;
-	csk->rcv_nxt += hdr->plen;
+	csk->rcv_nxt += le32_to_cpu(hdr->plen);
 	skb_get(skb);
 	connect_upcall(csk, skb);
 	mutex_unlock(&lcsk->mutex);
@@ -3243,9 +3261,7 @@ static void rx_iscsi_cmp(struct cstor_device *cdev, struct sk_buff *skb)
 		}
 
 		ssi->nr_frags = dssi->nr_frags;
-		skb->len += csk->dskb->data_len;
-		skb->data_len += csk->dskb->data_len;
-		skb->truesize += csk->dskb->data_len;
+		skb_len_add(skb, csk->dskb->data_len);
 
 		kfree_skb(csk->dskb);
 		csk->dskb = NULL;
@@ -3350,28 +3366,7 @@ static void update_dcb_priority(struct cstor_device *cdev, struct sk_buff *skb)
 			continue;
 		}
 
-		if (csk->lcsk) {
-			if (csk->laddr.ss_family == AF_INET6) {
-				struct sockaddr_in6 *sock_in6 = (struct sockaddr_in6 *)&csk->laddr;
-
-				dcb_port = be16_to_cpu(sock_in6->sin6_port);
-			} else {
-				struct sockaddr_in *sock_in = (struct sockaddr_in *)&csk->laddr;
-
-				dcb_port = be16_to_cpu(sock_in->sin_port);
-			}
-		} else {
-			if (csk->raddr.ss_family == AF_INET6) {
-				struct sockaddr_in6 *sock_in6 = (struct sockaddr_in6 *)&csk->raddr;
-
-				dcb_port = be16_to_cpu(sock_in6->sin6_port);
-			} else {
-				struct sockaddr_in *sock_in = (struct sockaddr_in *)&csk->raddr;
-
-				dcb_port = be16_to_cpu(sock_in->sin_port);
-			}
-		}
-
+		dcb_port = cstor_find_tcp_port(csk->lcsk ? &csk->laddr : &csk->raddr);
 		if (dcb_port != port_num) {
 			mutex_unlock(&csk->mutex);
 			xa_lock(&cdev->tids);
@@ -3401,15 +3396,13 @@ static cstor_handler_func work_handlers[MAX_CPL_CMDS] = {
 	[CPL_NVMT_CMP] = nvmt_cmp,
 	[CPL_ISCSI_DATA] = iscsi_data,
 	[CPL_RX_ISCSI_CMP] = rx_iscsi_cmp,
-	[CPL_ABORT_RPL_RSS] = abort_rpl,
-	[CPL_ABORT_RPL] = abort_rpl,
+	[CPL_ABORT_RPL_RSS] = abort_rpl_rss,
 	[CPL_PASS_OPEN_RPL] = pass_open_rpl,
 	[CPL_CLOSE_LISTSRV_RPL] = close_listsrv_rpl,
 	[CPL_PASS_ACCEPT_REQ] = pass_accept_req,
 	[CPL_PASS_ESTABLISH] = pass_establish,
 	[CPL_PEER_CLOSE] = peer_close,
-	[CPL_ABORT_REQ_RSS] = peer_abort,
-	[CPL_CLOSE_CON_RPL] = close_con_rpl,
+	[CPL_ABORT_REQ_RSS] = abort_req_rss,
 	[CPL_FW4_ACK] = fw4_ack,
 	[CPL_SET_TCB_RPL] = set_tcb_rpl,
 	[CPL_FW6_MSG] = deferred_fw6_msg,
@@ -3456,9 +3449,6 @@ static void sock_timeout(struct timer_list *t)
  */
 void sched(struct cstor_device *cdev, struct sk_buff *skb)
 {
-	/*
-	 * Queue the skb and schedule the worker thread.
-	 */
 	skb_queue_tail(&cdev->rxq, skb);
 
 	spin_lock_bh(&cdev->slock);
@@ -3494,10 +3484,6 @@ static void fw6_msg(struct cstor_device *cdev, struct sk_buff *skb)
 	}
 }
 
-/*
- * Most upcalls from the T4 Core go to sched() to
- * schedule the processing on a work queue.
- */
 cstor_handler_func cstor_handlers[NUM_CPL_CMDS] = {
 	[CPL_ACT_ESTABLISH] = sched,
 	[CPL_ACT_OPEN_RPL] = sched,
@@ -3506,13 +3492,11 @@ cstor_handler_func cstor_handlers[NUM_CPL_CMDS] = {
 	[CPL_ISCSI_DATA] = sched,
 	[CPL_RX_ISCSI_CMP] = sched,
 	[CPL_ABORT_RPL_RSS] = sched,
-	[CPL_ABORT_RPL] = sched,
 	[CPL_PASS_OPEN_RPL] = sched,
 	[CPL_CLOSE_LISTSRV_RPL] = sched,
 	[CPL_PASS_ACCEPT_REQ] = sched,
 	[CPL_PASS_ESTABLISH] = sched,
 	[CPL_PEER_CLOSE] = sched,
-	[CPL_CLOSE_CON_RPL] = sched,
 	[CPL_ABORT_REQ_RSS] = sched,
 	[CPL_FW4_ACK] = sched,
 	[CPL_SET_TCB_RPL] = sched,
@@ -3583,8 +3567,10 @@ int cstor_resolve_route(struct cstor_ucontext *uctx, void __user *ubuf)
 	int ret;
 	u8 port_id;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -3611,7 +3597,7 @@ int cstor_resolve_route(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	n = dst_neigh_lookup(dst, peer_ip);
 	if (!n) {
-		cstor_err(cdev, "dst_neigh_lookup() failed\n");
+		cstor_err(cdev, "dst_neigh_lookup() failed for raddr %pISpc\n", &cmd.raddr);
 		dst_release(dst);
 		return -ENODEV;
 	}
@@ -3642,13 +3628,14 @@ int cstor_resolve_route(struct cstor_ucontext *uctx, void __user *ubuf)
 	_ubuf = &((struct cstor_resolve_route_cmd *)ubuf)->resp;
 	uresp.port_id = port_id;
 
-	if (copy_to_user(_ubuf, &uresp, sizeof(uresp))) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
+	if (ret) {
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = -EFAULT;
 		goto out;
 	}
 
-	ret = 0;
 out:
 	neigh_release(n);
 	dst_release(dst);
@@ -3659,7 +3646,6 @@ static int
 send_connect_ipv4(struct cstor_sock *csk, struct sk_buff *skb,
 		  u64 params, u64 opt0, u32 opt2, u32 isn, u32 len)
 {
-	struct cstor_device *cdev = csk->uctx->cdev;
 	struct cpl_t7_act_open_req *req = NULL;
 	struct sockaddr_in *la = (struct sockaddr_in *)&csk->laddr;
 	struct sockaddr_in *ra = (struct sockaddr_in *)&csk->raddr;
@@ -3679,8 +3665,6 @@ send_connect_ipv4(struct cstor_sock *csk, struct sk_buff *skb,
 	req->params = cpu_to_be64(T7_FILTER_TUPLE_V(params));
 	req->rsvd2 = cpu_to_be32(0);
 	req->opt3 = cpu_to_be32(0);
-
-	cstor_debug(cdev, "laddr: %pI4\n", &la->sin_addr.s_addr);
 
 	return 0;
 }
@@ -3721,7 +3705,6 @@ send_connect_ipv6(struct cstor_sock *csk, struct sk_buff *skb,
 	req6->rsvd2 = cpu_to_be32(0);
 	req6->opt3 = cpu_to_be32(0);
 
-	cstor_debug(cdev, "laddr: %pI6\n", &la6->sin6_addr.s6_addr);
 	return 0;
 }
 
@@ -3795,6 +3778,7 @@ static int send_connect(struct cstor_sock *csk)
 		return ret;
 	}
 
+	cstor_debug(cdev, "laddr %pISpc, raddr %pISpc\n", &csk->laddr, &csk->raddr);
 	t4_set_arp_err_handler(skb, csk, act_open_req_arp_failure);
 	set_bit(CSTOR_SOCK_H_ACT_OPEN_REQ, &csk->history);
 	return cstor_l2t_send(cdev, skb, csk);
@@ -3811,8 +3795,10 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 	int iptype, ret;
 	u16 lport, rport;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -3824,7 +3810,7 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	csk = alloc_sock(uctx, NULL);
 	if (!csk) {
-		cstor_err(cdev, "cannot alloc csk\n");
+		cstor_err(cdev, "failed to allocate csk\n");
 		return -ENOMEM;
 	}
 
@@ -3839,12 +3825,9 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	csk->protocol = cmd.protocol;
 
-	/*
-	 * Allocate an active TID to initiate a TCP connection.
-	 */
 	ret = cxgb4_uld_atid_alloc(cdev->lldi.ports[0], csk);
 	if (ret < 0) {
-		cstor_err(cdev, "cannot alloc atid, ret %d\n", ret);
+		cstor_err(cdev, "cxgb4_uld_atid_alloc() failed, ret %d\n", ret);
 		goto out;
 	}
 
@@ -3858,6 +3841,7 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 	}
 
 	memcpy(&csk->raddr, &cmd.raddr, sizeof(csk->raddr));
+	cstor_debug(cdev, "raddr %pISpc\n", &csk->raddr);
 
 	if (cmd.raddr.ss_family == AF_INET) {
 		struct sockaddr_in *raddr = (struct sockaddr_in *)&csk->raddr;
@@ -3865,16 +3849,11 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 		iptype = 4;
 		ra = (__u8 *)&raddr->sin_addr;
 		rport = be16_to_cpu(raddr->sin_port);
-#if 0
-		/* Handle loopback requests to INADDR_ANY. */
+
 		if ((__force int)raddr->sin_addr.s_addr == INADDR_ANY) {
-			err = pick_local_ipaddrs(dev, cm_id);
-			if (err)
-				goto fail4;
+			ret = -EINVAL;
+			goto out;
 		}
-#endif
-		/* find a route */
-		cstor_debug(cdev, "raddr %pI4 rport %#x\n", ra, be16_to_cpu(raddr->sin_port));
 
 		csk->dst = find_route(cdev, (struct sockaddr_in *)&csk->laddr, 0,
 				      raddr->sin_addr.s_addr, 0, raddr->sin_port, 0);
@@ -3884,39 +3863,34 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 		iptype = 6;
 		ra = (__u8 *)&raddr6->sin6_addr;
 		rport = be16_to_cpu(raddr6->sin6_port);
-#if 0
-		/*
-		 * Handle loopback requests to INADDR_ANY.
-		 */
+
 		if (ipv6_addr_type(&raddr6->sin6_addr) == IPV6_ADDR_ANY) {
-			err = pick_local_ip6addrs(dev, cm_id);
-			if (err)
-				goto fail4;
+			ret = -EINVAL;
+			goto out;
 		}
-#endif
-		/* find a route */
-		cstor_debug(cdev, "raddr %pI6 rport %#x\n", raddr6->sin6_addr.s6_addr,
-			    be16_to_cpu(raddr6->sin6_port));
 
 		csk->dst = find_route6(cdev, (struct sockaddr_in6 *)&csk->laddr, NULL,
 				       raddr6->sin6_addr.s6_addr, raddr6->sin6_scope_id);
 	}
 
 	if (!csk->dst) {
-		cstor_err(cdev, "atid %u, find_route() failed\n", csk->atid);
+		cstor_err(cdev, "atid %u, find_route() failed for raddr %pISpc\n",
+			  csk->atid, &csk->raddr);
 		ret = -EHOSTUNREACH;
 		goto out;
 	}
 
 	ret = cstor_get_lport(csk, &lport);
 	if (ret) {
-		cstor_err(cdev, "cstor_get_lport() failed\n");
+		cstor_err(cdev, "cstor_get_lport() failed, laddr %pISc raddr %pISpc, ret %d\n",
+			  &csk->laddr, &csk->raddr, ret);
 		goto out;
 	}
 
-	ret = import_sock(csk, iptype, ra, rport, 0);
+	ret = import_sock(csk, iptype, ra, rport);
 	if (ret) {
-		cstor_err(cdev, "atid %u, import_sock() failed, ret %d\n", csk->atid, ret);
+		cstor_err(cdev, "atid %u, import_sock() failed, laddr %pISpc raddr %pISpc, "
+			  "ret %d\n", csk->atid, &csk->laddr, &csk->raddr, ret);
 		goto out;
 	}
 
@@ -3928,15 +3902,18 @@ int cstor_connect(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	_ubuf = &((struct cstor_connect_cmd *)ubuf)->resp;
 	uresp.atid = csk->atid;
-	if (copy_to_user(_ubuf, &uresp, sizeof(uresp))) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
+	if (ret) {
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = -EFAULT;
 		goto out;
 	}
 
 	ret = send_connect(csk);
 	if (ret) {
-		cstor_err(cdev, "atid %u, failed send_connect(), ret %d\n", csk->atid, ret);
+		cstor_err(cdev, "atid %u, failed send_connect(), laddr %pISpc raddr %pISpc, "
+			  "ret %d\n", csk->atid, &csk->laddr, &csk->raddr, ret);
 		csk->state = CSTOR_SOCK_STATE_DEAD;
 		goto out;
 	}
@@ -3961,41 +3938,36 @@ int cstor_find_device(struct cstor_ucontext *uctx, void __user *ubuf)
 	int ret;
 	u8 port_id;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
 	if (cmd.ipv4) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&laddr;
 
-		sin->sin_family = AF_INET;
-		sin->sin_port = cmd.tcp_port;
-		sin->sin_addr.s_addr = cmd.ip_addr[0];
+		cstor_fill_sockaddr_in(sin, cmd.ip_addr[0], cmd.tcp_port);
 	} else {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&laddr;
 
-		sin6->sin6_family = AF_INET6;
-		sin6->sin6_port = cmd.tcp_port;
-		memcpy(sin6->sin6_addr.s6_addr, cmd.ip_addr, sizeof(cmd.ip_addr));
+		cstor_fill_sockaddr_in6(sin6, cmd.ip_addr, cmd.tcp_port);
 	}
 
 	rcu_read_lock();
 	ndev = cstor_find_ndev(&laddr);
 	if (!ndev) {
 		rcu_read_unlock();
-		if (cmd.ipv4)
-			cstor_err(cdev, "net device not found, laddr %pI4\n", cmd.ip_addr);
-		else
-			cstor_err(cdev, "net device not found, laddr %pI6\n", cmd.ip_addr);
-
+		cstor_err(cdev, "net device not found, laddr %pISpc\n", &laddr);
 		return -ENODEV;
 	}
 
 	ret = cstor_find_port_id(cdev, ndev, &port_id);
 	rcu_read_unlock();
 	if (ret) {
-		cstor_err(cdev, "error cstor_find_port_id(), ret %d\n", ret);
+		cstor_err(cdev, "error cstor_find_port_id(), laddr %pISpc, ret %d\n",
+			  &laddr, ret);
 		return ret;
 	}
 
@@ -4003,9 +3975,11 @@ int cstor_find_device(struct cstor_ucontext *uctx, void __user *ubuf)
 	uresp.port_id = port_id;
 
 	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
-	if (ret)
+	if (ret) {
 		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
 			  sizeof(uresp), ret);
+		ret = -EFAULT;
+	}
 
 	return ret;
 }
@@ -4020,8 +3994,10 @@ int cstor_enable_iscsi_digest(struct cstor_ucontext *uctx, void __user *ubuf)
 	u32 qpid = 0;
 	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -4033,8 +4009,8 @@ int cstor_enable_iscsi_digest(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	if (csk->qp) {
 		qpid = csk->qp->wq.sq.qid;
-		csk->qp->attr.hdgst = cmd.dgst.hdgst;
-		csk->qp->attr.ddgst = cmd.dgst.ddgst;
+		csk->qp->attr.hdgst = cmd.hdgst;
+		csk->qp->attr.ddgst = cmd.ddgst;
 	}
 
 	skb_trim(skb, 0);
@@ -4049,14 +4025,14 @@ int cstor_enable_iscsi_digest(struct cstor_ucontext *uctx, void __user *ubuf)
 				      T7_REPLY_CHAN_V(csk->rx_chan));
 	req->word_cookie = cpu_to_be16(0);
 	req->mask = cpu_to_be64(0x3 << 4);
-	req->val = cpu_to_be64(((cmd.dgst.hdgst ? ULP_CRC_HEADER : 0) |
-			       (cmd.dgst.ddgst ? ULP_CRC_DATA : 0)) << 4);
+	req->val = cpu_to_be64(((cmd.hdgst ? ULP_CRC_HEADER : 0) |
+			       (cmd.ddgst ? ULP_CRC_DATA : 0)) << 4);
 
 	cstor_reinit_wr_wait(&csk->wr_wait);
 	ret = cstor_send_wait(cdev, skb, &csk->wr_wait, csk->tid, qpid, __func__);
 	if (ret)
-		cstor_err(cdev, "cstor_send_wait() failed, cmd.dgst.hdgst %u ret %d"
-			  "cmd.dgst.ddgst %u\n", cmd.dgst.hdgst, cmd.dgst.ddgst, ret);
+		cstor_err(cdev, "cstor_send_wait() failed, cmd.hdgst %u cmd.ddgst %u ret %d\n",
+			  cmd.hdgst, cmd.ddgst, ret);
 
 	return ret;
 }
@@ -4064,9 +4040,15 @@ int cstor_enable_iscsi_digest(struct cstor_ucontext *uctx, void __user *ubuf)
 #define OFLD_TX_DATA_WR_LEN (sizeof(struct fw_ofld_tx_data_wr))
 #define TX_HDR_LEN (sizeof(struct sge_opaque_hdr) + OFLD_TX_DATA_WR_LEN)
 
+#define OFLD_TX_DATA_V2_WR_LEN (sizeof(struct fw_ofld_tx_data_v2_wr))
+#define TX_SENDPATH_HDR_LEN (sizeof(struct sge_opaque_hdr) + OFLD_TX_DATA_V2_WR_LEN)
+
 static int cstor_is_ofld_imm(struct cstor_sock *csk, const struct sk_buff *skb)
 {
-	return ((skb->len + OFLD_TX_DATA_WR_LEN) <= MAX_IMM_OFLD_TX_DATA_WR_LEN);
+	bool sendpath_enabled = test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags);
+	u32 tx_data_wr_len = sendpath_enabled ? OFLD_TX_DATA_V2_WR_LEN : OFLD_TX_DATA_WR_LEN;
+
+	return ((skb->len + tx_data_wr_len) <= ofld_tx_data_wr_max_len(sendpath_enabled));
 }
 
 static inline u32 cstor_sgl_len(u32 n)
@@ -4084,6 +4066,31 @@ static u32 cstor_calc_tx_flits_ofld(struct cstor_sock *csk, const struct sk_buff
 		cnt++;
 
 	return flits + cstor_sgl_len(cnt);
+}
+
+static void cstor_tx_data_v2_wr(struct cstor_sock *csk, struct sk_buff *skb, u32 len, u32 credits)
+{
+	struct fw_ofld_tx_data_v2_wr *req;
+	u32 submode = cstor_skcb_submode(skb);
+	u32 immlen = 0;
+
+	if (cstor_is_ofld_imm(csk, skb))
+		immlen += skb->len;
+
+	req = __skb_push(skb, sizeof(*req));
+	req->op_to_immdlen = cpu_to_be32(FW_WR_OP_V(FW_OFLD_TX_DATA_V2_WR) |
+					 FW_WR_IMMDLEN_V(immlen));
+	req->flowid_len16 = cpu_to_be32(FW_WR_FLOWID_V(csk->tid) | FW_WR_LEN16_V(credits));
+	req->r4 = cpu_to_be32(0);
+	req->r5 = cpu_to_be16(0);
+	req->r6 = cpu_to_be32(0);
+	req->seqno = cpu_to_be32(csk->snd_nxt);
+	req->plen = cpu_to_be32(len);
+	req->lsodisable_to_flags = cpu_to_be32(TX_ULP_MODE_V(ULP_MODE_ISCSI) |
+					       TX_ULP_SUBMODE_V(submode) |
+					       T6_TX_FORCE_F | TX_SHOVE_F);
+
+	cxgb4_uld_skb_set_pidx_offset(skb, offsetof(struct fw_ofld_tx_data_v2_wr, wrid));
 }
 
 static void
@@ -4121,25 +4128,35 @@ static int cstor_send_skb(struct cstor_sock *csk, struct sk_buff *skb)
 	else
 		credits = DIV_ROUND_UP((8 * cstor_calc_tx_flits_ofld(csk, skb)), 16);
 
-	credits += DIV_ROUND_UP(OFLD_TX_DATA_WR_LEN, 16);
+	if (test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		credits += DIV_ROUND_UP(OFLD_TX_DATA_V2_WR_LEN, 16);
 
-	if (csk->wr_cred < credits) {
-		cstor_err(csk->uctx->cdev, "tid %u, skb %u/%u, wr %d < %u.\n",
-			  csk->tid, skb->len, skb->data_len, credits, csk->wr_cred);
-		kfree_skb(skb);
-		return -ENOMEM;
+		set_wr_txq(skb, CPL_PRIORITY_DATA, csk->sq->sq_idx);
+		len += cstor_skcb_tx_extralen(skb);
+
+		cstor_tx_data_v2_wr(csk, skb, len, credits);
+		csk->snd_nxt += len;
+	} else {
+		credits += DIV_ROUND_UP(OFLD_TX_DATA_WR_LEN, 16);
+
+		if (csk->wr_cred < credits) {
+			cstor_err(csk->uctx->cdev, "tid %u, skb %u/%u, wr %d < %u.\n",
+				  csk->tid, skb->len, skb->data_len, credits, csk->wr_cred);
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
+
+		set_bit(CSTOR_SOCK_F_VALIDATE_CREDITS, &csk->flags);
+
+		set_wr_txq(skb, CPL_PRIORITY_DATA, csk->txq_idx);
+		skb->csum = (__force __wsum)(credits);
+		csk->wr_cred -= credits;
+
+		len += cstor_skcb_tx_extralen(skb);
+
+		cstor_tx_data_wr(csk, skb, dlen, len, credits);
+		cstor_sock_enqueue_wr(csk, skb);
 	}
-
-	set_bit(CSTOR_SOCK_F_VALIDATE_CREDITS, &csk->flags);
-
-	set_wr_txq(skb, CPL_PRIORITY_DATA, csk->txq_idx);
-	skb->csum = (__force __wsum)(credits);
-	csk->wr_cred -= credits;
-
-	len += cstor_skcb_tx_extralen(skb);
-
-	cstor_tx_data_wr(csk, skb, dlen, len, credits);
-	cstor_sock_enqueue_wr(csk, skb);
 
 	t4_set_arp_err_handler(skb, csk, arp_failure_discard);
 
@@ -4154,10 +4171,13 @@ int cstor_send_iscsi_pdu(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_sock *csk;
 	struct sk_buff *skb = NULL;
 	struct cstor_send_iscsi_pdu_cmd cmd;
-	int ret = 0;
+	u32 tx_hdr_len;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -4175,26 +4195,50 @@ int cstor_send_iscsi_pdu(struct cstor_ucontext *uctx, void __user *ubuf)
 		goto err;
 	}
 
-	if ((TX_HDR_LEN + cmd.buf_len) > 2048) {
-		cstor_err(uctx->cdev, "tid %u, size(%lu) larger than 2048 bytes\n",
-			  cmd.tid, TX_HDR_LEN + cmd.buf_len);
+	if (uctx->cdev->lldi.sendpath_enabled &&
+	    !test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags)) {
+		ret = cstor_alloc_sq(csk);
+		if (ret) {
+			cstor_err(uctx->cdev, "tid %u, failed to create sq, ret %d\n",
+				  csk->tid, ret);
+			goto err;
+		}
+	}
+
+	if (!test_bit(CSTOR_SOCK_F_FLOWC_SENT, &csk->flags)) {
+		ret = send_flowc(csk);
+		if (ret) {
+			cstor_err(uctx->cdev, "tid %u, send_flowc() failed, ret %d\n",
+				  csk->tid, ret);
+			goto err;
+		}
+	}
+
+	tx_hdr_len = test_bit(CSTOR_SOCK_F_TX_SENDPATH, &csk->flags) ?
+		     TX_SENDPATH_HDR_LEN : TX_HDR_LEN;
+
+	if (cmd.buf_len > 2048) {
+		cstor_err(uctx->cdev, "tid %u, size(%u) larger than 2048 bytes\n",
+			  cmd.tid, cmd.buf_len);
 		ret = -EINVAL;
 		goto err;
 	}
 
-	skb = alloc_skb(TX_HDR_LEN + cmd.buf_len, GFP_KERNEL);
+	skb = alloc_skb(tx_hdr_len + cmd.buf_len, GFP_KERNEL);
 	if (unlikely(!skb)) {
 		cstor_err(uctx->cdev, "tid %u, failed to alloc socket buffer\n", cmd.tid);
 		ret = -ENOMEM;
 		goto err;
 	}
 
-	skb_reserve(skb, TX_HDR_LEN);
+	skb_reserve(skb, tx_hdr_len);
 	skb_reset_transport_header(skb);
 
 	skb_put(skb, cmd.buf_len);
-	if (copy_from_user(skb->data, (void __user *)cmd.buf, cmd.buf_len)) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, length %u\n", cmd.buf_len);
+	ret = copy_from_user(skb->data, (void __user *)cmd.buf, cmd.buf_len);
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, length %u, ret %d\n",
+			  cmd.buf_len, ret);
 		ret = -EFAULT;
 		kfree_skb(skb);
 		goto err;

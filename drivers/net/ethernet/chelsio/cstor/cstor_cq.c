@@ -32,7 +32,7 @@
 
 #include "cstor.h"
 
-static int destroy_cq(struct cstor_cq *cq)
+static int cstor_send_cq_fw_ri_res_wr(struct cstor_cq *cq, bool create_cq, u16 cqe_size)
 {
 	struct cstor_device *cdev = cq->uctx->cdev;
 	struct sk_buff *skb = cdev->skb;
@@ -53,11 +53,25 @@ static int destroy_cq(struct cstor_cq *cq)
 
 	res = res_wr->res;
 	res->u.cq.restype = FW_RI_RES_TYPE_CQ;
-	res->u.cq.op = FW_RI_RES_OP_RESET;
 	res->u.cq.iqid = cpu_to_be32(cq->q.cqid);
 
+	if (create_cq) {
+		res->u.cq.op = FW_RI_RES_OP_WRITE;
+		res->u.cq.iqandst_to_iqandstindex = cpu_to_be32(FW_RI_RES_WR_IQANUS_V(0) |
+				FW_RI_RES_WR_IQANUD_V(UPDATEDELIVERY_INTERRUPT_X) |
+				FW_RI_RES_WR_IQANDST_F |
+				FW_RI_RES_WR_IQANDSTINDEX_V(cdev->lldi.ciq_ids[cq->q.ciq_idx]));
+		res->u.cq.iqdroprss_to_iqesize = cpu_to_be16(FW_RI_RES_WR_IQPCIECH_V(2) |
+				FW_RI_RES_WR_IQINTCNTTHRESH_V(0) |
+				FW_RI_RES_WR_IQESIZE_V(ilog2(cqe_size) - 4));
+		res->u.cq.iqsize = cpu_to_be16(cq->q.size);
+		res->u.cq.iqaddr = cpu_to_be64(cq->q.dma_addr);
+	} else {
+		res->u.cq.op = FW_RI_RES_OP_RESET;
+	}
+
 	cstor_reinit_wr_wait(&cdev->wr_wait);
-	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, 0, __func__);
+	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, cq->q.cqid, __func__);
 	if (ret)
 		cstor_err(cdev, "cstor_send_wait() failed, ret %d\n", ret);
 
@@ -67,10 +81,6 @@ static int destroy_cq(struct cstor_cq *cq)
 static int create_cq(struct cstor_cq *cq, u16 cqe_size)
 {
 	struct cstor_device *cdev = cq->uctx->cdev;
-	struct sk_buff *skb = cdev->skb;
-	struct fw_ri_res_wr *res_wr;
-	struct fw_ri_res *res;
-	u32 wr_len = sizeof(*res_wr) + sizeof(*res);
 	int ret;
 
 	cq->q.cqid = cxgb4_uld_get_cqid(cdev->rdma_res, &cq->uctx->d_uctx);
@@ -80,10 +90,10 @@ static int create_cq(struct cstor_cq *cq, u16 cqe_size)
 		goto err1;
 	}
 
-	cq->q.queue = dma_alloc_coherent(&cdev->lldi.pdev->dev, cq->q.memsize, &cq->q.dma_addr,
+	cq->q.queue = dma_alloc_coherent(cdev->lldi.dev, cq->q.memsize, &cq->q.dma_addr,
 					 GFP_KERNEL);
 	if (!cq->q.queue) {
-		cstor_err(cdev, "failed to allocate cq queue\n");
+		cstor_err(cdev, "failed to allocate cq queue, memsize %lu\n", cq->q.memsize);
 		ret = -ENOMEM;
 		goto err2;
 	}
@@ -94,35 +104,9 @@ static int create_cq(struct cstor_cq *cq, u16 cqe_size)
 		goto err3;
 	}
 
-	/* build fw_ri_res_wr */
-	skb_trim(skb, 0);
-	skb_get(skb);
-	set_wr_txq(skb, CPL_PRIORITY_CONTROL, cdev->lldi.ctrlq_start);
-
-	res_wr = (struct fw_ri_res_wr *)__skb_put_zero(skb, wr_len);
-	res_wr->op_nres = cpu_to_be32(FW_WR_OP_V(FW_RI_RES_WR) |
-				      FW_RI_RES_WR_NRES_V(1) | FW_WR_COMPL_F);
-	res_wr->len16_pkd = cpu_to_be32(DIV_ROUND_UP(wr_len, 16));
-	res_wr->cookie = (uintptr_t)&cdev->wr_wait;
-
-	res = res_wr->res;
-	res->u.cq.restype = FW_RI_RES_TYPE_CQ;
-	res->u.cq.op = FW_RI_RES_OP_WRITE;
-	res->u.cq.iqid = cpu_to_be32(cq->q.cqid);
-	res->u.cq.iqandst_to_iqandstindex = cpu_to_be32(FW_RI_RES_WR_IQANUS_V(0) |
-				FW_RI_RES_WR_IQANUD_V(UPDATEDELIVERY_INTERRUPT_X) |
-				FW_RI_RES_WR_IQANDST_F |
-				FW_RI_RES_WR_IQANDSTINDEX_V(cdev->lldi.ciq_ids[cq->q.ciq_idx]));
-	res->u.cq.iqdroprss_to_iqesize = cpu_to_be16(FW_RI_RES_WR_IQPCIECH_V(2) |
-					FW_RI_RES_WR_IQINTCNTTHRESH_V(0) |
-					FW_RI_RES_WR_IQESIZE_V(ilog2(cqe_size) - 4));
-	res->u.cq.iqsize = cpu_to_be16(cq->q.size);
-	res->u.cq.iqaddr = cpu_to_be64(cq->q.dma_addr);
-
-	cstor_reinit_wr_wait(&cdev->wr_wait);
-	ret = cstor_send_wait(cdev, skb, &cdev->wr_wait, 0, 0, __func__);
+	ret = cstor_send_cq_fw_ri_res_wr(cq, true, cqe_size);
 	if (ret) {
-		cstor_err(cdev, "cstor_send_wait() failed, ret %d\n", ret);
+		cstor_err(cdev, "cstor_send_cq_fw_ri_res_wr() failed, ret %d\n", ret);
 		if (ret == -ETIMEDOUT)
 			return ret;
 		goto err4;
@@ -131,9 +115,10 @@ static int create_cq(struct cstor_cq *cq, u16 cqe_size)
 	cq->q.gts = cdev->lldi.gts_reg;
 
 	ret = cstor_get_db_gts_phys_addr(cdev, cq->q.cqid, T4_BAR2_QTYPE_INGRESS, &cq->q.bar2_qid,
-					 &cq->q.db_gts_pa);
+					 &cq->q.gts_pa);
 	if (ret) {
-		cstor_err(cdev, "failed to get bar2 addr for cqid %u, ret %d\n", cq->q.cqid, ret);
+		cstor_err(cdev, "failed to get gts phys addr for cqid %u, ret %d\n",
+			  cq->q.cqid, ret);
 		goto err3;
 	}
 
@@ -141,7 +126,7 @@ static int create_cq(struct cstor_cq *cq, u16 cqe_size)
 err4:
 	xa_erase_bh(&cdev->cqs, cq->q.cqid);
 err3:
-	dma_free_coherent(&cdev->lldi.pdev->dev, cq->q.memsize, cq->q.queue, cq->q.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, cq->q.memsize, cq->q.queue, cq->q.dma_addr);
 err2:
 	cxgb4_uld_put_cqid(&cq->uctx->d_uctx, cq->q.cqid);
 err1:
@@ -153,14 +138,15 @@ int __cstor_destroy_cq(struct cstor_cq *cq, bool reset_cq_ctx)
 	struct cstor_device *cdev = cq->uctx->cdev;
 
 	if (refcount_read(&cq->refcnt) != 1) {
-		cstor_err(cq->uctx->cdev, "cqid %u still in use\n", cq->q.cqid);
+		cstor_err(cq->uctx->cdev, "cqid %u still in use, refcnt %u\n",
+			  cq->q.cqid, refcount_read(&cq->refcnt));
 		return -EINVAL;
 	}
 
 	if (reset_cq_ctx) {
 		int ret;
 
-		ret = destroy_cq(cq);
+		ret = cstor_send_cq_fw_ri_res_wr(cq, false, 0);
 		if (ret) {
 			cstor_err(cdev, "error destroying cqid %u, ret %d\n", cq->q.cqid, ret);
 			return ret;
@@ -168,7 +154,7 @@ int __cstor_destroy_cq(struct cstor_cq *cq, bool reset_cq_ctx)
 	}
 
 	xa_erase_bh(&cdev->cqs, cq->q.cqid);
-	dma_free_coherent(&cdev->lldi.pdev->dev, cq->q.memsize, cq->q.queue, cq->q.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, cq->q.memsize, cq->q.queue, cq->q.dma_addr);
 	cxgb4_uld_put_cqid(&cq->uctx->d_uctx, cq->q.cqid);
 
 	if (cq->eventfd_ctx)
@@ -205,9 +191,12 @@ int cstor_destroy_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_cq *cq;
 	struct cstor_destroy_cq_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -230,16 +219,19 @@ int cstor_create_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 	void __user *_uresp;
 	size_t memsize, hwentries;
 	int entries;
-	int ret = -ENOMEM;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
 	entries = cmd.num_cqe;
 	cstor_debug(cdev, "entries %d\n", entries);
 
+	ret = -ENOMEM;
 	cq = kzalloc(sizeof(*cq), GFP_KERNEL);
 	if (!cq) {
 		cstor_err(cdev, "failed to allocate cq\n");
@@ -263,6 +255,7 @@ int cstor_create_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 		cq->eventfd_ctx = eventfd_ctx_fdget(cmd.event_fd);
 		if (IS_ERR(cq->eventfd_ctx)) {
 			ret = PTR_ERR(cq->eventfd_ctx);
+			cstor_err(cdev, "eventfd_ctx_get() failed, ret %d\n", ret);
 			goto err1;
 		}
 	}
@@ -302,7 +295,7 @@ int cstor_create_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	ret = create_cq(cq, cmd.cqe_size);
 	if (ret) {
-		cstor_err(cdev, "create_cq failed, ret %d\n", ret);
+		cstor_err(cdev, "create_cq failed, cqe_size %u, ret %d\n", cmd.cqe_size, ret);
 		if (ret == -ETIMEDOUT) {
 			if (cq->eventfd_ctx) {
 				eventfd_ctx_put(cq->eventfd_ctx);
@@ -347,7 +340,7 @@ int cstor_create_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 
 		kfree(mm2);
 		kfree(mm);
-		return ret;
+		return -EFAULT;
 	}
 
 	mm->key = uresp.key;
@@ -357,7 +350,7 @@ int cstor_create_cq(struct cstor_ucontext *uctx, void __user *ubuf)
 	insert_mmap(uctx, mm);
 
 	mm2->key = uresp.gts_key;
-	mm2->addr = cq->q.db_gts_pa;
+	mm2->addr = cq->q.gts_pa;
 	mm2->vaddr = NULL;
 	mm2->len = PAGE_SIZE;
 	insert_mmap(uctx, mm2);

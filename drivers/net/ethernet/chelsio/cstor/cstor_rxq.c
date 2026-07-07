@@ -76,15 +76,15 @@ static void free_rxq(struct cstor_rxq *rxq)
 		return;
 	}
 
-	dma_free_coherent(&cdev->lldi.pdev->dev, rxq->iq.memsize, rxq->iq.desc, rxq->iq.dma_addr);
-	dma_free_coherent(&cdev->lldi.pdev->dev, rxq->fl.memsize, rxq->fl.desc, rxq->fl.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, rxq->iq.memsize, rxq->iq.desc, rxq->iq.dma_addr);
+	dma_free_coherent(cdev->lldi.dev, rxq->fl.memsize, rxq->fl.desc, rxq->fl.dma_addr);
 }
 
 static void *alloc_ring(struct cstor_device *cdev, size_t len, dma_addr_t *dma_addr)
 {
 	void *p;
 
-	p = dma_alloc_coherent(&cdev->lldi.pdev->dev, len, dma_addr, GFP_KERNEL);
+	p = dma_alloc_coherent(cdev->lldi.dev, len, dma_addr, GFP_KERNEL);
 	if (!p) {
 		cstor_err(cdev, "mem alloc failed with a len of %lu\n", len);
 		return NULL;
@@ -188,10 +188,10 @@ static int alloc_rxq(struct cstor_rxq *rxq)
 	return 0;
 err:
 	if (iq->desc)
-		dma_free_coherent(&cdev->lldi.pdev->dev, iq->memsize, iq->desc, iq->dma_addr);
+		dma_free_coherent(cdev->lldi.dev, iq->memsize, iq->desc, iq->dma_addr);
 
 	if (fl->desc)
-		dma_free_coherent(&cdev->lldi.pdev->dev, fl->memsize, fl->desc, fl->dma_addr);
+		dma_free_coherent(cdev->lldi.dev, fl->memsize, fl->desc, fl->dma_addr);
 
 	return ret;
 }
@@ -210,8 +210,10 @@ int cstor_create_rxq(struct cstor_ucontext *uctx, void __user *ubuf)
 	int flsize, iqsize;
 	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -299,16 +301,17 @@ int cstor_create_rxq(struct cstor_ucontext *uctx, void __user *ubuf)
 	uctx->key += PAGE_SIZE;
 	uresp.iq_key = uctx->key;
 	uctx->key += PAGE_SIZE;
-	uresp.fl_bar2_key = uctx->key;
+	uresp.fl_db_key = uctx->key;
 	uctx->key += PAGE_SIZE;
-	uresp.iq_bar2_key = uctx->key;
+	uresp.iq_gts_key = uctx->key;
 	uctx->key += PAGE_SIZE;
 	spin_unlock(&uctx->mmap_lock);
 
 	_uresp = &((struct cstor_create_rxq_cmd *)ubuf)->resp;
 	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
 	if (ret) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
 		ret = -EFAULT;
 		goto err7;
 	}
@@ -327,12 +330,12 @@ int cstor_create_rxq(struct cstor_ucontext *uctx, void __user *ubuf)
 	ret = cstor_get_db_gts_phys_addr(cdev, rxq->fl.cntxt_id, T4_BAR2_QTYPE_EGRESS, &bar2_qid,
 					 &db_gts_pa);
 	if (ret) {
-		cstor_err(cdev, "failed to get bar2 addr for rxq->fl.cntxt_id %u, ret %d\n",
-			  rxq->fl.cntxt_id, ret);
+		cstor_err(cdev, "failed to get doorbell phys addr for rxq->fl.cntxt_id %u,"
+			  "ret %d\n", rxq->fl.cntxt_id, ret);
 		goto err8;
 	}
 
-	fl_db_key_mm->key = uresp.fl_bar2_key;
+	fl_db_key_mm->key = uresp.fl_db_key;
 	fl_db_key_mm->addr = db_gts_pa;
 	fl_db_key_mm->vaddr = NULL;
 	fl_db_key_mm->len = PAGE_SIZE;
@@ -341,12 +344,12 @@ int cstor_create_rxq(struct cstor_ucontext *uctx, void __user *ubuf)
 	ret = cstor_get_db_gts_phys_addr(cdev, rxq->iq.cntxt_id, T4_BAR2_QTYPE_EGRESS, &bar2_qid,
 					 &db_gts_pa);
 	if (ret) {
-		cstor_err(cdev, "failed to get bar2 addr for rxq->iq.cntxt_id %u, ret %d\n",
+		cstor_err(cdev, "failed to get gts phys addr for rxq->iq.cntxt_id %u, ret %d\n",
 			  rxq->iq.cntxt_id, ret);
 		goto err9;
 	}
 
-	iq_db_key_mm->key = uresp.iq_bar2_key;
+	iq_db_key_mm->key = uresp.iq_gts_key;
 	iq_db_key_mm->addr = db_gts_pa;
 	iq_db_key_mm->vaddr = NULL;
 	iq_db_key_mm->len = PAGE_SIZE;
@@ -398,9 +401,12 @@ int cstor_destroy_rxq(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_rxq *rxq;
 	struct cstor_destroy_rxq_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 

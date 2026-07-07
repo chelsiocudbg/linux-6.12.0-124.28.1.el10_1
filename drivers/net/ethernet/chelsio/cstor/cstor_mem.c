@@ -33,7 +33,7 @@
 #include <linux/moduleparam.h>
 #include <linux/atomic.h>
 
-#include "umem.h"
+#include "cstor.h"
 
 #define CSTOR_INLINE_THRESHOLD 256
 #define CSTOR_PBL_ALIGNMENT 4
@@ -93,7 +93,8 @@ static int cstor_write_pbl_imm(struct cstor_mr *mr, u64 page_size, u32 len, void
 
 	ret = copy_to_user(usr_pbl, raw_pbl, i << 3);
 	if (ret) {
-		cstor_err(cdev, "copy_to_user() failed, i << 3 %d\n", i << 3);
+		cstor_err(cdev, "copy_to_user() failed, i << 3 %d, ret %d\n", i << 3, ret);
+		ret = -EFAULT;
 		goto err_free_raw_pbl;
 	}
 
@@ -174,13 +175,14 @@ cstor_write_pbl_dsgl(struct cstor_mr *mr, u64 page_size, u32 len, __u64 __user *
 
 	max_dma_len = min3(len, (u32)(PAGE_SIZE << order), cdev->max_dma_len);
 
-	daddr = dma_map_single(&cdev->lldi.pdev->dev, pages, max_dma_len, DMA_TO_DEVICE);
-	if (dma_mapping_error(&cdev->lldi.pdev->dev, daddr)) {
-		cstor_err(cdev, "dma_map_single() failed\n");
+	daddr = dma_map_single(cdev->lldi.dev, pages, max_dma_len, DMA_TO_DEVICE);
+	ret = dma_mapping_error(cdev->lldi.dev, daddr);
+	if (ret) {
+		cstor_err(cdev, "dma_map_single() failed, ret %d\n", ret);
 		goto err2;
 	}
 
-	dma_sync_single_for_cpu(&cdev->lldi.pdev->dev, daddr, max_dma_len, DMA_TO_DEVICE);
+	dma_sync_single_for_cpu(cdev->lldi.dev, daddr, max_dma_len, DMA_TO_DEVICE);
 
 	rdma_umem_for_each_dma_block(mr->umem, &biter, page_size) {
 		dma_addr_t dma_addr = rdma_block_iter_dma_address(&biter);
@@ -189,7 +191,7 @@ cstor_write_pbl_dsgl(struct cstor_mr *mr, u64 page_size, u32 len, __u64 __user *
 		pages[i++] = cpu_to_be64(dma_addr);
 
 		if (i == (max_dma_len / sizeof(*pages))) {
-			dma_sync_single_for_device(&cdev->lldi.pdev->dev, daddr,
+			dma_sync_single_for_device(cdev->lldi.dev, daddr,
 						   max_dma_len, DMA_TO_DEVICE);
 
 			ret = cstor_write_mem_dsgl(cdev, (mr->attr.pbl_addr + (n << 3)) >> 5,
@@ -202,13 +204,14 @@ cstor_write_pbl_dsgl(struct cstor_mr *mr, u64 page_size, u32 len, __u64 __user *
 				goto err3;
 			}
 
-			dma_sync_single_for_cpu(&cdev->lldi.pdev->dev, daddr,
+			dma_sync_single_for_cpu(cdev->lldi.dev, daddr,
 						max_dma_len, DMA_TO_DEVICE);
 
 			ret = copy_to_user(usr_pbl + n, raw_pbl, max_dma_len);
 			if (ret) {
-				cstor_err(cdev, "copy_to_user() failed, max_dma_len %u\n",
-					  max_dma_len);
+				cstor_err(cdev, "copy_to_user() failed, max_dma_len %u, ret %d\n",
+					  max_dma_len, ret);
+				ret = -EFAULT;
 				goto err3;
 			}
 
@@ -221,7 +224,7 @@ cstor_write_pbl_dsgl(struct cstor_mr *mr, u64 page_size, u32 len, __u64 __user *
 		while (i % CSTOR_PBL_ALIGNMENT)
 			pages[i++] = cpu_to_be64(0);
 
-		dma_sync_single_for_device(&cdev->lldi.pdev->dev, daddr, i << 3, DMA_TO_DEVICE);
+		dma_sync_single_for_device(cdev->lldi.dev, daddr, i << 3, DMA_TO_DEVICE);
 
 		ret = cstor_write_mem_dsgl(cdev, (mr->attr.pbl_addr + (n << 3)) >> 5,
 					   daddr, i << 3);
@@ -231,14 +234,16 @@ cstor_write_pbl_dsgl(struct cstor_mr *mr, u64 page_size, u32 len, __u64 __user *
 				  n, i, mr->attr.pbl_addr, daddr, ret);
 		} else {
 			ret = copy_to_user(usr_pbl + n, raw_pbl, i * sizeof(*usr_pbl));
-			if (ret)
-				cstor_err(cdev, "copy_to_user() failed, i %d "
-					  "usr_pbl size %zu\n", i, sizeof(*usr_pbl));
+			if (ret) {
+				cstor_err(cdev, "copy_to_user() failed, i %d usr_pbl size %zu "
+					  "ret %d\n", i, sizeof(*usr_pbl), ret);
+				ret = -EFAULT;
+			}
 		}
 	}
 
 err3:
-	dma_unmap_single(&cdev->lldi.pdev->dev, daddr, max_dma_len, DMA_TO_DEVICE);
+	dma_unmap_single(cdev->lldi.dev, daddr, max_dma_len, DMA_TO_DEVICE);
 err2:
 	free_pages((unsigned long)raw_pbl, order);
 err1:
@@ -290,8 +295,10 @@ int cstor_invalidate_iscsi_tag(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_iscsi_tag_info *tinfo;
 	int ret, i;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -429,8 +436,10 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 	u32 stag;
 	int acc, ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 
@@ -443,7 +452,7 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 		return -EINVAL;
 	}
 
-	pd = xa_load(&uctx->pds, cmd.pdid);
+	pd = xa_load(&cdev->pds, cmd.pdid);
 	if (!pd) {
 		cstor_err(cdev, "failed to find pd with pdid %u\n", cmd.pdid);
 		return -EINVAL;
@@ -473,26 +482,23 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	mr->umem = cstor_umem_get(cdev, start, length, acc);
 	if (IS_ERR(mr->umem)) {
-		cstor_err(cdev, "cstor_umem_get() failed, start %llu length %llu acc %d\n",
-			  start, length, acc);
-		ret = -ENOMEM;
+		ret = PTR_ERR(mr->umem);
+		cstor_err(cdev, "cstor_umem_get() failed, start %llu length %llu acc %d, ret %d\n",
+			  start, length, acc, ret);
 		goto err3;
 	}
 
-	page_size = cstor_umem_find_best_pgsz(mr->umem, T4_PAGE_SIZE_CAP, start);
+	page_size = ib_umem_find_best_pgsz(mr->umem, T4_PAGE_SIZE_CAP, start);
 	if (!page_size) {
-		cstor_err(cdev, "cstor_umem_find_best_pgsz() failed, start %llu\n", start);
+		cstor_err(cdev, "ib_umem_find_best_pgsz() failed, start %llu\n", start);
 		ret = -ENOTSUPP;
 		goto err4;
 	}
 
-	if ((__ffs64(page_size) - 12) > T6_MAX_PAGE_SIZE) {
-		cstor_err(cdev, "Invalid page_size %llu\n", page_size);
-		ret = -EINVAL;
-		goto err4;
-	}
+	npbls = ALIGN(ib_umem_num_dma_blocks(mr->umem, page_size), CSTOR_PBL_ALIGNMENT);
 
-	npbls = ALIGN(cstor_umem_num_dma_blocks(mr->umem, page_size), CSTOR_PBL_ALIGNMENT);
+	cstor_debug(cdev, "start %llu, length %llu, stag %u, page_size %llu, npbls %lu\n",
+		    start, length, stag, page_size, npbls);
 
 	ret = alloc_pbl(mr, npbls);
 	if (ret) {
@@ -515,7 +521,7 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	mr->attr.pdid = pd->pdid;
 	mr->attr.zbva = 0;
-	mr->attr.perms = cstor_ib_to_tpt_access(acc);
+	mr->attr.perms = cstor_get_tpt_access_perms(acc);
 	mr->attr.va_fbo = start;
 	mr->attr.page_size = __ffs64(page_size) - 12;
 	mr->attr.len = length;
@@ -538,8 +544,10 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 	_uresp = &((struct cstor_reg_mr_cmd *)ubuf)->resp;
 	ret = copy_to_user(_uresp, &uresp, sizeof(uresp));
 	if (ret) {
-		cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n", sizeof(uresp));
-		goto err5;
+		cstor_err(cdev, "copy_to_user() failed, uresp size %zu, ret %d\n",
+			  sizeof(uresp), ret);
+		__cstor_dereg_mr(mr);
+		return -EFAULT;
 	}
 
 	return 0;
@@ -547,7 +555,7 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 err5:
 	cstor_pblpool_free(cdev, mr->attr.pbl_addr, mr->attr.pbl_size << 3);
 err4:
-	cstor_umem_release(mr->umem);
+	cstor_umem_release(cdev, mr->umem);
 err3:
 	xa_erase(&cdev->mrs, stag >> 8);
 err2:
@@ -576,7 +584,7 @@ int __cstor_dereg_mr(struct cstor_mr *mr)
 		cstor_pblpool_free(cdev, mr->attr.pbl_addr, mr->attr.pbl_size << 3);
 
 	if (mr->umem)
-		cstor_umem_release(mr->umem);
+		cstor_umem_release(cdev, mr->umem);
 
 	kfree(mr);
 	return 0;
@@ -587,9 +595,12 @@ int cstor_dereg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 	struct cstor_device *cdev = uctx->cdev;
 	struct cstor_mr *mr;
 	struct cstor_dereg_mr_cmd cmd;
+	int ret;
 
-	if (copy_from_user(&cmd, ubuf, sizeof(cmd))) {
-		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu\n", sizeof(cmd));
+	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
+	if (ret) {
+		cstor_err(uctx->cdev, "copy_from_user() failed, cmd size %zu, ret %d\n",
+			  sizeof(cmd), ret);
 		return -EFAULT;
 	}
 

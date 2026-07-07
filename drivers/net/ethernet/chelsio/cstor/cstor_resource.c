@@ -36,7 +36,7 @@
 
 static int tcp_port_start = 40000;
 module_param(tcp_port_start, int, 0644);
-MODULE_PARM_DESC(tcp_port_start, "Starting value for TCP Port (default=40000");
+MODULE_PARM_DESC(tcp_port_start, "Starting value for TCP Port (default=40000)");
 
 static int tcp_port_max = 65536;
 module_param(tcp_port_max, int, 0644);
@@ -51,7 +51,7 @@ int cstor_init_resource(struct cstor_device *cdev, u32 nr_tpt)
 	ret = cxgb4_uld_alloc_id_table(&cdev->resource.tpt_table, 0, max_mr, 1,
 				       CXGB4_ID_TABLE_F_RANDOM);
 	if (ret) {
-		cstor_err(cdev, "failed to allocate tpt_table\n");
+		cstor_err(cdev, "failed to allocate tpt_table, ret %d\n", ret);
 		goto err1;
 	}
 
@@ -63,20 +63,22 @@ int cstor_init_resource(struct cstor_device *cdev, u32 nr_tpt)
 	ret = cxgb4_uld_alloc_id_table(&cdev->resource.qp_tag_table, 0, nr_qp_tag, 1,
 				       CXGB4_ID_TABLE_F_RANDOM);
 	if (ret) {
-		cstor_err(cdev, "failed to allocate qp_tag_table\n");
+		cstor_err(cdev, "failed to allocate qp_tag_table, ret %d\n", ret);
 		goto err2;
 	}
 
 	ret = cxgb4_uld_alloc_id_table(&cdev->resource.tcp_port_table, tcp_port_start,
 				       tcp_port_max, 0, 0);
 	if (ret) {
-		cstor_err(cdev, "failed to allocate tcp_port_table\n");
+		cstor_err(cdev, "failed to allocate tcp_port_table, ret %d\n", ret);
 		goto err3;
 	}
 
 	cdev->rdma_res = cxgb4_uld_init_rdma_resource(&cdev->lldi);
-	if (!cdev->rdma_res)
+	if (!cdev->rdma_res) {
+		ret = -ENOMEM;
 		goto err4;
+	}
 
 	return 0;
  err4:
@@ -86,7 +88,7 @@ int cstor_init_resource(struct cstor_device *cdev, u32 nr_tpt)
  err2:
 	cxgb4_uld_free_id_table(&cdev->resource.tpt_table);
  err1:
-	return -ENOMEM;
+	return ret;
 }
 
 void cstor_destroy_resource(struct cstor_device *cdev)

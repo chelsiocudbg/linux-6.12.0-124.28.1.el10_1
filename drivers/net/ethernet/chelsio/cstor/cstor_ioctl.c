@@ -244,8 +244,7 @@ int cstor_mmap(struct file *file, struct vm_area_struct *vma)
 		 * Map WQ or CQ dma memory...
 		 */
 		vma->vm_pgoff = 0;
-		ret = dma_mmap_coherent(&cdev->lldi.pdev->dev, vma, mm->vaddr, mm->dma_addr,
-					mm->len);
+		ret = dma_mmap_coherent(cdev->lldi.dev, vma, mm->vaddr, mm->dma_addr, mm->len);
 		vma->vm_pgoff = vm_pgoff;
 	} else {
 		/*
