@@ -6235,13 +6235,11 @@ int cxgb4_adap_probe(struct adapter *adapter)
 
 	for_each_port(adapter, i) {
 		/* For supporting MQPRIO Offload, need some extra
-		 * queues for each ETHOFLD TIDs. Keep it equal to
-		 * MAX_ATIDs for now. Once we connect to firmware
-		 * later and query the EOTID params, we'll come to
-		 * know the actual # of EOTIDs supported.
+		 * queues for each ETHOFLD TIDs.
 		 */
 		netdev = alloc_etherdev_mq(sizeof(struct port_info),
-					   MAX_ETH_QSETS + CXGB4_MAX_ATIDS);
+					   MAX_ETH_QSETS +
+					   adapter->tidinfo.uotids.size);
 		if (!netdev) {
 			err = -ENOMEM;
 			goto out_free_dev;
