@@ -1557,10 +1557,11 @@ static const struct file_operations mbox_debugfs_fops = {
 
 static int mps_trc_show(struct seq_file *seq, void *v)
 {
-	int enabled, i;
+	struct t4_linux_debugfs_data *d = seq->private;
+	struct adapter *adap = d->adap;
+	unsigned int trcidx = d->data;
 	struct trace_params tp;
-	unsigned int trcidx = (uintptr_t)seq->private & 3;
-	struct adapter *adap = seq->private - trcidx;
+	int enabled, i;
 
 	t4_get_trace_filter(adap, &tp, trcidx, &enabled);
 	if (!enabled) {
