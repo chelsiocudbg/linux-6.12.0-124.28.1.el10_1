@@ -2018,7 +2018,7 @@ struct fw_filter_wr;
 
 void t4_intr_enable(struct adapter *adapter);
 void t4_intr_disable(struct adapter *adapter);
-int t4_slow_intr_handler(struct adapter *adapter);
+int t4_slow_intr_handler(struct adapter *adapter, bool verbose);
 
 int t4_wait_dev_ready(void __iomem *regs);
 

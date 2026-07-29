@@ -856,7 +856,7 @@ static irqreturn_t t4_nondata_intr(int irq, void *cookie)
 		t4_write_reg(adap, MYPF_REG(PL_PF_INT_CAUSE_A), v);
 	}
 	if (adap->flags & CXGB4_MASTER_PF)
-		t4_slow_intr_handler(adap);
+		t4_slow_intr_handler(adap, true);
 	return IRQ_HANDLED;
 }
 
@@ -2439,6 +2439,7 @@ static int cxgb_up(struct adapter *adap)
 			err = -ENOMEM;
 			goto irq_err;
 		}
+
 		err = request_irq(adap->msix_info[s->nd_msix_idx].vec,
 				  t4_nondata_intr, 0,
 				  adap->msix_info[s->nd_msix_idx].desc, adap);
@@ -3556,7 +3557,7 @@ void t4_fatal_err(struct adapter *adap)
 		netif_tx_stop_all_queues(dev);
 		netif_carrier_off(dev);
 	}
-	dev_alert(adap->pdev_dev, "encountered fatal error, adapter stopped\n");
+	CH_ALERT(adap, "encountered fatal error, adapter stopped\n");
 	cxgb4_work_queue(adap->workq, &adap->fatal_err_notify_task);
 }
 

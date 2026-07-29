@@ -4068,7 +4068,7 @@ static irqreturn_t t4_intr_msi(int irq, void *cookie)
 	struct adapter *adap = cookie;
 
 	if (adap->flags & CXGB4_MASTER_PF)
-		t4_slow_intr_handler(adap);
+		t4_slow_intr_handler(adap, true);
 	process_intrq(adap);
 	return IRQ_HANDLED;
 }
@@ -4083,7 +4083,7 @@ static irqreturn_t t4_intr_intx(int irq, void *cookie)
 	struct adapter *adap = cookie;
 
 	t4_write_reg(adap, MYPF_REG(PCIE_PF_CLI_A), 0);
-	if (((adap->flags & CXGB4_MASTER_PF) && t4_slow_intr_handler(adap)) |
+	if (((adap->flags & CXGB4_MASTER_PF) && t4_slow_intr_handler(adap, true)) |
 	    process_intrq(adap))
 		return IRQ_HANDLED;
 	return IRQ_NONE;             /* probably shared interrupt */
@@ -5035,7 +5035,7 @@ void cxgb4_sge_txq_sync_pidx_locked(struct net_device *dev, struct sge_txq *q)
        q->db_pidx_inc = 0;
        spin_unlock_irqrestore(&q->db_lock, flags);
        if (ret)
-               CH_WARN(netdev2adap(dev), "DB drop recovery failed.\n");
+	       dev_warn(netdev2adap(dev)->pdev_dev, "DB drop recovery failed.\n");
 }
 
 void cxgb4_sge_txq_disable_db(struct sge_txq *q)

@@ -257,6 +257,9 @@ int clip_tbl_show(struct seq_file *seq, void *v)
 	char ip[60];
 	int i;
 
+	if (!ctbl)
+		return 0;
+
 	read_lock_bh(&ctbl->lock);
 
 	seq_puts(seq, "IP Address                  Users\n");
