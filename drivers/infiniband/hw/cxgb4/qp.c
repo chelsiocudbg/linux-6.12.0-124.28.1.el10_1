@@ -4774,15 +4774,16 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			/*
 			 * Allow kernel users to move to ERROR for qp draining.
 			 */
-			if (!internal && (qhp->ibqp.uobject || attrs.next_state !=
-						C4IW_QP_V2_STATE_ERROR)) {
+			if (!internal && attrs.next_state != C4IW_QP_V2_STATE_RESET &&
+			    (qhp->ibqp.uobject || attrs.next_state != C4IW_QP_V2_STATE_ERROR)) {
 				ret = -EINVAL;
 				goto out;
 			}
 			switch (attrs.next_state) {
+				case C4IW_QP_V2_STATE_RESET:
 				case C4IW_QP_V2_STATE_IDLE:
 					flush_qp(qhp);
-					set_v2_state(qhp, C4IW_QP_V2_STATE_IDLE);
+					set_v2_state(qhp, attrs.next_state);
 					wake_up(&qhp->wait);
 					break;
 				case C4IW_QP_V2_STATE_ERROR:
