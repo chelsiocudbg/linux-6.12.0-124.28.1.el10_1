@@ -435,6 +435,7 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 	size_t npbls;
 	u32 stag;
 	int acc, ret;
+	u8 flush_memwrites = 2;
 
 	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
 	if (ret) {
@@ -532,6 +533,15 @@ int cstor_reg_mr(struct cstor_ucontext *uctx, void __user *ubuf)
 	if (ret) {
 		cstor_err(cdev, "cstor_write_mem_tpte() failed, stag %u ret %d\n", stag, ret);
 		goto err5;
+	}
+
+	while (flush_memwrites--) {
+		ret = cstor_reset_mem_with_imm(cdev, cdev->lldi.vr->stag.start >> 5,
+					       sizeof(struct fw_ri_tpte));
+		if (ret) {
+			cstor_err(cdev, "flush memwrites failed, ret %d\n", ret);
+			goto err5;
+		}
 	}
 
 	mr->attr.state = 1;

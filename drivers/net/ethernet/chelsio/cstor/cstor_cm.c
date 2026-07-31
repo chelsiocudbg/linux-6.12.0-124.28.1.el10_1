@@ -459,7 +459,7 @@ void _cstor_free_listen_sock(struct kref *kref)
 {
 	struct cstor_device *cdev;
 	struct cstor_listen_sock *lcsk = container_of(kref, struct cstor_listen_sock, kref);
-	struct cstor_event_channel *event_channel = lcsk->event_channel;
+	int i;
 
 	cdev = lcsk->uctx->cdev;
 	if (lcsk->stid != CSTOR_INVALID_STID) {
@@ -479,9 +479,13 @@ void _cstor_free_listen_sock(struct kref *kref)
 	if (lcsk->destroy_skb)
 		kfree_skb(lcsk->destroy_skb);
 
-	if (event_channel) {
-		WARN_ON(kref_read(&event_channel->kref) < 1);
-		kref_put(&event_channel->kref, _cstor_free_event_channel);
+	for (i = 0; i < _CSTOR_MAX_PORTS; i++) {
+		struct cstor_event_channel *event_channel = lcsk->event_channel[i];
+
+		if (event_channel) {
+			WARN_ON(kref_read(&event_channel->kref) < 1);
+			kref_put(&event_channel->kref, _cstor_free_event_channel);
+		}
 	}
 
 	mutex_destroy(&lcsk->mutex);
@@ -1752,8 +1756,16 @@ static void pass_accept_req(struct cstor_device *cdev, struct sk_buff *skb)
 
 	mutex_lock(&lcsk->mutex);
 	if (!lcsk->listen) {
+		cstor_err(cdev, "lcsk stid %u, laddr %pISpc is not in listen state\n", stid,
+			  &lcsk->laddr);
 		mutex_unlock(&lcsk->mutex);
-		cstor_err(cdev, "stid %u listening csk not in LISTEN\n", stid);
+		goto reject;
+	}
+
+	if (!(lcsk->port_mask & (1 << port_id))) {
+		cstor_info(cdev, "connection rejected, stid %u laddr %pISpc, port mask %#x, "
+			   "syn port id %u\n", stid, &lcsk->laddr, lcsk->port_mask, port_id);
+		mutex_unlock(&lcsk->mutex);
 		goto reject;
 	}
 	mutex_unlock(&lcsk->mutex);
@@ -1799,7 +1811,16 @@ static void pass_accept_req(struct cstor_device *cdev, struct sk_buff *skb)
 		goto reject;
 	}
 
-	csk->event_channel = lcsk->event_channel;
+	mutex_lock(&lcsk->mutex);
+	if (!(lcsk->port_mask & (1 << csk->port_id))) {
+		cstor_info(cdev, "csk port id %u is not enabled in port mask %#x, tid %u, "
+			   "lcsk stid %u, laddr %pISpc, syn port id %u\n", csk->port_id,
+			   lcsk->port_mask, tid, stid, &lcsk->laddr, port_id);
+		mutex_unlock(&lcsk->mutex);
+		goto reject;
+	}
+	mutex_unlock(&lcsk->mutex);
+
 	csk->state = CSTOR_SOCK_STATE_CONNECTING;
 
 	csk->tid = tid;
@@ -1807,6 +1828,8 @@ static void pass_accept_req(struct cstor_device *cdev, struct sk_buff *skb)
 	cxgb4_uld_tid_qid_sel_update(cdev->lldi.ports[csk->port_id], CXGB4_ULD_TYPE_CSTOR,
 				     tid, &csk->txq_idx);
 
+	csk->event_channel = lcsk->invalid_port_id ? lcsk->event_channel[0] :
+			     lcsk->event_channel[csk->port_id];
 	kref_get(&csk->event_channel->kref);
 
 	hdrs = cstor_get_hdr_size(csk, (enable_tcp_timestamps && req->tcpopt.tstamp));
@@ -2609,14 +2632,15 @@ static int destroy_listen(struct cstor_listen_sock *lcsk)
 int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 {
 	struct cstor_device *cdev = uctx->cdev;
-	struct cstor_listen_sock *lcsk;
+	struct cstor_listen_sock *lcsk = NULL;
 	struct cstor_create_listen_cmd cmd;
 	struct cstor_create_listen_resp uresp;
+	struct cstor_event_channel *event_channel;
 	void __user *_ubuf;
+	unsigned long index;
 	int ret;
 	u16 lport;
 	u8 port_id;
-	bool inaddr_any;
 
 	ret = copy_from_user(&cmd, ubuf, sizeof(cmd));
 	if (ret) {
@@ -2634,6 +2658,116 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	if (!cmd.first_pdu_recv_timeout) {
 		cstor_err(cdev, "first_pdu_recv_timeout value not present\n");
 		return -EINVAL;
+	}
+
+	if (cmd.port_id == _CSTOR_INVALID_PORT_ID) {
+		if (!cmd.inaddr_any) {
+			cstor_err(cdev, "invalid port id %u, cmd.inaddr_any %u\n", cmd.port_id,
+				  cmd.inaddr_any);
+			return -EINVAL;
+		}
+	} else if (cmd.port_id >= cdev->lldi.nports) {
+		cstor_err(cdev, "invalid port id %u, cdev num ports %u\n", cmd.port_id,
+			  cdev->lldi.nports);
+		return -EINVAL;
+	}
+
+	event_channel = xa_load(&uctx->event_channels, cmd.efd);
+	if (!event_channel) {
+		cstor_err(cdev, "invalid event fd %u\n", cmd.efd);
+		return -EINVAL;
+	}
+
+	xa_lock(&cdev->stids);
+	if (cmd.ipv4) {
+		struct sockaddr_in *sin;
+
+		xa_for_each_marked(&cdev->stids, index, lcsk, CSTOR_IPV4_LISTEN_SOCK) {
+			sin = (struct sockaddr_in *)&lcsk->laddr;
+
+			if (sin->sin_port != cmd.tcp_port)
+				continue;
+
+			if (sin->sin_addr.s_addr == cmd.ip_addr[0]) {
+				if (!cmd.inaddr_any) {
+					cstor_err(cdev, "server exists with %pISpc\n", sin);
+					xa_unlock(&cdev->stids);
+					return -EEXIST;
+				}
+				break;
+			} else if (sin->sin_addr.s_addr == cpu_to_be32(INADDR_ANY) ||
+				   cmd.inaddr_any) {
+				cstor_err(cdev, "server exists with port %u\n", cmd.tcp_port);
+				xa_unlock(&cdev->stids);
+				return -EEXIST;
+			}
+		}
+	} else {
+		struct sockaddr_in6 *sin6;
+
+		xa_for_each_marked(&cdev->stids, index, lcsk, CSTOR_IPV6_LISTEN_SOCK) {
+			sin6 = (struct sockaddr_in6 *)&lcsk->laddr;
+
+			if (sin6->sin6_port != cmd.tcp_port)
+				continue;
+
+			if (ipv6_addr_equal(&sin6->sin6_addr, (struct in6_addr *)&cmd.ip_addr)) {
+				if (!cmd.inaddr_any) {
+					cstor_err(cdev, "server exists with %pISpc\n", sin6);
+					xa_unlock(&cdev->stids);
+					return -EEXIST;
+				}
+				break;
+			} else if (ipv6_addr_any((struct in6_addr *)&sin6->sin6_addr) ||
+				   cmd.inaddr_any) {
+				cstor_err(cdev, "server exists with port %u\n", cmd.tcp_port);
+				xa_unlock(&cdev->stids);
+				return -EEXIST;
+			}
+		}
+	}
+
+	if (lcsk && !lcsk->listen) {
+		cstor_info(cdev, "lcsk stid %u, laddr %pISpc, not in listen state, "
+			   "cmd.port_id %u\n", lcsk->stid, &lcsk->laddr, cmd.port_id);
+		xa_unlock(&cdev->stids);
+		return -EBUSY;
+	}
+
+	xa_unlock(&cdev->stids);
+
+	if (lcsk) {
+		if (cmd.port_id == _CSTOR_INVALID_PORT_ID) {
+			cstor_err(cdev, "invalid port id %u, lcsk stid %u, laddr %pISpc, "
+				  "port mask %#x\n", cmd.port_id, lcsk->stid, &lcsk->laddr,
+				  lcsk->port_mask);
+			return -EINVAL;
+		}
+
+		if (lcsk->port_mask & (1 << cmd.port_id)) {
+			cstor_err(cdev, "port id %u already enabled in port mask %#x, "
+				  "lcsk stid %u, laddr %pISpc\n", cmd.port_id, lcsk->port_mask,
+				  lcsk->stid, &lcsk->laddr);
+			return -EEXIST;
+		}
+
+		_ubuf = &((struct cstor_create_listen_cmd *)ubuf)->resp;
+		uresp.stid = lcsk->stid;
+		if (copy_to_user(_ubuf, &uresp, sizeof(uresp))) {
+			cstor_err(cdev, "copy_to_user() failed, uresp size %zu\n",
+				  sizeof(uresp));
+			return -EFAULT;
+		}
+
+		lcsk->event_channel[cmd.port_id] = event_channel;
+		kref_get(&event_channel->kref);
+
+		mutex_lock(&lcsk->mutex);
+		lcsk->port_mask |= (1 << cmd.port_id);
+		lcsk->port_mask |= (1 << (cmd.port_id + CSTOR_LOOPBACK_PORT_SHIFT));
+		mutex_unlock(&lcsk->mutex);
+
+		return 0;
 	}
 
 	lcsk = kzalloc(sizeof(*lcsk), GFP_KERNEL);
@@ -2658,31 +2792,27 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	lcsk->protocol = cmd.protocol;
 	lcsk->first_pdu_recv_timeout = cmd.first_pdu_recv_timeout;
 
-	lcsk->event_channel = xa_load(&uctx->event_channels, cmd.efd);
-	if (!lcsk->event_channel) {
-		cstor_err(cdev, "invalid event file descriptor cmd.efd %u\n", cmd.efd);
-		ret = -EBADF;
-		goto err;
-	}
-
-	kref_get(&lcsk->event_channel->kref);
-
 	if (cmd.ipv4) {
 		struct sockaddr_in *sin = (struct sockaddr_in *)&lcsk->laddr;
 
 		cstor_fill_sockaddr_in(sin, cmd.ip_addr[0], cmd.tcp_port);
-		inaddr_any = (sin->sin_addr.s_addr == cpu_to_be32(INADDR_ANY));
 	} else {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&lcsk->laddr;
 
 		cstor_fill_sockaddr_in6(sin6, cmd.ip_addr, cmd.tcp_port);
-		inaddr_any = ipv6_addr_any(&sin6->sin6_addr);
 	}
 
 	lport = be16_to_cpu(cmd.tcp_port);
 
-	if (inaddr_any) {
-		port_id = _CSTOR_LCSK_INADDR_ANY_PORT_ID;
+	if (cmd.inaddr_any) {
+		if (cmd.port_id == _CSTOR_INVALID_PORT_ID) {
+			lcsk->port_mask = (1 << cdev->lldi.nports) - 1;
+			lcsk->port_mask |= (lcsk->port_mask << CSTOR_LOOPBACK_PORT_SHIFT);
+		} else {
+			lcsk->port_mask = 1 << cmd.port_id;
+			lcsk->port_mask |= (1 << (cmd.port_id + CSTOR_LOOPBACK_PORT_SHIFT));
+		}
+		lcsk->inaddr_any = true;
 	} else {
 		struct net_device *ndev;
 
@@ -2703,6 +2833,15 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 				  &lcsk->laddr, ret);
 			goto err;
 		}
+
+		if (port_id != cmd.port_id) {
+			cstor_err(cdev, "port_id mismatch cmd.port_id %u, expected port id %u, "
+				  "laddr %pISpc\n", cmd.port_id, port_id, &lcsk->laddr);
+			goto err;
+		}
+
+		lcsk->port_mask = 1 << port_id;
+		lcsk->port_mask |= (1 << (port_id + CSTOR_LOOPBACK_PORT_SHIFT));
 	}
 
 	ret = cxgb4_uld_stid_alloc(cdev->lldi.ports[0], lcsk->laddr.ss_family, lcsk);
@@ -2723,7 +2862,19 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 		lcsk->stid = CSTOR_INVALID_STID;
 		goto err;
 	}
+
+	__xa_set_mark(&cdev->stids, lcsk->stid,
+		      cmd.ipv4 ? CSTOR_IPV4_LISTEN_SOCK : CSTOR_IPV6_LISTEN_SOCK);
 	xa_unlock(&cdev->stids);
+
+	if (cmd.port_id == _CSTOR_INVALID_PORT_ID) {
+		lcsk->event_channel[0] = event_channel;
+		lcsk->invalid_port_id = true;
+	} else {
+		lcsk->event_channel[cmd.port_id] = event_channel;
+	}
+
+	kref_get(&event_channel->kref);
 
 	atomic_inc(&uctx->num_lcsk);
 
@@ -2746,7 +2897,6 @@ int cstor_create_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 
 	_ubuf = &((struct cstor_create_listen_cmd *)ubuf)->resp;
 	uresp.stid = lcsk->stid;
-	uresp.port_id = port_id;
 
 	ret = copy_to_user(_ubuf, &uresp, sizeof(uresp));
 	if (ret) {
@@ -2770,9 +2920,9 @@ err:
 	return ret;
 }
 
-static void remove_pending_connect_event(struct cstor_listen_sock *lcsk)
+static void remove_pending_connect_event(struct cstor_listen_sock *lcsk,
+					 struct cstor_event_channel *event_channel)
 {
-	struct cstor_event_channel *event_channel = lcsk->event_channel;
 	struct cstor_uevent_node *uevt_node, *tmp;
 	struct cstor_uevent *uevt;
 	struct cstor_sock *csk;
@@ -2780,7 +2930,9 @@ static void remove_pending_connect_event(struct cstor_listen_sock *lcsk)
 	mutex_lock(&event_channel->uevt_list_lock);
 	list_for_each_entry_safe(uevt_node, tmp, &event_channel->uevt_list, entry) {
 		uevt = &uevt_node->uevt;
-		if (uevt->event == CSTOR_UEVENT_CONNECT_REQ) {
+		if (uevt->event == CSTOR_UEVENT_CONNECT_REQ &&
+		    uevt->u.req.stid == lcsk->stid &&
+		    !(lcsk->port_mask & (1 << uevt->u.req.conn_info.port_id))) {
 			csk = get_sock_from_tid(lcsk->uctx->cdev, uevt->u.req.tid);
 			cstor_free_uevent_node(uevt_node);
 			cstor_sock_disconnect(csk);
@@ -2794,11 +2946,27 @@ static void remove_pending_connect_event(struct cstor_listen_sock *lcsk)
 static int __cstor_destroy_listen(struct cstor_listen_sock *lcsk)
 {
 	struct cstor_ucontext *uctx = lcsk->uctx;
-	int ret;
+	int ret, i;
 
 	mutex_lock(&lcsk->mutex);
 	lcsk->listen = false;
-	remove_pending_connect_event(lcsk);
+	if (lcsk->port_mask) {
+		if (lcsk->invalid_port_id) {
+			remove_pending_connect_event(lcsk, lcsk->event_channel[0]);
+			kref_put(&lcsk->event_channel[0]->kref, _cstor_free_event_channel);
+			lcsk->event_channel[0] = NULL;
+		} else {
+			for (i = 0; i < _CSTOR_MAX_PORTS; i++) {
+				if (lcsk->port_mask & (1 << i)) {
+					remove_pending_connect_event(lcsk, lcsk->event_channel[i]);
+					kref_put(&lcsk->event_channel[i]->kref,
+						 _cstor_free_event_channel);
+					lcsk->event_channel[i] = NULL;
+				}
+			}
+		}
+		lcsk->port_mask = 0;
+	}
 	mutex_unlock(&lcsk->mutex);
 
 	ret = destroy_listen(lcsk);
@@ -2835,8 +3003,30 @@ int cstor_destroy_listen(struct cstor_ucontext *uctx, void __user *ubuf)
 	}
 
 	if (!lcsk->listen) {
-		cstor_err(cdev, "stid %u, listening csk not in LISTEN\n", cmd.stid);
+		cstor_err(cdev, "lcsk stid %u, laddr %pISpc is not in listen state\n", cmd.stid,
+			  &lcsk->laddr);
 		return -EINVAL;
+	}
+
+	if (!lcsk->invalid_port_id && !(lcsk->port_mask & (1 << cmd.port_id))) {
+		cstor_err(cdev, "invalid port id %u, lcsk stid %u, laddr %pISpc, "
+			  "port mask %#x\n", cmd.port_id, lcsk->stid, &lcsk->laddr,
+			  lcsk->port_mask);
+		return -EINVAL;
+	}
+
+	if (lcsk->inaddr_any && !lcsk->invalid_port_id) {
+		mutex_lock(&lcsk->mutex);
+		lcsk->port_mask &= ~(1U << cmd.port_id);
+		lcsk->port_mask &= ~(1U << (cmd.port_id + CSTOR_LOOPBACK_PORT_SHIFT));
+		remove_pending_connect_event(lcsk, lcsk->event_channel[cmd.port_id]);
+		kref_put(&lcsk->event_channel[cmd.port_id]->kref, _cstor_free_event_channel);
+		lcsk->event_channel[cmd.port_id] = NULL;
+		if (lcsk->port_mask) {
+			mutex_unlock(&lcsk->mutex);
+			return 0;
+		}
+		mutex_unlock(&lcsk->mutex);
 	}
 
 	return __cstor_destroy_listen(lcsk);
@@ -3200,8 +3390,16 @@ static void nvmt_cmp(struct cstor_device *cdev, struct sk_buff *skb)
 	lcsk = csk->lcsk;
 	mutex_lock(&lcsk->mutex);
 	if (!lcsk->listen) {
-		cstor_err(cdev, "tid %u, lcsk listen is not listening, port id %u\n",
-			  tid, csk->port_id);
+		cstor_err(cdev, "tid %u, lcsk stid %u, laddr %pISpc is not in listen state\n",
+			  tid, lcsk->stid, &lcsk->laddr);
+		mutex_unlock(&lcsk->mutex);
+		goto err;
+	}
+
+	if (!(lcsk->port_mask & (1 << csk->port_id))) {
+		cstor_info(cdev, "tid %u, port id %u is not enabled in port mask %#x, "
+			   "lcsk stid %u laddr %pISpc", tid, csk->port_id, lcsk->port_mask,
+			   lcsk->stid, &lcsk->laddr);
 		mutex_unlock(&lcsk->mutex);
 		goto err;
 	}
@@ -3296,8 +3494,16 @@ static void rx_iscsi_cmp(struct cstor_device *cdev, struct sk_buff *skb)
 	lcsk = csk->lcsk;
 	mutex_lock(&lcsk->mutex);
 	if (!lcsk->listen) {
-		cstor_err(cdev, "tid %u, lcsk listen is not listening, port id %u\n",
-			  tid, csk->port_id);
+		cstor_err(cdev, "tid %u, lcsk stid %u, laddr %pISpc is not in listen state\n",
+			  tid, lcsk->stid, &lcsk->laddr);
+		mutex_unlock(&lcsk->mutex);
+		goto err;
+	}
+
+	if (!(lcsk->port_mask & (1 << csk->port_id))) {
+		cstor_info(cdev, "tid %u, port id %u is not enabled in port mask %#x, "
+			   "lcsk stid %u laddr %pISpc", tid, csk->port_id, lcsk->port_mask,
+			   lcsk->stid, &lcsk->laddr);
 		mutex_unlock(&lcsk->mutex);
 		goto err;
 	}

@@ -32,7 +32,7 @@
 #ifndef __CSTOR_IOCTL_H__
 #define __CSTOR_IOCTL_H__
 
-#define CSTOR_MODULE_VERSION	"2.0.0"
+#define CSTOR_MODULE_VERSION	"2.1.0"
 #define CSTOR_MAX_ADAPTERS 64
 
 #define CSTOR_DRIVER_NAME "cstor"
@@ -376,14 +376,15 @@ enum _cstor_transport_protocol {
 
 struct cstor_create_listen_resp {
 	__u32 stid;
-	__u8 port_id;
 };
 
-#define _CSTOR_LCSK_INADDR_ANY_PORT_ID 0xFF
+#define _CSTOR_INVALID_PORT_ID 0xff
 
 struct cstor_create_listen_cmd {
 	__u8 ipv4;
 	__u8 protocol;
+	__u8 inaddr_any;
+	__u8 port_id;
 	__be16 tcp_port;
 	__be32 ip_addr[4];
 	__u32 backlog;
@@ -397,6 +398,7 @@ _IOWR(CSTOR_IOCTL_MAGIC, CSTOR_IOCTL_CMD_CREATE_LISTEN, struct cstor_create_list
 
 struct cstor_destroy_listen_cmd {
 	__u32 stid;
+	__u8 port_id;
 };
 
 #define CSTOR_IOCTL_DESTROY_LISTEN    \
@@ -546,7 +548,6 @@ struct cstor_uevent {
 		struct _cstor_connect_rpl rpl;
 		struct _cstor_iscsi_pdu_info pdu_info;
 		__u32 tid;
-		__u8 port_id;
 	} u;
 };
 

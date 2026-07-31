@@ -570,10 +570,14 @@ struct cstor_event_channel {
 };
 
 #define CSTOR_INVALID_STID 0xFFFFFFFF
+#define CSTOR_LOOPBACK_PORT_SHIFT 4
+
+#define CSTOR_IPV4_LISTEN_SOCK XA_MARK_0
+#define CSTOR_IPV6_LISTEN_SOCK XA_MARK_1
 
 struct cstor_listen_sock {
 	struct cstor_ucontext *uctx;
-	struct cstor_event_channel *event_channel;
+	struct cstor_event_channel *event_channel[_CSTOR_MAX_PORTS];
 	struct mutex mutex;
 	struct sockaddr_storage laddr;
 	struct cstor_wr_wait wr_wait;
@@ -582,8 +586,11 @@ struct cstor_listen_sock {
 	u32 stid;
 	u32 first_pdu_recv_timeout;
 	u8 protocol;
-	u8 clip_release:1;
+	u8 port_mask;
 	u8 listen:1;
+	u8 inaddr_any:1;
+	u8 invalid_port_id:1;
+	u8 clip_release:1;
 	u8 app_close:1;
 };
 
