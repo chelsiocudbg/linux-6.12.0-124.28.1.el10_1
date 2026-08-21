@@ -437,7 +437,7 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 
 	struct c4iw_dev *dev = to_c4iw_dev(ibdev);
 	u32 chip_ver = CHELSIO_CHIP_VERSION(dev->rdev.lldi.adapter_type);
-
+	u8 roce_prot = roce_mode && (chip_ver >= CHELSIO_T7);
 
 	pr_debug("ibdev %p\n", ibdev);
 
@@ -460,10 +460,13 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 	props->max_srq = dev->rdev.lldi.vr->srq.size;
 	props->max_qp_wr = dev->rdev.hw_queue.t4_max_qp_depth;
 	props->max_srq_wr = dev->rdev.hw_queue.t4_max_qp_depth;
-	props->max_send_sge = min(T4_MAX_SEND_SGE, T4_MAX_WRITE_SGE);
+	if (roce_prot)
+		props->max_send_sge = min(T4_V2_MAX_SEND_SGE, T4_V2_MAX_WRITE_SGE);
+	else
+		props->max_send_sge = min(T4_MAX_SEND_SGE, T4_MAX_WRITE_SGE);
 	props->max_recv_sge = T4_MAX_RECV_SGE;
 	props->max_srq_sge = T4_MAX_RECV_SGE;
-	props->max_sge_rd = (roce_mode && (chip_ver >= CHELSIO_T7)) ? T7_MAX_RD_SGE : 1;
+	props->max_sge_rd = roce_prot ? T7_MAX_RD_SGE : 1;
 	props->max_res_rd_atom = dev->rdev.lldi.max_ird_adapter;
 	props->max_qp_rd_atom = min(dev->rdev.lldi.max_ordird_qp,
 				    c4iw_max_read_depth);

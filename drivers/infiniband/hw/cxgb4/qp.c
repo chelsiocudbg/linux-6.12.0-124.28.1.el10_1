@@ -1330,7 +1330,7 @@ static int build_rdma_write(struct t4_sq *sq, union t4_wr *wqe,
 	int size;
 	int ret;
 
-	if (wr->num_sge > T4_MAX_SEND_SGE)
+	if (wr->num_sge > T4_MAX_WRITE_SGE)
 		return -EINVAL;
 
 	/*
@@ -1524,10 +1524,12 @@ static int build_memreg(struct t4_sq *sq, union t4_wr *wqe,
 			u8 *len16, bool dsgl_supported)
 {
 	struct fw_ri_immd *imdp;
-	__be64 *p;
-	int i;
 	int pbllen = roundup(mhp->mpl_len * sizeof(u64), 32);
-	int rem;
+	int max_immd = min(max_fr_immd,
+			   CHELSIO_CHIP_VERSION(mhp->rhp->rdev.lldi.adapter_type) < CHELSIO_T7 ?
+			   T6_ULP_TX_MAX_IMM : T7_ULP_TX_MAX_IMM);
+	int rem, i;
+	__be64 *p;
 
 	if (mhp->mpl_len > t4_max_fr_depth(&mhp->rhp->rdev, use_dsgl))
 		return -EINVAL;
@@ -1543,7 +1545,7 @@ static int build_memreg(struct t4_sq *sq, union t4_wr *wqe,
 	wqe->fr.va_lo_fbo = cpu_to_be32(mhp->ibmr.iova &
 					0xffffffff);
 
-	if (dsgl_supported && use_dsgl && (pbllen > max_fr_immd)) {
+	if (dsgl_supported && use_dsgl && (pbllen > max_immd)) {
 		struct fw_ri_dsgl *sglp;
 
 		for (i = 0; i < mhp->mpl_len; i++)
@@ -1808,7 +1810,7 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 			wr->send_flags & IB_SEND_INLINE ? "true" : "false",
 			wr->send_flags & IB_SEND_SOLICITED ? "true" : "false");
 
-	if (wr->num_sge > T4_MAX_SEND_SGE)
+	if (wr->num_sge > T4_V2_MAX_SEND_SGE)
 		return -EINVAL;
 
 	switch (wr->opcode) {
@@ -1907,7 +1909,7 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 	if (wr->num_sge) {
 		if (wr->send_flags & IB_SEND_INLINE) {
 			ret = build_immd(sq, immd_src, wr,
-					T4_MAX_SEND_INLINE, &plen);
+					 T4_V2_MAX_SEND_INLINE, &plen);
 			if (ret)
 				return ret;
 			size = sizeof wqe->v2_ud_send + roundup(hdr_len, 16) +
@@ -1951,7 +1953,7 @@ static int build_v2_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 	int size;
 	int ret;
 
-	if (wr->num_sge > T4_MAX_SEND_SGE)
+	if (wr->num_sge > T4_V2_MAX_SEND_SGE)
 		return -EINVAL;
 	switch (wr->opcode) {
 		case IB_WR_SEND:
@@ -1986,7 +1988,7 @@ static int build_v2_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 	if (wr->num_sge) {
 		if (wr->send_flags & IB_SEND_INLINE) {
 			ret = build_immd(sq, wqe->v2_send.u.immd_src, wr,
-					T4_MAX_SEND_INLINE, &plen);
+					T4_V2_MAX_SEND_INLINE, &plen);
 			if (ret)
 				return ret;
 			size = sizeof wqe->v2_send + sizeof(struct fw_ri_immd) +
@@ -2029,7 +2031,7 @@ static int build_v2_rdma_write(struct c4iw_qp *qhp, union t4_wr *wqe,
 	int size;
 	int ret;
 
-	if (wr->num_sge > T4_MAX_SEND_SGE)
+	if (wr->num_sge > T4_V2_MAX_WRITE_SGE)
 		return -EINVAL;
 	if (wr->opcode == IB_WR_RDMA_WRITE_WITH_IMM)
 		wqe->v2_write.immd_data = wr->ex.imm_data;
@@ -2040,7 +2042,7 @@ static int build_v2_rdma_write(struct c4iw_qp *qhp, union t4_wr *wqe,
 	if (wr->num_sge) {
 		if (wr->send_flags & IB_SEND_INLINE) {
 			ret = build_immd(sq, wqe->v2_write.u.immd_src, wr,
-					T4_MAX_WRITE_INLINE, &plen);
+					T4_V2_MAX_WRITE_INLINE, &plen);
 			if (ret)
 				return ret;
 			size = sizeof wqe->v2_write + sizeof(struct fw_ri_immd) +
@@ -2126,6 +2128,9 @@ static int build_v2_memreg(struct t4_sq *sq, union t4_wr *wqe,
 	__be64 *p;
 	int i;
 	int pbllen = roundup(mhp->mpl_len * sizeof(u64), 32);
+	int max_immd = min(max_fr_immd,
+			  CHELSIO_CHIP_VERSION(mhp->rhp->rdev.lldi.adapter_type) < CHELSIO_T7 ?
+			  T6_ULP_TX_MAX_IMM : T7_ULP_TX_MAX_IMM);
 	int rem;
 
 	if (mhp->mpl_len > t4_max_fr_depth(&mhp->rhp->rdev, use_dsgl))
@@ -2144,7 +2149,7 @@ static int build_v2_memreg(struct t4_sq *sq, union t4_wr *wqe,
 	wqe->v2_fr.va_lo_fbo = cpu_to_be32(mhp->ibmr.iova &
 			0xffffffff);
 
-	if (dsgl_supported && use_dsgl && (pbllen > max_fr_immd)) {
+	if (dsgl_supported && use_dsgl && (pbllen > max_immd)) {
 		struct fw_ri_dsgl *sglp;
 
 		for (i = 0; i < mhp->mpl_len; i++)
@@ -4966,17 +4971,19 @@ static int c4iw_validate_qp_attrs(struct c4iw_dev *rhp,
 		struct ib_qp_init_attr *attrs,
 		struct ib_udata *udata)
 {
-	if (attrs->cap.max_inline_data > T4_MAX_SEND_INLINE)
-		return -EINVAL;
 
 	if (rdma_protocol_roce(&rhp->ibdev, 1)) {
 		if (attrs->qp_type != IB_QPT_RC &&
 				attrs->qp_type != IB_QPT_UD &&
 				attrs->qp_type != IB_QPT_GSI)
 			return -EOPNOTSUPP;
+		if (attrs->cap.max_inline_data > T4_V2_MAX_SEND_INLINE)
+			return -EINVAL;
 	} else {
 		if (attrs->qp_type != IB_QPT_RC)
 			return -EOPNOTSUPP;
+		if (attrs->cap.max_inline_data > T4_MAX_SEND_INLINE)
+			return -EINVAL;
 	}
 
 	if (!attrs->srq) {
@@ -5132,7 +5139,8 @@ static int create_rc_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 
 	attrs->cap.max_recv_wr = rqsize - 1;
 	attrs->cap.max_send_wr = sqsize - 1;
-	attrs->cap.max_inline_data = T4_MAX_SEND_INLINE;
+	attrs->cap.max_inline_data = rdma_protocol_roce(&rhp->ibdev, 1) ?
+					T4_V2_MAX_SEND_INLINE : T4_MAX_SEND_INLINE;
 
 	qhp->rhp = rhp;
 	qhp->attr.pd = php->pdid;
@@ -5910,16 +5918,17 @@ int c4iw_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		attr->qp_state = v2_to_ib_qp_state(qhp->attr.state);
 		pr_debug("ibqp 0x%llx attr->qp_state %d\n",
 				(unsigned long long)ibqp, attr->qp_state);
+		init_attr->cap.max_inline_data = T4_V2_MAX_SEND_INLINE;
 	} else {
 		attr->qp_state = to_ib_qp_state(qhp->attr.state);
 		pr_debug("ibqp 0x%llx attr->qp_state %d\n",
 				(unsigned long long)ibqp, attr->qp_state);
+		init_attr->cap.max_inline_data = T4_MAX_SEND_INLINE;
 	}
 	init_attr->cap.max_send_wr = qhp->attr.sq_num_entries;
 	init_attr->cap.max_recv_wr = qhp->attr.rq_num_entries;
 	init_attr->cap.max_send_sge = qhp->attr.sq_max_sges;
 	init_attr->cap.max_recv_sge = qhp->attr.rq_max_sges;
-	init_attr->cap.max_inline_data = T4_MAX_SEND_INLINE;
 	init_attr->sq_sig_type = qhp->sq_sig_all ? IB_SIGNAL_ALL_WR : 0;
 	return 0;
 }

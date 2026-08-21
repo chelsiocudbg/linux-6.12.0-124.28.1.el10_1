@@ -5615,6 +5615,9 @@ static void print_adapter_info(struct adapter *adapter)
 		 cxgb4_msix_enabled(adapter) ? "MSI-X" :
 		 (cxgb4_msi_enabled(adapter) ? "MSI" : ""),
 		 cxgb4_uld_supported_any(adapter) ? "Offload" : "non-Offload");
+
+	dev_info(adapter->pdev_dev, "Number of cores enabled: %u \n",
+		 adapter->params.num_up_cores);
 }
 
 static void print_port_info(const struct net_device *dev)
