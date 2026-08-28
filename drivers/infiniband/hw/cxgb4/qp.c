@@ -2866,6 +2866,24 @@ int c4iw_post_receive(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 	return ret;
 }
 
+static void copy_wr_to_sq(struct t4_wq *wq, union t4_wr *wqe, u8 len16)
+{
+	u64 *src, *dst;
+
+	src = (u64 *)wqe;
+	dst = (u64 *)((u8 *)wq->sq.queue + wq->sq.wq_pidx * T4_EQ_ENTRY_SIZE);
+
+	while (len16) {
+		*dst++ = *src++;
+		if (dst == (u64 *)&wq->sq.queue[wq->sq.size])
+			dst = (u64 *)wq->sq.queue;
+		*dst++ = *src++;
+		if (dst == (u64 *)&wq->sq.queue[wq->sq.size])
+			dst = (u64 *)wq->sq.queue;
+		len16--;
+	}
+}
+
 static int roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		const struct ib_send_wr **bad_wr)
 {
@@ -2874,7 +2892,7 @@ static int roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	enum fw_wr_opcodes fw_opcode = 0;
 	enum fw_ri_wr_flags fw_flags;
 	struct c4iw_qp *qhp;
-	union t4_wr *wqe = NULL;
+	union t4_wr *wqe = NULL, lwqe;
 	u32 num_wrs;
 	struct t4_swsqe *swsqe;
 	unsigned long flag;
@@ -2928,6 +2946,8 @@ static int roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 				fw_opcode = FW_RI_V2_SEND_WR;
 				if (qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD) {
 					swsqe->opcode = FW_RI_SEND;
+					memset(&lwqe, 0, sizeof(lwqe));
+					wqe = &lwqe;
 					err = build_v2_ud_rdma_send(qhp, wqe, wr, &len16);
 				} else {
 					if (wr->opcode == IB_WR_SEND)
@@ -3019,6 +3039,8 @@ static int roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		init_wr_hdr(wqe, qhp->wq.sq.pidx, fw_opcode, fw_flags, len16);
 		wr = wr->next;
 		num_wrs--;
+		if (qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD)
+			copy_wr_to_sq(&qhp->wq, wqe, len16);
 		t4_sq_produce(&qhp->wq, len16);
 		pr_debug("qid %u in_use %u\n", qhp->wq.sq.qid, qhp->wq.sq.in_use);
 		idx += DIV_ROUND_UP(len16*16, T4_EQ_ENTRY_SIZE);

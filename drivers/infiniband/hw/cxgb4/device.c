@@ -368,6 +368,13 @@ static int qp_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/*
+ * Maximum bytes/characters printed per QP entry in the debugfs qp dump.
+ * 224 in worst case scenerio.
+ * Bump this if the per-entry print format grows.
+ */
+#define QP_SIZE 224
+
 static int qp_open(struct inode *inode, struct file *file)
 {
 	struct c4iw_qp *qp;
@@ -389,7 +396,7 @@ static int qp_open(struct inode *inode, struct file *file)
 	xa_for_each(&qpd->devp->qps, index, qp)
 		count++;
 
-	qpd->bufsize = count * 180;
+	qpd->bufsize = count * QP_SIZE;
 	qpd->buf = vmalloc(qpd->bufsize);
 	if (!qpd->buf) {
 		kfree(qpd);
