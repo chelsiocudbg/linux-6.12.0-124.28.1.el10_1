@@ -4499,7 +4499,7 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			qhp->wq.sq.qid, qhp->wq.rq.qid, mask, qhp->attr.state,
 			(mask & C4IW_QP_ATTR_NEXT_STATE) ? attrs.next_state : -1, attr_mask, cur_state,
 			new_state);
-	if (!ib_modify_qp_is_ok(cur_state, new_state,
+	if (!ib_modify_qp_is_ok(v2_to_ib_qp_state(cur_state), v2_to_ib_qp_state(new_state),
 				qhp->ibqp.qp_type, attr_mask)) {
 		pr_err("%s Invalid modify QP parameters\n", __func__);
 		ret = -EINVAL;
@@ -4699,7 +4699,7 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 	if (qhp->attr.state == attrs.next_state)
 		goto out;
 
-	if (!ib_modify_qp_is_ok(cur_state, new_state,
+	if (!ib_modify_qp_is_ok(v2_to_ib_qp_state(cur_state), v2_to_ib_qp_state(new_state),
 				qhp->ibqp.qp_type, attr_mask)) {
 		pr_err("%s Invalid modify QP parameters\n", __func__);
 		ret = -EINVAL;
@@ -4821,6 +4821,18 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			}
 			break;
 		case C4IW_QP_V2_STATE_ERROR:
+			if (attrs.next_state == C4IW_QP_V2_STATE_RESET) {
+				if (c4iw_fatal_error(&rhp->rdev)) {
+					dev_err(rhp->rdev.lldi.dev, "%s - device in fatal error state\n", __func__);
+					ret = -EINVAL;
+					goto out;
+				} else {
+					flush_qp(qhp);
+					set_v2_state(qhp, attrs.next_state);
+					wake_up(&qhp->wait);
+					goto out;
+				}
+			}
 			if (attrs.next_state != C4IW_QP_V2_STATE_IDLE) {
 				ret = -EINVAL;
 				goto out;
