@@ -1007,7 +1007,7 @@ static int poll_roce_cq(struct t4_wq *wq, struct t4_cq *cq, struct t4_cqe *cqe,
 
 	swsqe = &wq->sq.sw_sq[CQE_WRID_SQ_IDX(hw_cqe)];
 	if (!swsqe->signaled) {
-		pr_err("%s:%d WARNING: UNSIGNALLED COMPLETION @ %u!!\n", __func__, __LINE__, CQE_WRID_SQ_IDX(hw_cqe));
+		pr_err("%s:%d WARNING: UNSIGNALLED COMPLETION @ %u sw_cqe %d cqid %d!!\n", __func__, __LINE__, CQE_WRID_SQ_IDX(hw_cqe), SW_CQE(hw_cqe), cq->cqid);
 		ret = -EAGAIN;
 		goto skip_cqe;
 	}

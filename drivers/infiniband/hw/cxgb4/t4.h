@@ -661,8 +661,10 @@ static inline void t4_ring_srq_db(struct t4_srq *srq, u16 inc, u8 len16,
 					srq->bar2_va + SGE_UDB_KDOORBELL);
 		}
 		wmb();
-	} else
+	} else {
 		writel(QID_V(srq->qid) | ARM_PIDX_V(inc) | ARM_QTYPE_V(0), srq->db);
+		wmb();
+	}
 	return;
 }
 
@@ -686,8 +688,10 @@ static inline void t4_ring_sq_db(struct t4_wq *wq, u16 inc, union t4_wr *wqe)
 		/* Flush user doorbell area writes. */
 		wmb();
 	}
-	else
+	else {
 		writel(QID_V(wq->sq.qid) | PIDX_V(inc), wq->db);
+		wmb();
+	}
 	return;
 }
 
@@ -712,8 +716,10 @@ static inline void t4_ring_rq_db(struct t4_wq *wq, u16 inc,
 		/* Flush user doorbell area writes. */
 		wmb();
 	}
-	else
+	else {
 		writel(QID_V(wq->rq.qid) | PIDX_V(inc), wq->db);
+		wmb();
+	}
 	return;
 }
 
@@ -772,11 +778,13 @@ struct t4_cq {
 
 static inline void write_gts(struct t4_cq *cq, u32 val)
 {
+	wmb();
 	if (cq->bar2_va)
 		writel(val | INGRESSQID_V(cq->bar2_qid),
 		       cq->bar2_va + SGE_UDB_GTS);
 	else
 		writel(val | INGRESSQID_V(cq->cqid), cq->gts);
+	wmb();
 }
 
 static inline int t4_clear_cq_armed(struct t4_cq *cq, bool user)
