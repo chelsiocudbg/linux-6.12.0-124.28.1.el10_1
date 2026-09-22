@@ -1743,7 +1743,9 @@ static void cxgb4_uld_queues_txqs_init(struct adapter *adap,
                switch (qtype) {
                case CXGB4_ULD_TXQ_TYPE_SHARED:
                        if (uld == CXGB4_ULD_TYPE_TOE)
-                               num_txqs = adap->sge.ofldqsets /
+                               num_txqs = max_t(u32, adap->sge.ofldqsets,
+					        adap->params.num_up_cores *
+						adap->params.nports) /
                                           adap->params.nports;
                        else
                                num_txqs = 0;
@@ -2969,17 +2971,16 @@ int cxgb4_set_ktls_feature(struct adapter *adap, bool enable)
 #endif
 
 
-void cxgb4_uld_alloc_resources(struct adapter *adap,
-				      enum cxgb4_uld_type type,
-				      const struct cxgb4_uld_info *p)
+int cxgb4_uld_alloc_resources(struct adapter *adap, enum cxgb4_uld_type type,
+			      const struct cxgb4_uld_info *p)
 {
 	int ret = 0;
 
 	if ((type == CXGB4_ULD_CRYPTO && !is_pci_uld(adap)) ||
 	    (type != CXGB4_ULD_CRYPTO && !cxgb4_uld_supported_any(adap)))
-		return;
+		return -ENOTSUPP;
 	if (type == CXGB4_ULD_ISCSIT && is_t4(adap->params.chip))
-		return;
+		return -ENOTSUPP;
 	ret = cfg_queues_uld(adap, type, p);
 	if (ret)
 		goto out;
@@ -2993,14 +2994,16 @@ void cxgb4_uld_alloc_resources(struct adapter *adap,
 	}
 	if (adap->flags & CXGB4_FULL_INIT_DONE)
 		enable_rx_uld(adap, type);
-	return;
+	return 0;
 free_rxq:
 	free_sge_queues_uld(adap, type);
 free_queues:
 	free_queues_uld(adap, type);
 out:
 	dev_warn(adap->pdev_dev,
-		 "ULD registration failed for uld type %d\n", type);
+		 "ULD registration failed for uld type %d, ret %d\n",
+		 type, ret);
+	return ret;
 }
 
 /* cxgb4_register_uld - register an upper-layer driver
@@ -3032,7 +3035,11 @@ void cxgb4_register_uld(enum cxgb4_uld_type type,
 	cxgb4_ulds[type] = *p;
 	list_for_each_entry(adap, &adapter_list, list_node) {
 		mutex_lock(&adap->uld_inst.uld_mutex);
-		cxgb4_uld_alloc_resources(adap, type, p);
+		if (cxgb4_uld_alloc_resources(adap, type, p)) {
+			mutex_unlock(&adap->uld_inst.uld_mutex);
+			continue;
+		}
+
 		if (adap->flags & CXGB4_FULL_INIT_DONE) {
 			cxgb4_uld_txq_alloc_shared(adap, type);
 		}

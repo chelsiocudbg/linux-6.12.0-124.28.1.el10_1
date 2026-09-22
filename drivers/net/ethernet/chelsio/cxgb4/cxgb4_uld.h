@@ -588,8 +588,8 @@ unsigned int cxgb4_modparam_enable_ulds(void);
 int uld_attach(struct adapter *adap, unsigned int uld);
 void cxgb4_register_uld(enum cxgb4_uld_type type, const struct cxgb4_uld_info *p);
 int cxgb4_unregister_uld(enum cxgb4_uld_type type);
-void cxgb4_uld_alloc_resources(struct adapter *adap,
-			       enum cxgb4_uld_type type, const struct cxgb4_uld_info *p);
+int cxgb4_uld_alloc_resources(struct adapter *adap, enum cxgb4_uld_type type,
+			      const struct cxgb4_uld_info *p);
 bool cxgb4_uld_is_registered(struct adapter *adap, enum cxgb4_uld_type type);
 bool cxgb4_modparam_enable_ulds_supported(enum cxgb4_uld_type type);
 

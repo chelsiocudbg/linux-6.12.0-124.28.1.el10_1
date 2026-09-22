@@ -2235,7 +2235,11 @@ static void attach_ulds(struct adapter *adap)
         for (i = 0; i < CXGB4_ULD_TYPE_MAX; i++) {
                 mutex_lock(&adap->uld_inst.uld_mutex);
 		if (cxgb4_ulds[i].add) {
-			cxgb4_uld_alloc_resources(adap, i, &cxgb4_ulds[i]);
+			if (cxgb4_uld_alloc_resources(adap, i, &cxgb4_ulds[i])) {
+				mutex_unlock(&adap->uld_inst.uld_mutex);
+				continue;
+			}
+
                         if (adap->flags & CXGB4_FULL_INIT_DONE)
                                 cxgb4_uld_txq_alloc_shared(adap, i);
                         uld_attach(adap, i);
@@ -5370,7 +5374,7 @@ static int cxgb4_enable_irqs(struct adapter *adap)
 {
 	u32 eth_need, uld_need = 0, ethofld_need = 0, mirror_need = 0;
 	u32 ethqsets = 0, ofldqsets = 0, eoqsets = 0, mirrorqsets = 0;
-	u8 nchan = adap->params.nports;
+	u8 num_uld = 0, nchan = adap->params.nports;
 	u32 i, want, need, num_vec, flags = 0;
 	struct sge *s = &adap->sge;
 	struct msix_entry *entries;
@@ -5388,8 +5392,9 @@ static int cxgb4_enable_irqs(struct adapter *adap)
 #endif
 	eth_need = need;
 	if (is_uld(adap)) {
-		want += s->ofldqsets;
-		uld_need = adap->params.num_up_cores * nchan;
+		num_uld = adap->num_ofld_uld + adap->num_uld;
+		want += num_uld * s->ofldqsets;
+		uld_need = num_uld * nchan;
 		need += uld_need;
 	}
 
@@ -5478,7 +5483,7 @@ static int cxgb4_enable_irqs(struct adapter *adap)
 		num_vec -= need;
 		while (num_vec) {
 			if (num_vec < eth_need + ethofld_need ||
-			    ethqsets > s->max_ethqsets)
+			    ethqsets >= s->max_ethqsets)
 				break;
 
 			for_each_port(adap, i) {
@@ -5498,10 +5503,10 @@ static int cxgb4_enable_irqs(struct adapter *adap)
 		if (is_uld(adap)) {
 			while (num_vec) {
 				if (num_vec < uld_need ||
-				    ofldqsets > s->ofldqsets)
+				    ofldqsets >= s->ofldqsets)
 					break;
 
-				ofldqsets++;
+				ofldqsets += nchan;
 				num_vec -= uld_need;
 			}
 		}
@@ -5509,10 +5514,10 @@ static int cxgb4_enable_irqs(struct adapter *adap)
 		if (s->mirrorqsets) {
 			while (num_vec) {
 				if (num_vec < mirror_need ||
-				    mirrorqsets > s->mirrorqsets)
+				    mirrorqsets >= s->mirrorqsets)
 					break;
 
-				mirrorqsets++;
+				mirrorqsets += mirror_need;
 				num_vec -= mirror_need;
 			}
 		}
