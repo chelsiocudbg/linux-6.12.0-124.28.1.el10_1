@@ -116,9 +116,11 @@ static int c4iw_roce_create_ah(struct ib_ah *ah,
 
 	if (vlan_id < VLAN_N_VID) {
 		ahp->insert_vlan_tag = true;
-		ahp->vlan_id = vlan_id;
+		ahp->vlan_id = vlan_id |
+			((rdma_ah_get_sl(ah_init_attr->ah_attr) & 0x7) << VLAN_PRIO_SHIFT);
 	} else {
 		ahp->insert_vlan_tag = false;
+		ahp->vlan_id = 0;
 	}
 	rdma_gid2ip((struct sockaddr *)&ahp->sgid_addr, &sgid_attr->gid);
 	rdma_gid2ip((struct sockaddr *)&ahp->dgid_addr, &ah_init_attr->ah_attr->grh.dgid);

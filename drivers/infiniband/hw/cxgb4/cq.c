@@ -1108,6 +1108,8 @@ static int c4iw_poll_cq_one(struct c4iw_cq *chp, struct ib_wc *wc,
 	u32 cqe2qpid;
 	u64 cookie = 0;
 	int ret;
+	u16 tci;
+	u16 vid;
 	struct c4iw_srq *srq = NULL;
 
 	ret = t4_next_cqe(&chp->cq, &rd_cqe);
@@ -1179,9 +1181,15 @@ static int c4iw_poll_cq_one(struct c4iw_cq *chp, struct ib_wc *wc,
 						RDMA_NETWORK_IPV4;
 					smac = be64_to_cpu(cqe.v2_ext_lo);
 					ether_addr_copy(wc->smac, (u8 *)&smac);
-					wc->vlan_id = CQE_V2_VLAN(&cqe);
-					if (wc->vlan_id == 0)
-						wc->vlan_id = 0xffff;
+					tci = CQE_V2_VLAN(&cqe);
+					if (tci == 0 || tci == 0xffff) {
+						vid = 0xffff;
+						wc->sl = 0;
+					} else {
+						vid = tci & VLAN_VID_MASK;
+						wc->sl = (tci & VLAN_PRIO_MASK) >> VLAN_PRIO_SHIFT;
+					}
+					wc->vlan_id = vid;
 					wc->wc_flags |= IB_WC_GRH |
 						IB_WC_WITH_NETWORK_HDR_TYPE |
 						IB_WC_WITH_SMAC|IB_WC_WITH_VLAN;

@@ -1800,8 +1800,10 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 	if (ret)
 		return ret;
 
-	if (vlan_id < VLAN_CFI_MASK)
+	if (vlan_id < VLAN_CFI_MASK) {
 		has_vlan = true;
+		vlan_id |= (rdma_ah_get_sl(&ahp->attr) & 0x7) << VLAN_PRIO_SHIFT;
+	}
 
 	pr_debug("ahp 0x%llx num_sge %u, dest_qp %u, q_key %x, p_key %x, hlen %d, mss %d,"
 			" PSN %u, inline %s, solicited %s\n", (unsigned long long)ahp,
@@ -4063,7 +4065,7 @@ static u64 roce_select_ntuple(struct net_device *dev,
 	 * in the Compressed Filter Tuple.
 	 */
 	if (tp->vlan_shift >= 0 && qhp->roce_attr.roce_ah.vlan_id != CPL_L2T_VLAN_NONE)
-		ntuple |= (u64)(FT_VLAN_VLD_F | qhp->roce_attr.roce_ah.vlan_id) << tp->vlan_shift;
+		ntuple |= (u64)(FT_VLAN_VLD_F | ahp->vlan_id) << tp->vlan_shift;
 
 	if (tp->protocol_shift >= 0)
 		ntuple |= (u64)IPPROTO_UDP << tp->protocol_shift;
@@ -4612,9 +4614,11 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 
 		if (vlan_id < VLAN_N_VID) {
 			new_roce_attr.roce_ah.insert_vlan_tag = true;
-			new_roce_attr.roce_ah.vlan_id = vlan_id;
+			new_roce_attr.roce_ah.vlan_id = vlan_id |
+					((rdma_ah_get_sl(&attr->ah_attr) & 0x7) << VLAN_PRIO_SHIFT);
 		} else {
 			new_roce_attr.roce_ah.insert_vlan_tag = false;
+			new_roce_attr.roce_ah.vlan_id = 0;
 		}
 
 		rdma_gid2ip((struct sockaddr *)&ahp->sgid_addr, &sgid_attr->gid);
