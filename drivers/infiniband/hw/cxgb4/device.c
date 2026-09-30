@@ -1086,7 +1086,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 
 	devp = ib_alloc_device(c4iw_dev, ibdev);
 	if (!devp) {
-		pr_err("Cannot allocate ib device\n");
+		dev_err(infop->dev, "Cannot allocate ib device\n");
 		return ERR_PTR(-ENOMEM);
 	}
 	devp->rdev.lldi = *infop;
@@ -1123,7 +1123,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 		devp->rdev.bar2_kva = ioremap_wc(devp->rdev.bar2_pa,
 			pci_resource_len(devp->rdev.lldi.pdev, 2));
 		if (!devp->rdev.bar2_kva) {
-			pr_err("Unable to ioremap BAR2\n");
+			dev_err(devp->rdev.lldi.dev, "Unable to ioremap BAR2\n");
 			ib_dealloc_device(&devp->ibdev);
 			return ERR_PTR(-EINVAL);
 		}
@@ -1135,7 +1135,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 		devp->rdev.oc_mw_kva = ioremap_wc(devp->rdev.oc_mw_pa,
 			devp->rdev.lldi.vr->ocq.size);
 		if (!devp->rdev.oc_mw_kva) {
-			pr_err("Unable to ioremap onchip mem\n");
+			dev_err(devp->rdev.lldi.dev, "Unable to ioremap onchip mem\n");
 			ib_dealloc_device(&devp->ibdev);
 			return ERR_PTR(-EINVAL);
 		}
@@ -1147,7 +1147,7 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 
 	ret = c4iw_rdev_open(&devp->rdev);
 	if (ret) {
-		pr_err("Unable to open CXIO rdev err %d\n", ret);
+		dev_err(devp->rdev.lldi.dev, "Unable to open CXIO rdev err %d\n", ret);
 		ib_dealloc_device(&devp->ibdev);
 		return ERR_PTR(ret);
 	}
@@ -1342,9 +1342,8 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 		if (!ctx->dev) {
 			ctx->dev = c4iw_alloc(&ctx->lldi);
 			if (IS_ERR(ctx->dev)) {
-				pr_err("%s: initialization failed: %ld\n",
-				       pci_name(ctx->lldi.pdev),
-				       PTR_ERR(ctx->dev));
+				dev_err(ctx->lldi.dev, "initialization failed: %ld\n",
+					PTR_ERR(ctx->dev));
 				ctx->dev = NULL;
 				break;
 			}
@@ -1500,8 +1499,9 @@ static void recover_lost_dbs(struct uld_ctx *ctx, struct qp_list *qp_list)
 					  t4_sq_host_wq_pidx(&qp->wq),
 					  t4_sq_wq_size(&qp->wq));
 		if (ret) {
-			pr_err("%s: Fatal error - DB overflow recovery failed - error syncing SQ qid %u\n",
-			       pci_name(ctx->lldi.pdev), qp->wq.sq.qid);
+			dev_err(ctx->dev->rdev.lldi.dev,
+				"Fatal error - DB overflow recovery failed - error syncing SQ qid %u\n",
+				qp->wq.sq.qid);
 			spin_unlock(&qp->lock);
 			xa_unlock_irq(&qp->rhp->qps);
 			return;
@@ -1514,8 +1514,9 @@ static void recover_lost_dbs(struct uld_ctx *ctx, struct qp_list *qp_list)
 					  t4_rq_wq_size(&qp->wq));
 
 		if (ret) {
-			pr_err("%s: Fatal error - DB overflow recovery failed - error syncing RQ qid %u\n",
-			       pci_name(ctx->lldi.pdev), qp->wq.rq.qid);
+			dev_err(ctx->dev->rdev.lldi.dev,
+				"Fatal error - DB overflow recovery failed - error syncing RQ qid %u\n",
+				qp->wq.rq.qid);
 			spin_unlock(&qp->lock);
 			xa_unlock_irq(&qp->rhp->qps);
 			return;
@@ -1548,8 +1549,8 @@ static void recover_queues(struct uld_ctx *ctx)
 	/* flush the SGE contexts */
 	ret = cxgb4_flush_eq_cache(ctx->dev->rdev.lldi.ports[0]);
 	if (ret) {
-		pr_err("%s: Fatal error - DB overflow recovery failed\n",
-				ctx->lldi.name);
+		dev_err(ctx->dev->rdev.lldi.dev,
+			"Fatal error - DB overflow recovery failed\n");
 		return;
 	}
 
@@ -1563,8 +1564,8 @@ static void recover_queues(struct uld_ctx *ctx)
 
 	qp_list.qps = kzalloc(count * sizeof *qp_list.qps, GFP_ATOMIC);
 	if (!qp_list.qps) {
-		pr_err("%s: Fatal error - DB overflow recovery failed\n",
-				ctx->lldi.name);
+		dev_err(ctx->dev->rdev.lldi.dev,
+			"Fatal error - DB overflow recovery failed\n");
 		xa_unlock_irq(&ctx->dev->rawqps);
 		xa_unlock_irq(&ctx->dev->qps);
 		return;
@@ -1583,8 +1584,8 @@ static void recover_queues(struct uld_ctx *ctx)
 
 	qp_list.rqps = kzalloc(count * sizeof *qp_list.rqps, GFP_ATOMIC);
 	if (!qp_list.rqps) {
-		pr_err("%s: Fatal error - DB overflow recovery failed\n",
-				ctx->lldi.name);
+		dev_err(ctx->dev->rdev.lldi.dev,
+			"Fatal error - DB overflow recovery failed\n");
 		xa_unlock_irq(&ctx->dev->rawqps);
 		xa_unlock_irq(&ctx->dev->qps);
 		kfree(qp_list.qps);

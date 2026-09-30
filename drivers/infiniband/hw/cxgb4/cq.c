@@ -362,6 +362,70 @@ static void advance_oldest_read(struct t4_wq *wq)
 	wq->sq.oldest_read = NULL;
 }
 
+static bool cqe_of_qp(struct c4iw_cq *chp, struct c4iw_qp *qhp,
+		      struct t4_cqe *cqe)
+{
+	if (DRAIN_CQE(cqe))
+		return false;
+	if (get_qhp(chp->rhp, CQE_QPID(cqe)) != qhp)
+		return false;
+	return SQ_TYPE(cqe) || !qhp->srq;
+}
+
+void c4iw_cq_clean(struct c4iw_cq *chp, struct c4iw_qp *qhp)
+{
+	struct t4_cq *cq = &chp->cq;
+	const __be64 genbit = cpu_to_be64(1ULL << CQE_GENBIT_S);
+	u32 idx, dst, n, i, nfreed;
+	u8 gen;
+
+	idx = dst = cq->sw_cidx;
+	n = cq->sw_in_use;
+	for (i = 0; i < n; i++) {
+		if (!cqe_of_qp(chp, qhp, &cq->sw_queue[idx])) {
+			if (dst != idx)
+				cq->sw_queue[dst] = cq->sw_queue[idx];
+			if (++dst == cq->size)
+				dst = 0;
+		} else {
+			cq->sw_in_use--;
+		}
+		if (++idx == cq->size)
+			idx = 0;
+	}
+	cq->sw_pidx = dst;
+
+	n = 0;
+	idx = cq->cidx;
+	gen = cq->gen;
+	while (n < cq->size && CQE_GENBIT(&cq->queue[idx]) == gen) {
+		n++;
+		if (++idx == cq->size) {
+			idx = 0;
+			gen ^= 1;
+		}
+	}
+	rmb();
+
+	nfreed = 0;
+	for (i = n; i-- > 0; ) {
+		struct t4_cqe *cqe = &cq->queue[(cq->cidx + i) % cq->size];
+
+		if (cqe_of_qp(chp, qhp, cqe)) {
+			nfreed++;
+		} else if (nfreed) {
+			struct t4_cqe *d =
+				&cq->queue[(cq->cidx + i + nfreed) % cq->size];
+			__be64 dgen = d->bits_type_ts & genbit;
+
+			*d = *cqe;
+			d->bits_type_ts = (d->bits_type_ts & ~genbit) | dgen;
+		}
+	}
+	while (nfreed--)
+		t4_hwcq_consume(cq);
+}
+
 /*
  * Move all CQEs from the HWCQ into the SWCQ.
  * Deal with out-of-order and/or completions that complete
@@ -1007,7 +1071,9 @@ static int poll_roce_cq(struct t4_wq *wq, struct t4_cq *cq, struct t4_cqe *cqe,
 
 	swsqe = &wq->sq.sw_sq[CQE_WRID_SQ_IDX(hw_cqe)];
 	if (!swsqe->signaled) {
-		pr_err("%s:%d WARNING: UNSIGNALLED COMPLETION @ %u sw_cqe %d cqid %d!!\n", __func__, __LINE__, CQE_WRID_SQ_IDX(hw_cqe), SW_CQE(hw_cqe), cq->cqid);
+		dev_err_ratelimited(wq->rdev->lldi.dev,
+			"%s:%d WARNING: UNSIGNALLED COMPLETION @ %u sw_cqe %d cqid %d!!\n",
+			__func__, __LINE__, CQE_WRID_SQ_IDX(hw_cqe), SW_CQE(hw_cqe), cq->cqid);
 		ret = -EAGAIN;
 		goto skip_cqe;
 	}

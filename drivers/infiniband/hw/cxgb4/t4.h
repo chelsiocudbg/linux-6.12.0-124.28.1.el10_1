@@ -735,6 +735,11 @@ static inline void t4_set_wq_in_error(struct t4_wq *wq, u32 srqidx)
 	*wq->qp_errp = 1;
 }
 
+static inline void t4_clear_wq_in_error(struct t4_wq *wq)
+{
+	*wq->qp_errp = 0;
+}
+
 static inline void t4_disable_wq_db(struct t4_wq *wq)
 {
 	wq->rq.queue[wq->rq.size].status.db_off = 1;

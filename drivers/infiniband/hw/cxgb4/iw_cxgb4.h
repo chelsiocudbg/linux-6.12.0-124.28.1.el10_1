@@ -274,8 +274,7 @@ static inline int c4iw_wait(struct c4iw_rdev *rdev, struct completion *c)
          * device recovery (see CXGB4_STATE_START_RECOVERY).
          */
         if (!ret) {
-                pr_err(MOD "%s: Timeout waiting for FW reply\n",
-                       rdev->lldi.name);
+                dev_err(rdev->lldi.dev, "Timeout waiting for FW reply\n");
                 WARN_ON(1);
                 c4iw_disable_device(rdev, 0);
                 cxgb4_fatal_err(rdev->lldi.ports[0]);
@@ -298,8 +297,9 @@ static inline int c4iw_wait_for_reply(struct c4iw_rdev *rdev,
 
 	ret = wait_for_completion_timeout(&wr_waitp->completion, C4IW_WR_TO);
 	if (!ret) {
-		pr_err("%s - Device %s not responding (disabling device) - tid %u qpid %u\n",
-		       func, pci_name(rdev->lldi.pdev), hwtid, qpid);
+		dev_err(rdev->lldi.dev,
+			"%s - device not responding (disabling device) - tid %u qpid %u\n",
+			func, hwtid, qpid);
 		rdev->flags |= T4_FATAL_ERROR;
 		wr_waitp->ret = -EIO;
 		goto out;
@@ -1418,6 +1418,7 @@ void c4iw_rqtpool_free(struct c4iw_rdev *rdev, u32 addr, int size);
 u32 c4iw_pblpool_alloc(struct c4iw_rdev *rdev, int size);
 void c4iw_pblpool_free(struct c4iw_rdev *rdev, u32 addr, int size);
 void c4iw_flush_hw_cq(struct c4iw_cq *chp, struct c4iw_qp *flush_qhp);
+void c4iw_cq_clean(struct c4iw_cq *chp, struct c4iw_qp *qhp);
 void c4iw_count_rcqes(struct t4_cq *cq, struct t4_wq *wq, int *count, enum qp_transport_type prot);
 int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp);
 int c4iw_flush_rq(struct c4iw_qp *wq, struct t4_cq *cq, int count);

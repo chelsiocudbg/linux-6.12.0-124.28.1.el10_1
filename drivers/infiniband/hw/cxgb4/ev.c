@@ -69,14 +69,16 @@ void print_tpte(struct c4iw_dev *dev, u32 stag)
 	ret = cxgb4_read_pbl_entries(dev->rdev.lldi.ports[0],
 			FW_RI_TPTE_PBLADDR_G(ntohl(tpte.nosnoop_pbladdr)),
 			len_b, (__be32 *)pble);
-	pr_err("PBL Dump:\n");
+	dev_err(dev->rdev.lldi.dev, "PBL Dump:\n");
 	for (i = 0; i < len_b / 4;) {
-		pr_err("0x%08x %08x\n", be32_to_cpu(pble[i]), be32_to_cpu(pble[i+1]));
+		dev_err(dev->rdev.lldi.dev,
+			"0x%08x %08x\n",
+			be32_to_cpu(pble[i]), be32_to_cpu(pble[i+1]));
 		i+=2;
 	}
 
 	if (ret) {
-		pr_err("%s cxgb4_read_pbl_entries err %d\n", __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s cxgb4_read_pbl_entries err %d\n", __func__, ret);
 		return;
 	}
 	kfree(pble);
@@ -156,11 +158,10 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 	xa_lock_irq(&dev->qps);
 	qhp = xa_load(&dev->qps, CQE_QPID(err_cqe));
 	if (!qhp) {
-		pr_err("BAD AE qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
-				CQE_QPID(err_cqe),
-				cqe_opc, CQE_STATUS(err_cqe),
-				CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
-				CQE_WRID_LOW(err_cqe));
+		dev_err_ratelimited(dev->rdev.lldi.dev,
+			"BAD AE qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
+			CQE_QPID(err_cqe), cqe_opc, CQE_STATUS(err_cqe), CQE_TYPE(err_cqe),
+			CQE_WRID_HI(err_cqe), CQE_WRID_LOW(err_cqe));
 		xa_unlock_irq(&dev->qps);
 		goto out;
 	}
@@ -172,11 +173,10 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 	cqe_opc = prot ? CQE_V2_OPCODE(err_cqe): CQE_OPCODE(err_cqe);
 	chp = get_chp(dev, cqid);
 	if (!chp) {
-		pr_err("BAD AE cqid 0x%x qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
-				cqid, CQE_QPID(err_cqe),
-				cqe_opc, CQE_STATUS(err_cqe),
-				CQE_TYPE(err_cqe), CQE_WRID_HI(err_cqe),
-				CQE_WRID_LOW(err_cqe));
+		dev_err_ratelimited(dev->rdev.lldi.dev,
+			"BAD AE cqid 0x%x qpid 0x%x opcode %d status 0x%x type %d wrid.hi 0x%x wrid.lo 0x%x\n",
+			cqid, CQE_QPID(err_cqe), cqe_opc, CQE_STATUS(err_cqe), CQE_TYPE(err_cqe),
+			CQE_WRID_HI(err_cqe), CQE_WRID_LOW(err_cqe));
 		xa_unlock_irq(&dev->qps);
 		goto out;
 	}
@@ -196,7 +196,7 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 
 		/* Completion Events */
 		case T4_ERR_SUCCESS:
-			pr_err("AE with status 0!\n");
+			dev_err_ratelimited(dev->rdev.lldi.dev, "AE with status 0!\n");
 			break;
 
 		case T4_ERR_STAG:
@@ -238,8 +238,9 @@ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
 			break;
 
 		default:
-			pr_err("Unknown T4 status 0x%x QPID 0x%x\n",
-					CQE_STATUS(err_cqe), qhp->wq.sq.qid);
+			dev_err_ratelimited(dev->rdev.lldi.dev,
+				"Unknown T4 status 0x%x QPID 0x%x\n",
+				CQE_STATUS(err_cqe), qhp->wq.sq.qid);
 			post_qp_event(dev, chp, qhp, err_cqe, IB_EVENT_QP_FATAL);
 			break;
 	}
