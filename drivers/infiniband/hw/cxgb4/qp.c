@@ -487,8 +487,8 @@ static void free_raw_txq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
 	rtnl_unlock();
 
 	if (ret) {
-		pr_err("%s: %s mbox command failed with %d\n",
-				dev->rdev.lldi.name, __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox command failed with %d\n",
+			__func__, ret);
 		return;
 	}
 	if (rqp->txq.flags & T4_SQ_ONCHIP)
@@ -548,7 +548,7 @@ static int alloc_raw_txq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
         ret = cxgb4_wr_mbox(rqp->netdev, &c, sizeof(c), &c);
         rtnl_unlock();
         if (ret) {
-                pr_err("%s mbox error %d\n", __func__, ret);
+                dev_err(dev->rdev.lldi.dev, "%s mbox error %d\n", __func__, ret);
                 if (rqp->txq.flags & T4_SQ_ONCHIP)
                         cxgb4_uld_ocqp_pool_free(dev->rdev.lldi.ports[0],
                                                  rqp->txq.dma_addr,
@@ -579,8 +579,9 @@ static int alloc_raw_txq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
         ret = cxgb4_wr_mbox(rqp->netdev, &c2, sizeof(c2), &c2);
         rtnl_unlock();
         if (ret) {
-                pr_err("%s mbox error (FW_PARAMS/DMAQ_EQ_CMPLIQID_CTRL) %d\n",
-                       __func__, ret);
+                dev_err(dev->rdev.lldi.dev,
+                        "%s mbox error (FW_PARAMS/DMAQ_EQ_CMPLIQID_CTRL) %d\n",
+                        __func__, ret);
                 free_raw_txq(dev, rqp);
                 return ret;
         }
@@ -610,8 +611,8 @@ static void stop_raw_rxq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
 	ret = cxgb4_wr_mbox(rqp->netdev, &c, sizeof(c), &c);
 	rtnl_unlock();
 	if (ret)
-		pr_err(MOD "%s: %s mbox command failed with %d\n",
-				dev->rdev.lldi.name, __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox command failed with %d\n",
+			__func__, ret);
 }
 
 static void free_raw_rxq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
@@ -634,8 +635,8 @@ static void free_raw_rxq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
 	ret = cxgb4_wr_mbox(rqp->netdev, &c, sizeof(c), &c);
 	rtnl_unlock();
 	if (ret) {
-		pr_err("%s: %s mbox command failed with %d\n",
-				dev->rdev.lldi.name, __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox command failed with %d\n",
+			__func__, ret);
 		return;
 	}
 	dma_free_coherent(dev->rdev.lldi.dev, rqp->iq.memsize, rqp->iq.desc,
@@ -711,7 +712,7 @@ static int alloc_raw_rxq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
 	ret = cxgb4_wr_mbox(rqp->netdev, &c, sizeof(c), &c);
 	rtnl_unlock();
 	if (ret) {
-		pr_err("%s mbox error %d\n", __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox error %d\n", __func__, ret);
 		goto err;
 	}
 
@@ -739,8 +740,7 @@ static int alloc_raw_rxq(struct c4iw_dev *dev, struct c4iw_raw_qp *rqp)
 		ret = cxgb4_set_params(rqp->netdev, 1, &v, &conm);
 		rtnl_unlock();
 		if (ret) {
-			pr_err("%s set conm ctx error %d\n", __func__,
-					ret);
+			dev_err(dev->rdev.lldi.dev, "%s set conm ctx error %d\n", __func__, ret);
 			free_raw_rxq(dev, rqp);
 			return ret;
 		}
@@ -780,8 +780,8 @@ static void free_raw_srq(struct c4iw_dev *dev, struct c4iw_raw_srq *srq)
 	ret = cxgb4_wr_mbox(srq->netdev, &c, sizeof(c), &c);
 	rtnl_unlock();
 	if (ret) {
-		pr_err("%s: %s mbox command failed with %d\n",
-				dev->rdev.lldi.name, __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox command failed with %d\n",
+			__func__, ret);
 		return;
 	}
 	dma_free_coherent(dev->rdev.lldi.dev, srq->iq.memsize, srq->iq.desc,
@@ -856,7 +856,7 @@ static int alloc_raw_srq(struct c4iw_dev *dev, struct c4iw_raw_srq *srq)
 	ret = cxgb4_wr_mbox(srq->netdev, &c, sizeof(c), &c);
 	rtnl_unlock();
 	if (ret) {
-		pr_err("%s mbox error %d\n", __func__, ret);
+		dev_err(dev->rdev.lldi.dev, "%s mbox error %d\n", __func__, ret);
 		goto err;
 	}
 
@@ -884,8 +884,7 @@ static int alloc_raw_srq(struct c4iw_dev *dev, struct c4iw_raw_srq *srq)
 		ret = cxgb4_set_params(srq->netdev, 1, &v, &conm);
 		rtnl_unlock();
 		if (ret) {
-			pr_err("%s set conm ctx error %d\n", __func__,
-					ret);
+			dev_err(dev->rdev.lldi.dev, "%s set conm ctx error %d\n", __func__, ret);
 			free_raw_srq(dev, srq);
 			return ret;
 		}
@@ -1622,7 +1621,7 @@ static inline void roce_fill_tnl_lso(struct c4iw_qp *qhp,
 		struct cpl_tx_tnl_lso *tnl_lso,
 		u32 isgl_plen, u32 plen,
 		bool vlan_present, bool ipv6,
-		struct c4iw_xfrm_info *x, bool loopback)
+		struct c4iw_xfrm_info *x, bool loopback, bool ud)
 {
 	struct cpl_tx_pkt_core *tx_pkt_xt;
 	struct port_info *pi;
@@ -1670,7 +1669,7 @@ static inline void roce_fill_tnl_lso(struct c4iw_qp *qhp,
 	val = CPL_TX_TNL_LSO_ETHHDRLEN_V(eth_xtra_len / 4) |
 		CPL_TX_TNL_LSO_IPV6_V(ipv6 ? 1 : 0) |
 		CPL_TX_TNL_LSO_IPHDRLEN_V((l3hdr_len + tp_esphdr_len) / 4) |
-		CPL_TX_TNL_LSO_TCPHDRLEN_V(20 / 4);
+		CPL_TX_TNL_LSO_TCPHDRLEN_V((ud ? 28 : 20) / 4);
 	tnl_lso->Flow_to_TcpHdrLen = htonl(val);
 	tnl_lso->IpIdOffset = htons(0);
 	tnl_lso->IpIdSplit_to_Mss = htons(CPL_TX_TNL_LSO_MSS_PMTU_V(roce_pmtu_to_mss(ib_mtu_int_to_enum(qhp->mtu))) |
@@ -1883,7 +1882,7 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 
 	/* BTH header */
 	ud_hdr.bth.pkey = cpu_to_be16(0xFFFF);
-	ud_hdr.bth.destination_qpn = cpu_to_be32(ahp->dest_qp);
+	ud_hdr.bth.destination_qpn = cpu_to_be32(dest_qp);
 	ud_hdr.bth.psn = cpu_to_be32(qhp->roce_attr.gsi_attr.psn_nxt);
 
 	/* DETH header */
@@ -1935,7 +1934,7 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 		plen = 0;
 	}
 	roce_fill_tnl_lso(qhp, tnl_lso, plen, hdr_len, has_vlan,
-			ahp->net_type == RDMA_NETWORK_IPV4 ? false : true, &ahp->xfrm, loopback);
+			ahp->net_type == RDMA_NETWORK_IPV4 ? false : true, &ahp->xfrm, loopback, true);
 	tnl_lso->TCPSeqOffset = htonl(CPL_TX_TNL_LSO_BTH_OPCODE_V(0x64) |
 			CPL_TX_TNL_LSO_TCPSEQOFFSET_PSN_V(qhp->roce_attr.gsi_attr.psn_nxt));
 	*len16 = DIV_ROUND_UP(size, 16);
@@ -2198,6 +2197,7 @@ void c4iw_iw_qp_add_ref(struct ib_qp *qp)
 {
 	pr_debug("ib_qp 0x%llx\n", (unsigned long long)qp);
 	switch (qp->qp_type) {
+		case IB_QPT_UD:
 		case IB_QPT_RC:
 			set_bit(ROCE_QP_REFED, (&to_c4iw_qp(qp)->history));
 			refcount_inc(&to_c4iw_qp(qp)->qp_refcnt);
@@ -2573,6 +2573,8 @@ static void post_write_cmpl(struct c4iw_qp *qhp, const struct ib_send_wr *wr)
 	return;
 }
 
+static void flush_qp(struct c4iw_qp *qhp);
+
 static int iw_post_rc_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 		const struct ib_send_wr **bad_wr)
 {
@@ -2590,6 +2592,21 @@ static int iw_post_rc_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 
 	qhp = to_c4iw_qp(ibqp);
 	spin_lock_irqsave(&qhp->lock, flag);
+
+	/*
+	 * The QP is put in error (the status-page error byte) before the
+	 * FINI is sent, and flushed only later.  A WR written into the ring
+	 * in between is never fetched for this connection: the firmware has
+	 * torn the connection down and grants no more credits, so the SGE
+	 * keeps the entry and hands it to the firmware after the QP's next
+	 * INIT, as the first WR of the next connection.  Flush now instead,
+	 * so the completions stay in order, then treat the WR as a drain.
+	 */
+	if (!qhp->wq.flushed && t4_wq_in_error(&qhp->wq)) {
+		spin_unlock_irqrestore(&qhp->lock, flag);
+		flush_qp(qhp);
+		spin_lock_irqsave(&qhp->lock, flag);
+	}
 
 	/*
 	 * If the qp has been flushed, then just insert a special
@@ -2785,6 +2802,13 @@ static int post_rc_receive(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 	qhp = to_c4iw_qp(ibqp);
 	spin_lock_irqsave(&qhp->lock, flag);
 
+	/* in error but not yet flushed: flush first, see iw_post_rc_send() */
+	if (!qhp->wq.flushed && t4_wq_in_error(&qhp->wq)) {
+		spin_unlock_irqrestore(&qhp->lock, flag);
+		flush_qp(qhp);
+		spin_lock_irqsave(&qhp->lock, flag);
+	}
+
 	/*
 	 * If the qp has been flushed, then just insert a special
 	 * drain cqe.
@@ -2901,6 +2925,13 @@ static int roce_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 
 	qhp = to_c4iw_qp(ibqp);
 	spin_lock_irqsave(&qhp->lock, flag);
+
+	/* in error but not yet flushed: flush first, see iw_post_rc_send() */
+	if (!qhp->wq.flushed && t4_wq_in_error(&qhp->wq)) {
+		spin_unlock_irqrestore(&qhp->lock, flag);
+		flush_qp(qhp);
+		spin_lock_irqsave(&qhp->lock, flag);
+	}
 
 	/*
 	 * If the qp has been flushed, then just insert a special
@@ -3406,8 +3437,7 @@ static int modify_raw_qp(struct c4iw_raw_qp *rqp,
 			}
 			break;
 		default:
-			pr_err("%s in a bad state %d\n",
-					__func__, rqp->state);
+			dev_err(rqp->rhp->rdev.lldi.dev, "%s in a bad state %d\n", __func__, rqp->state);
 			ret = -EINVAL;
 			goto out;
 	}
@@ -3437,13 +3467,6 @@ static void __flush_qp(struct c4iw_qp *qhp, struct c4iw_cq *rchp,
 	if (schp != rchp)
 		spin_lock(&schp->lock);
 	spin_lock(&qhp->lock);
-	if (qhp->srq && qhp->attr.state == C4IW_QP_STATE_ERROR &&
-	    qhp->ibqp.event_handler) {
-		ev.device = qhp->ibqp.device;
-		ev.element.qp = &qhp->ibqp;
-		ev.event = IB_EVENT_QP_LAST_WQE_REACHED;
-		qhp->ibqp.event_handler(&ev, qhp->ibqp.qp_context);
-	}
 
 	if (qhp->wq.flushed) {
 		spin_unlock(&qhp->lock);
@@ -3496,12 +3519,78 @@ static void __flush_qp(struct c4iw_qp *qhp, struct c4iw_cq *rchp,
 			spin_unlock_irqrestore(&schp->comp_handler_lock, flag);
 		}
 	}
+	if (qhp->srq && qhp->ibqp.event_handler) {
+		ev.device = qhp->ibqp.device;
+		ev.element.qp = &qhp->ibqp;
+		ev.event = IB_EVENT_QP_LAST_WQE_REACHED;
+		qhp->ibqp.event_handler(&ev, qhp->ibqp.qp_context);
+	}
+}
+
+static void clear_qp_error_state(struct c4iw_qp *qhp)
+{
+	unsigned long flag;
+
+	if (!qhp->wq.flushed)
+		return;
+
+	spin_lock_irqsave(&qhp->lock, flag);
+	qhp->wq.flushed = 0;
+	qhp->wq.sq.flush_cidx = -1;
+	t4_clear_wq_in_error(&qhp->wq);
+	spin_unlock_irqrestore(&qhp->lock, flag);
+}
+
+/*
+ * Give the QP's IRD share back to the adapter.  rdma_init()/rdma_roce_init()
+ * take it for every connection, so a QP that is reset and reused would take
+ * it again while the previous share is only returned at destroy.
+ */
+static void release_ird(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
+{
+	free_ird(rhp, qhp->attr.max_ird);
+	qhp->attr.max_ird = 0;
+}
+
+static void discard_kernel_qp_work(struct c4iw_qp *qhp)
+{
+	struct c4iw_cq *rchp = to_c4iw_cq(qhp->ibqp.recv_cq);
+	struct c4iw_cq *schp = to_c4iw_cq(qhp->ibqp.send_cq);
+	unsigned long flag;
+
+	if (qhp->ibqp.uobject)
+		return;
+
+	spin_lock_irqsave(&rchp->lock, flag);
+	if (schp != rchp)
+		spin_lock(&schp->lock);
+	spin_lock(&qhp->lock);
+
+	c4iw_cq_clean(rchp, qhp);
+	if (schp != rchp)
+		c4iw_cq_clean(schp, qhp);
+
+	qhp->wq.sq.cidx = qhp->wq.sq.pidx;
+	qhp->wq.sq.in_use = 0;
+	qhp->wq.sq.flush_cidx = -1;
+	qhp->wq.sq.oldest_read = NULL;
+	if (!qhp->srq) {
+		qhp->wq.rq.cidx = qhp->wq.rq.pidx;
+		qhp->wq.rq.in_use = 0;
+	}
+	qhp->wq.rq.msn = 1;
+
+	spin_unlock(&qhp->lock);
+	if (schp != rchp)
+		spin_unlock(&schp->lock);
+	spin_unlock_irqrestore(&rchp->lock, flag);
 }
 
 static void flush_qp(struct c4iw_qp *qhp)
 {
 	struct c4iw_cq *rchp, *schp;
 	unsigned long flag;
+	struct ib_event ev;
 
 	rchp = to_c4iw_cq(qhp->ibqp.recv_cq);
 	schp = to_c4iw_cq(qhp->ibqp.send_cq);
@@ -3525,6 +3614,13 @@ static void flush_qp(struct c4iw_qp *qhp)
 					schp->ibcq.cq_context);
 			spin_unlock_irqrestore(&schp->comp_handler_lock, flag);
 		}
+		if (qhp->srq && qhp->ibqp.event_handler) {
+			ev.device = qhp->ibqp.device;
+			ev.element.qp = &qhp->ibqp;
+			ev.event = IB_EVENT_QP_LAST_WQE_REACHED;
+			qhp->ibqp.event_handler(&ev, qhp->ibqp.qp_context);
+		}
+
 		return;
 	}
 	__flush_qp(qhp, rchp, schp);
@@ -3574,7 +3670,7 @@ static int rdma_roce_fini(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 			rhp->rdev.lldi.num_up_cores);
 
 	pr_debug("qhp 0x%llx qid 0x%x\n", (unsigned long long)qhp, qhp->wq.sq.qid);
-	if (qhp->qp_type == IB_QPT_GSI) {
+	if (qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD) {
 		tid = qhp->roce_attr.gsi_ftid;
 	} else if (qhp->qp_type == IB_QPT_RC) {
 		tid = qhp->roce_attr.hwtid;
@@ -3584,7 +3680,7 @@ static int rdma_roce_fini(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 		cxgb4_uld_tid_remove(qhp->netdev, ctrlq_index,
 				ahp->sgid_addr.saddr_in.sin_family, tid);
 	} else {
-		pr_err("Unwanted QP type!!!!!!\n");
+		dev_err(rhp->rdev.lldi.dev, "Unwanted QP type!!!!!!\n");
 		BUG_ON(1);
 	}
 
@@ -3735,6 +3831,16 @@ out:
         return ret;
 }
 
+static int reset_iw_qp(struct c4iw_qp *qhp)
+{
+	if (!t4_sq_empty(&qhp->wq) || !t4_rq_empty(&qhp->wq))
+		return -EINVAL;
+	discard_kernel_qp_work(qhp);
+	clear_qp_error_state(qhp);
+	release_ird(qhp->rhp, qhp);
+	return 0;
+}
+
 int c4iw_modify_iw_rc_qp(struct c4iw_qp *qhp, enum c4iw_qp_attr_mask mask,
 		struct c4iw_common_qp_attributes *attrs, int internal)
 {
@@ -3794,6 +3900,11 @@ int c4iw_modify_iw_rc_qp(struct c4iw_qp *qhp, enum c4iw_qp_attr_mask mask,
 
 	if (!(mask & C4IW_QP_ATTR_NEXT_STATE))
 		goto out;
+	if (!internal && qhp->attr.state == C4IW_QP_STATE_IDLE &&
+	    attrs->next_state == C4IW_QP_STATE_IDLE && qhp->wq.flushed) {
+		ret = reset_iw_qp(qhp);
+		goto out;
+	}
 	if (qhp->attr.state == attrs->next_state)
 		goto out;
 
@@ -3913,10 +4024,9 @@ int c4iw_modify_iw_rc_qp(struct c4iw_qp *qhp, enum c4iw_qp_attr_mask mask,
 				ret = -EINVAL;
 				goto out;
 			}
-			if (!t4_sq_empty(&qhp->wq) || !t4_rq_empty(&qhp->wq)) {
-				ret = -EINVAL;
+			ret = reset_iw_qp(qhp);
+			if (ret)
 				goto out;
-			}
 			set_state(qhp, C4IW_QP_STATE_IDLE);
 			break;
 		case C4IW_QP_STATE_TERMINATE:
@@ -3927,7 +4037,7 @@ int c4iw_modify_iw_rc_qp(struct c4iw_qp *qhp, enum c4iw_qp_attr_mask mask,
 			goto err;
 			break;
 		default:
-			pr_err("%s in a bad state %d\n", __func__, qhp->attr.state);
+			dev_err(rhp->rdev.lldi.dev, "%s in a bad state %d\n", __func__, qhp->attr.state);
 			ret = -EINVAL;
 			goto err;
 			break;
@@ -3997,7 +4107,7 @@ static int send_roce_flowc(struct c4iw_qp *qhp, bool send_psn)
 		return err;
 	qhp->txq_id = txq_info.lld_index;
 	cxgb4_uld_tid_qid_sel_update(qhp->netdev,
-			CXGB4_ULD_RDMA, (qhp->qp_type == IB_QPT_GSI ?
+			CXGB4_ULD_RDMA, ((qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD) ?
 				qhp->roce_attr.gsi_ftid : qhp->roce_attr.hwtid),
 			&qhp->txq_id);
 
@@ -4014,7 +4124,7 @@ static int send_roce_flowc(struct c4iw_qp *qhp, bool send_psn)
 	flowc->op_to_nparams = cpu_to_be32(FW_WR_OP_V(FW_FLOWC_WR) |
 			FW_FLOWC_WR_NPARAMS_V(nparams));
 	flowc->flowid_len16 = cpu_to_be32(FW_WR_LEN16_V(flowclen16) |
-			FW_WR_FLOWID_V(qhp->qp_type == IB_QPT_GSI ?
+			FW_WR_FLOWID_V((qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD) ?
 				qhp->roce_attr.gsi_ftid : qhp->roce_attr.hwtid));
 	if (send_psn) {
 		flowc->mnemval[0].mnemonic = FW_FLOWC_MNEM_SNDNXT;
@@ -4112,7 +4222,7 @@ static int roce_act_open_req(struct c4iw_qp *qhp)
 	wrlen = (ahp->net_type == RDMA_NETWORK_IPV4) ? roundup(sizev4, 16) : roundup(sizev6, 16);
 	ret = cxgb4_uld_atid_alloc(netdev, qhp);
 	if (ret < 0) {
-		pr_err("%s - cannot allocate atid.\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - cannot allocate atid.\n", __func__);
 		return ret;
 	}
 
@@ -4130,7 +4240,7 @@ static int roce_act_open_req(struct c4iw_qp *qhp)
 
 	skb = get_skb(NULL, wrlen, GFP_KERNEL);
 	if (!skb) {
-		pr_err("%s - failed to alloc skb\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - failed to alloc skb\n", __func__);
 		return -ENOMEM;
 	}
 	set_wr_txq(skb, CPL_PRIORITY_SETUP,
@@ -4162,7 +4272,9 @@ static int roce_act_open_req(struct c4iw_qp *qhp)
 		ret = cxgb4_clip_get(qhp->rhp->rdev.lldi.ports[0],
 				(const u32 *)&la6->sin6_addr.s6_addr, 1);
 		if (ret) {
-			pr_err("%s: cxgb4_clip_get failed ret %d \n", __func__, ret);
+			dev_err(dev->rdev.lldi.dev,
+				"%s: cxgb4_clip_get failed ret %d \n",
+				__func__, ret);
 			return -1;
 		}
 	}
@@ -4242,12 +4354,12 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 	u32 tid;
 
 	ahp = &qhp->roce_attr.roce_ah;
-	if (qhp->qp_type == IB_QPT_GSI) {
+	if (qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD) {
 		tid = qhp->roce_attr.gsi_ftid;
 	} else if (qhp->qp_type == IB_QPT_RC) {
 		tid = qhp->roce_attr.hwtid;
 	} else {
-		pr_err("Unsupported QP type!!!!!!\n");
+		dev_err(rhp->rdev.lldi.dev, "Unsupported QP type!!!!!!\n");
 		BUG_ON(1);
 	}
 
@@ -4266,7 +4378,7 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 		rc_wrlen = sizeof(struct ethhdr) +
 			(ahp->net_type == RDMA_NETWORK_IPV4 ? sizeof(struct iphdr) :
 			 sizeof(struct ipv6hdr)) + sizeof(struct udphdr) + 12 + ipsechdr_len;
-	if (qhp->qp_type == IB_QPT_GSI)
+	if (qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD)
 		wrlen = sizeof *wqe;
 	else
 		wrlen = sizeof *wqe + roundup(sizeof(struct fw_ri_immd) +
@@ -4336,14 +4448,14 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 	wqe->u.rocev2_init.ird_max = cpu_to_be32(qhp->attr.max_ird);
 	wqe->u.rocev2_init.psn_pkd = cpu_to_be32(qhp->roce_attr.gsi_attr.psn_nxt);
 	wqe->u.rocev2_init.epsn_pkd = cpu_to_be32(qhp->roce_attr.gsi_attr.epsn);
-	wqe->u.rocev2_init.q_key = cpu_to_be32(0x80010000);
+	wqe->u.rocev2_init.q_key = cpu_to_be32(qhp->roce_attr.q_key);
 	wqe->u.rocev2_init.p_key = cpu_to_be16(0xFFFF);
 	wqe->u.rocev2_init.r = 0;
 
 	pr_debug("ird %u ord %u psn_pkd %u epsn_pkd %u\n", qhp->attr.max_ord,
 			qhp->attr.max_ird, qhp->roce_attr.gsi_attr.psn_nxt,
 			qhp->roce_attr.gsi_attr.epsn);
-	if (unlikely(qhp->qp_type == IB_QPT_GSI)) {
+	if (unlikely(qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD)) {
 		wqe->u.rocev2_init.pkthdrsize = 0;
 	} else {
 		const struct ib_gid_attr *sgid_attr;
@@ -4431,7 +4543,7 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 		roce_fill_tnl_lso(qhp,
 				(struct cpl_tx_tnl_lso *)wqe->u.rocev2_init.tnl_lso,
 				0, hdr_len - 8, ahp->insert_vlan_tag,
-				(ahp->net_type == RDMA_NETWORK_IPV4 ? false : true), &ahp->xfrm, loopback);
+				(ahp->net_type == RDMA_NETWORK_IPV4 ? false : true), &ahp->xfrm, loopback, false);
 
 		/* Init WR has 16B word boundary.may need to initialize last
 		   10B(64 - 54) with 0 */
@@ -4457,6 +4569,8 @@ out:
 	return ret;
 }
 
+static int create_gsi_filter(struct net_device *netdev, struct c4iw_qp *qhp, u8 port_num);
+
 static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 		struct ib_qp_attr *attr, int internal)
 {
@@ -4472,11 +4586,12 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 	struct c4iw_ah *ahp;
 	int abort = 0;
 	int free = 0;
-	int ret = 0;
+	int ret = 0, filter_ret = 0;
 	u16 vlan_id;
 
 	memset(&attrs, 0, sizeof attrs);
-	cur_state = attr_mask & IB_QP_CUR_STATE ? attr->cur_qp_state : qhp->attr.state;
+	cur_state = attr_mask & IB_QP_CUR_STATE ? attr->cur_qp_state :
+						  v2_to_ib_qp_state(qhp->attr.state);
 	new_state = attr_mask & IB_QP_STATE ? attr->qp_state : cur_state;
 
 	attrs.next_state = c4iw_convert_v2_state(attr->qp_state);
@@ -4499,14 +4614,14 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			qhp->wq.sq.qid, qhp->wq.rq.qid, mask, qhp->attr.state,
 			(mask & C4IW_QP_ATTR_NEXT_STATE) ? attrs.next_state : -1, attr_mask, cur_state,
 			new_state);
-	if (!ib_modify_qp_is_ok(v2_to_ib_qp_state(cur_state), v2_to_ib_qp_state(new_state),
+	mutex_lock(&qhp->mutex);
+
+	if (!ib_modify_qp_is_ok(cur_state, new_state,
 				qhp->ibqp.qp_type, attr_mask)) {
-		pr_err("%s Invalid modify QP parameters\n", __func__);
+		dev_err(rhp->rdev.lldi.dev, "%s Invalid modify QP parameters\n", __func__);
 		ret = -EINVAL;
 		goto out;
 	}
-
-	mutex_lock(&qhp->mutex);
 
 	/* Process attr changes if in IDLE */
 	if (mask & C4IW_QP_ATTR_VALID_MODIFY) {
@@ -4553,7 +4668,9 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 		new_roce_attr.gsi_attr.snd_mss = ib_mtu_enum_to_int(attr->path_mtu);
 		pr_debug("snd_mss %u path_mtu %u\n", new_roce_attr.gsi_attr.snd_mss, attr->path_mtu);
 		if (new_roce_attr.gsi_attr.snd_mss > qhp->mtu) {
-			pr_err("invalid mtu (%d) > (%d)\n", new_roce_attr.gsi_attr.snd_mss, qhp->mtu);
+			dev_err(rhp->rdev.lldi.dev,
+				"invalid mtu (%d) > (%d)\n",
+				new_roce_attr.gsi_attr.snd_mss, qhp->mtu);
 			ret = -EINVAL;
 			goto out;
 		}
@@ -4679,7 +4796,9 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 					ahp->xfrm.local_ip_addr[3] = x->props.saddr.a4;
 				}
 			} else
-				pr_err("%s Invalid IPsec configuration\n", __func__);
+				dev_err(rhp->rdev.lldi.dev,
+					"%s Invalid IPsec configuration\n",
+					__func__);
 		}
 	}
 
@@ -4699,13 +4818,6 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 	if (qhp->attr.state == attrs.next_state)
 		goto out;
 
-	if (!ib_modify_qp_is_ok(v2_to_ib_qp_state(cur_state), v2_to_ib_qp_state(new_state),
-				qhp->ibqp.qp_type, attr_mask)) {
-		pr_err("%s Invalid modify QP parameters\n", __func__);
-		ret = -EINVAL;
-		goto out;
-	}
-
 	switch (qhp->attr.state) {
 		case C4IW_QP_V2_STATE_RESET:
 			switch (attrs.next_state) {
@@ -4713,6 +4825,16 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 					if (qhp->qp_type == IB_QPT_RC) {
 						qhp->netdev = rhp->rdev.lldi.ports[attr->port_num - 1];
 						qhp->mtu = ib_mtu_enum_to_int(ib_mtu_int_to_enum(qhp->netdev->mtu));
+					}
+					if (unlikely(qhp->qp_type == IB_QPT_UD)) {
+						filter_ret = create_gsi_filter(qhp->netdev, qhp, attr->port_num - 1);
+						if (filter_ret <= 0) {
+							dev_err(rhp->rdev.lldi.dev,
+								"filter creation failed: %d\n",
+								filter_ret);
+							ret = filter_ret ? filter_ret : -ETIMEDOUT;
+							goto out;
+						}
 					}
 					set_v2_state(qhp, C4IW_QP_V2_STATE_IDLE);
 					break;
@@ -4762,7 +4884,11 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 						goto err;
 					break;
 				case C4IW_QP_V2_STATE_ERROR:
+					t4_set_wq_in_error(&qhp->wq, 0);
 					set_v2_state(qhp, C4IW_QP_V2_STATE_ERROR);
+					ret = rdma_roce_fini(rhp, qhp);
+					if (ret)
+						goto err;
 					flush_qp(qhp);
 					break;
 				default:
@@ -4810,6 +4936,11 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 				case C4IW_QP_V2_STATE_RESET:
 				case C4IW_QP_V2_STATE_IDLE:
 					flush_qp(qhp);
+					if (attrs.next_state == C4IW_QP_V2_STATE_RESET) {
+						discard_kernel_qp_work(qhp);
+						clear_qp_error_state(qhp);
+						release_ird(rhp, qhp);
+					}
 					set_v2_state(qhp, attrs.next_state);
 					wake_up(&qhp->wait);
 					break;
@@ -4821,27 +4952,19 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			}
 			break;
 		case C4IW_QP_V2_STATE_ERROR:
-			if (attrs.next_state == C4IW_QP_V2_STATE_RESET) {
-				if (c4iw_fatal_error(&rhp->rdev)) {
-					dev_err(rhp->rdev.lldi.dev, "%s - device in fatal error state\n", __func__);
+			switch (attrs.next_state) {
+				case C4IW_QP_V2_STATE_RESET:
+					flush_qp(qhp);
+					discard_kernel_qp_work(qhp);
+					clear_qp_error_state(qhp);
+					release_ird(rhp, qhp);
+					set_v2_state(qhp, C4IW_QP_V2_STATE_RESET);
+					wake_up(&qhp->wait);
+					break;
+				default:
 					ret = -EINVAL;
 					goto out;
-				} else {
-					flush_qp(qhp);
-					set_v2_state(qhp, attrs.next_state);
-					wake_up(&qhp->wait);
-					goto out;
-				}
 			}
-			if (attrs.next_state != C4IW_QP_V2_STATE_IDLE) {
-				ret = -EINVAL;
-				goto out;
-			}
-			if (!t4_sq_empty(&qhp->wq) || !t4_rq_empty(&qhp->wq)) {
-				ret = -EINVAL;
-				goto out;
-			}
-			set_v2_state(qhp, C4IW_QP_V2_STATE_IDLE);
 			break;
 		case C4IW_QP_V2_STATE_TERMINATE:
 			if (!internal) {
@@ -4851,7 +4974,7 @@ static int c4iw_modify_roce_qp(struct c4iw_qp *qhp, int attr_mask,
 			goto err;
 			break;
 		default:
-			pr_err("%s in a bad state %d\n", __func__, qhp->attr.state);
+			dev_err(rhp->rdev.lldi.dev, "%s in a bad state %d\n", __func__, qhp->attr.state);
 			ret = -EINVAL;
 			goto err;
 			break;
@@ -4937,7 +5060,8 @@ static void destroy_rc_qp(struct ib_qp *ib_qp)
 
 	pr_debug("qp %p qp_type %d\n", qhp, ib_qp->qp_type);
 	if (rdma_protocol_roce(&rhp->ibdev, 1)) {
-		if (qhp->attr.state != C4IW_QP_V2_STATE_ERROR) {
+		if (qhp->attr.state != C4IW_QP_V2_STATE_ERROR &&
+		    qhp->attr.state != C4IW_QP_V2_STATE_RESET) {
 			attr.qp_state = IB_QPS_ERR;
 			if (qhp->attr.state == C4IW_QP_V2_STATE_TERMINATE)
 				c4iw_modify_roce_qp(qhp, C4IW_QP_ATTR_NEXT_STATE, &attr, 1);
@@ -4974,7 +5098,7 @@ static void destroy_rc_qp(struct ib_qp *ib_qp)
 
 	free_rc_queues(&rhp->rdev, &qhp->wq, ucontext ?
 			&ucontext->uctx : &rhp->rdev.uctx, !qhp->srq);
-	if (unlikely(qhp->qp_type == IB_QPT_GSI)) {
+	if (unlikely(qhp->qp_type == IB_QPT_GSI || qhp->qp_type == IB_QPT_UD)) {
 		del_filter((struct c4iw_raw_qp *)qhp, qhp->roce_attr.gsi_ftid);
 	}
 	c4iw_put_wr_wait(qhp->wr_waitp);
@@ -5053,8 +5177,11 @@ static int create_gsi_filter(struct net_device *netdev, struct c4iw_qp *qhp, u8 
 	filt.fs.hitcnts = 1;
 	filt.fs.val.roce = 1;
 	filt.fs.mask.roce = -1;
-	/* GSI QP number */
-	filt.fs.val.rocev2_qpn = 1;
+	if (qhp->qp_type == IB_QPT_UD) {
+		filt.fs.val.rocev2_qpn = qhp->wq.sq.qid;
+		filt.fs.mask.rocev2_qpn = 0xFFFF;
+	} else
+		filt.fs.val.rocev2_qpn = 1;
 	filt.cmd = CHELSIO_SET_FILTER;
 	filt.fs.type = 1;
 
@@ -5069,7 +5196,7 @@ static int create_gsi_filter(struct net_device *netdev, struct c4iw_qp *qhp, u8 
 		pr_debug("NON HPF cxgb4_get_free_ftid: %d\n", filt.filter_id);
 		ret = wait_for_completion_timeout(&ctx.completion, 10*HZ);
 		if (!ret) {
-			pr_err("%s: filter creation timed out\n", __func__);
+			dev_err(rhp->rdev.lldi.dev, "%s: filter creation timed out\n", __func__);
 		}
 	}
 
@@ -5497,7 +5624,7 @@ static int create_raw_qp(struct ib_qp *qp, struct ib_qp_init_attr *attrs,
 
 	rqp->fid = get_fid(rhp, rqp->nfids);
 	if (rqp->fid < 0) {
-		pr_err("%s no fids available\n", __func__);
+		dev_err(rhp->rdev.lldi.dev, "%s no fids available\n", __func__);
 		ret = -ENOMEM;
 		goto err2a;
 	}

@@ -247,7 +247,8 @@ static int c4iw_alloc_ucontext(struct ib_ucontext *ucontext,
 	spin_lock_init(&context->mmap_lock);
 
 	if (udata->outlen < sizeof(uresp) - sizeof(uresp.reserved)) {
-		pr_err_once("Warning - downlevel libcxgb4 (non-fatal), device status page disabled\n");
+		dev_err_once(rhp->rdev.lldi.dev,
+			"Warning - downlevel libcxgb4 (non-fatal), device status page disabled\n");
 		rhp->rdev.flags |= T4_STATUS_PAGE_DISABLED;
 	} else {
 		mm = kmalloc(sizeof(*mm), GFP_KERNEL);
@@ -860,8 +861,7 @@ void c4iw_register_device(struct work_struct *work)
 	return;
 
 err_dealloc_ctx:
-	pr_err("%s - Failed registering iwarp device: %d\n",
-	       pci_name(ctx->lldi.pdev), ret);
+	dev_err(dev->rdev.lldi.dev, "Failed registering iwarp device: %d\n", ret);
 	c4iw_dealloc(ctx);
 	return;
 }

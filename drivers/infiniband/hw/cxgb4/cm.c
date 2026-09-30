@@ -208,7 +208,9 @@ int c4iw_l2t_send(struct c4iw_rdev *rdev, struct sk_buff *skb,
 
 	if (c4iw_fatal_error(rdev)) {
 		kfree_skb(skb);
-		pr_err("%s - device in error state - dropping\n", __func__);
+		dev_err_ratelimited(rdev->lldi.dev,
+			"%s - device in error state - dropping\n",
+			__func__);
 		return -EIO;
 	}
 	error = cxgb4_l2t_send(rdev->lldi.ports[0], skb, l2e);
@@ -225,7 +227,9 @@ int c4iw_ofld_send(struct c4iw_rdev *rdev, struct sk_buff *skb)
 
 	if (c4iw_fatal_error(rdev)) {
 		kfree_skb(skb);
-		pr_err("%s - device in error state - dropping\n", __func__);
+		dev_err_ratelimited(rdev->lldi.dev,
+			"%s - device in error state - dropping\n",
+			__func__);
 		return -EIO;
 	}
 	error = cxgb4_uld_xmit(rdev->lldi.ports[0], skb);
@@ -552,11 +556,15 @@ struct dst_entry *find_route6(struct c4iw_dev *dev, __u8 *local_ip,
 				(struct flowi *)&fl6, NULL, 0);
 		if (IS_ERR(dst)) {
 			if (PTR_ERR(dst) != -ENOENT)
-				pr_err("xfrm_lookup failed: %ld\n", PTR_ERR(dst));
+				dev_err(dev->rdev.lldi.dev,
+					"xfrm_lookup failed: %ld\n",
+					PTR_ERR(dst));
 
 			dst = ip6_route_output(&init_net, NULL, &fl6);
 			if (IS_ERR(dst))
-				pr_err("ip6_route_output failed: %ld\n", PTR_ERR(dst));
+				dev_err(dev->rdev.lldi.dev,
+					"ip6_route_output failed: %ld\n",
+					PTR_ERR(dst));
 		}
 	}
 
@@ -2754,7 +2762,7 @@ static int pass_accept_req(struct c4iw_dev *dev, struct sk_buff *skb)
 				 &parent_ep->com.local_addr)->sin6_scope_id);
 	}
 	if (!dst) {
-		pr_err("%s - failed to find dst entry!\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - failed to find dst entry!\n", __func__);
 		goto reject;
 	}
 
@@ -2767,7 +2775,7 @@ static int pass_accept_req(struct c4iw_dev *dev, struct sk_buff *skb)
 
 	err = import_ep(child_ep, iptype, peer_ip, dst, dev, false, tos);
 	if (err) {
-		pr_err("%s - failed to allocate l2t entry!\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - failed to allocate l2t entry!\n", __func__);
 		dst_release(dst);
 		kfree(child_ep);
 		goto reject;
@@ -3096,7 +3104,7 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 			attrs.next_state = C4IW_QP_STATE_ERROR;
 			ret = c4iw_modify_iw_rc_qp(ep->com.qp, C4IW_QP_ATTR_NEXT_STATE, &attrs, 1);
 			if (ret)
-				pr_err("%s - qp <- error failed!\n", __func__);
+				dev_err(dev->rdev.lldi.dev, "%s - qp <- error failed!\n", __func__);
 		}
 		peer_abort_upcall(ep);
 		break;
@@ -3512,7 +3520,7 @@ int c4iw_iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 
 	ep = alloc_ep(dev, sizeof(*ep), GFP_KERNEL);
 	if (!ep) {
-		pr_err("%s - cannot alloc ep\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - cannot alloc ep\n", __func__);
 		err = -ENOMEM;
 		goto out;
 	}
@@ -3927,7 +3935,7 @@ int c4iw_iw_create_listen(struct iw_cm_id *cm_id, int backlog)
 
 	ep = alloc_ep(dev, sizeof(*ep), GFP_KERNEL);
 	if (!ep) {
-		pr_err("%s - cannot alloc ep\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - cannot alloc ep\n", __func__);
 		err = -ENOMEM;
 		goto fail1;
 	}
@@ -3952,7 +3960,7 @@ int c4iw_iw_create_listen(struct iw_cm_id *cm_id, int backlog)
 					    cm_id->m_local_addr.ss_family, ep);
 
 	if (err < 0) {
-		pr_err("%s - cannot alloc stid\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - cannot alloc stid\n", __func__);
 		goto fail2;
 	}
 	ep->stid = err;
@@ -4118,8 +4126,9 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 						     C4IW_QP_ATTR_NEXT_STATE,
 						     &attrs, 1);
 				if (ret)
-					pr_err("%s - qp <- error failed!\n",
-					       __func__);
+					dev_err(rdev->lldi.dev,
+						"%s - qp <- error failed!\n",
+						__func__);
 			}
 			fatal = 1;
 		}
@@ -4573,7 +4582,7 @@ static int rx_pkt(struct c4iw_dev *dev, struct sk_buff *skb)
 			      iph->daddr, iph->saddr, tcph->dest,
 			      tcph->source, iph->tos);
 	if (!dst) {
-		pr_err("%s - failed to find dst entry!\n", __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - failed to find dst entry!\n", __func__);
 		goto reject;
 	}
 	neigh = dst_neigh_lookup_skb(dst, skb);
@@ -4601,8 +4610,7 @@ static int rx_pkt(struct c4iw_dev *dev, struct sk_buff *skb)
 	}
 	neigh_release(neigh);
 	if (!e) {
-		pr_err("%s - failed to allocate l2t entry!\n",
-		       __func__);
+		dev_err(dev->rdev.lldi.dev, "%s - failed to allocate l2t entry!\n", __func__);
 		goto free_dst;
 	}
 
@@ -5000,15 +5008,14 @@ void c4iw_disable_device(struct c4iw_rdev *rdev, int recover)
 {
 
 	if (!c4iw_fatal_error(rdev))
-		pr_err("%s: Disabling device due to fatal error\n",
-				rdev->lldi.name);
+		dev_err(rdev->lldi.dev, "Disabling device due to fatal error\n");
 
 	rdev->flags |= T4_FATAL_ERROR;
 
 	if (recover) {
 		struct c4iw_dev *dev = rdev_to_c4iw_dev(rdev);
 
-		pr_err("%s: Recovering device\n", rdev->lldi.name);
+		dev_err(rdev->lldi.dev, "Recovering device\n");
 
 		/* Notify RDMA Core of fatal device event */
 		c4iw_dispatch_event(&dev->ibdev, 0, IB_EVENT_DEVICE_FATAL);
