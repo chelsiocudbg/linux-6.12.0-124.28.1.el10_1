@@ -500,9 +500,121 @@ static unsigned int speed_to_fw_caps(int speed)
 	return 0;
 }
 
+/* fw_caps -> ethtool Link Mode.
+ * Medium (KR/CR/SR/LR/DR/LRM/T) decided once, then a flat per-medium
+ * list of speed bits -- whatever Firmware says is achievable.
+ */
+enum link_medium {
+	LINK_MEDIUM_NONE,
+	LINK_MEDIUM_TP,		/* plain copper baseT               */
+	LINK_MEDIUM_KR,		/* electrical backplane             */
+	LINK_MEDIUM_CR,		/* copper direct-attach (TwinAx)    */
+	LINK_MEDIUM_SR,
+	LINK_MEDIUM_LR,		/* also covers ER FR                */
+	LINK_MEDIUM_DR,
+	LINK_MEDIUM_LRM,
+};
+
+static bool fw_port_is_backplane(enum fw_port_type port_type)
+{
+	switch (port_type) {
+	case FW_PORT_TYPE_KX:
+	case FW_PORT_TYPE_KX4:
+	case FW_PORT_TYPE_BP_AP:
+	case FW_PORT_TYPE_BP4_AP:
+	case FW_PORT_TYPE_BP40_BA:
+	case FW_PORT_TYPE_KR:
+	case FW_PORT_TYPE_KR_50G:
+	case FW_PORT_TYPE_KR_SFP28:
+	case FW_PORT_TYPE_KR_XLAUI:
+	case FW_PORT_TYPE_KR2_100G:
+	case FW_PORT_TYPE_KR4_100G:
+	case FW_PORT_TYPE_KR4_200G:
+	case FW_PORT_TYPE_KR8_400G:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* Electrical baseT connector -- "Supported ports: [ TP ]". Distinct
+ * from the pluggable-but-baseT-fallback group below: same speed
+ * bits, different connector, different class.
+ */
+static bool fw_port_is_electrical_tp(enum fw_port_type port_type)
+{
+	switch (port_type) {
+	case FW_PORT_TYPE_BT_SGMII:
+	case FW_PORT_TYPE_BT_XFI:
+	case FW_PORT_TYPE_BT_XAUI:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* Fixed onboard optical interface -- not a removable module, so
+ * there's no "empty cage" to represent. Always TP-style speed bits.
+ */
+static bool fw_port_is_fixed_baset(enum fw_port_type port_type)
+{
+	switch (port_type) {
+	case FW_PORT_TYPE_FIBER_XFI:
+	case FW_PORT_TYPE_FIBER_XAUI:
+		return true;
+	default:
+		return fw_port_is_electrical_tp(port_type);
+	}
+}
+
+/* "Supported ports" class bit -- physical connector, not the module.
+ * Anything not backplane or electrical baseT defaults to FIBRE
+ */
+static int fw_port_class_bit(enum fw_port_type port_type)
+{
+	if (fw_port_is_backplane(port_type))
+		return ETHTOOL_LINK_MODE_Backplane_BIT;
+	if (fw_port_is_electrical_tp(port_type))
+		return ETHTOOL_LINK_MODE_TP_BIT;
+	return ETHTOOL_LINK_MODE_FIBRE_BIT;
+}
+
+/* Resolve port_type and mod_type once.
+ * downstream logic operates only on the resulting medium.
+ */
+static enum link_medium fw_port_medium(enum fw_port_type port_type,
+				       enum fw_port_module_type mod_type)
+{
+	if (fw_port_is_backplane(port_type))
+		return LINK_MEDIUM_KR;
+	if (fw_port_is_fixed_baset(port_type))
+		return LINK_MEDIUM_TP;
+
+	/* pluggable cage (SFP/SFP28/SFP56/QSFP/QSFP56/...) -- medium is
+	 * whatever module is actually plugged in right now.
+	 */
+	switch (mod_type) {
+	case FW_PORT_MOD_TYPE_TWINAX_PASSIVE:
+	case FW_PORT_MOD_TYPE_TWINAX_ACTIVE:
+		return LINK_MEDIUM_CR;
+	case FW_PORT_MOD_TYPE_SR:
+		return LINK_MEDIUM_SR;
+	case FW_PORT_MOD_TYPE_LR:
+	case FW_PORT_MOD_TYPE_ER:
+		return LINK_MEDIUM_LR;
+	case FW_PORT_MOD_TYPE_DR:
+		return LINK_MEDIUM_DR;
+	case FW_PORT_MOD_TYPE_LRM:
+		return LINK_MEDIUM_LRM;
+	default:
+		return LINK_MEDIUM_NONE;	/* no module / unreadable */
+	}
+}
+
 /**
  *	fw_caps_to_lmm - translate Firmware to ethtool Link Mode Mask
  *	@port_type: Firmware Port Type
+ *	@mod_type: Firmware Module Type
  *	@fw_caps: Firmware Port Capabilities
  *	@link_mode_mask: ethtool Link Mode Mask
  *
@@ -510,196 +622,101 @@ static unsigned int speed_to_fw_caps(int speed)
  *	Link Mode Mask.
  */
 static void fw_caps_to_lmm(enum fw_port_type port_type,
+			   enum fw_port_module_type mod_type,
 			   fw_port_cap32_t fw_caps,
 			   unsigned long *link_mode_mask)
 {
-	#define SET_LMM(__lmm_name) \
-		do { \
-			__set_bit(ETHTOOL_LINK_MODE_ ## __lmm_name ## _BIT, \
-				  link_mode_mask); \
-		} while (0)
+	enum link_medium medium = fw_port_medium(port_type, mod_type);
 
 	#define FW_CAPS_TO_LMM(__fw_name, __lmm_name) \
 		do { \
 			if (fw_caps & FW_PORT_CAP32_ ## __fw_name) \
-				SET_LMM(__lmm_name); \
+				__set_bit(ETHTOOL_LINK_MODE_ ## __lmm_name ## _BIT, \
+					  link_mode_mask); \
 		} while (0)
 
-	switch (port_type) {
-	case FW_PORT_TYPE_BT_SGMII:
-	case FW_PORT_TYPE_BT_XFI:
-	case FW_PORT_TYPE_BT_XAUI:
-		SET_LMM(TP);
+	if (medium != LINK_MEDIUM_NONE)
+		__set_bit(fw_port_class_bit(port_type), link_mode_mask);
+
+	switch (medium) {
+	case LINK_MEDIUM_TP:
 		FW_CAPS_TO_LMM(SPEED_100M, 100baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseT_Full);
 		break;
 
-	case FW_PORT_TYPE_KX4:
-	case FW_PORT_TYPE_KX:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKX4_Full);
-		break;
-
-	case FW_PORT_TYPE_KR:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		break;
-
-	case FW_PORT_TYPE_BP_AP:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseR_FEC);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		break;
-
-	case FW_PORT_TYPE_BP4_AP:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseR_FEC);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKX4_Full);
-		break;
-
-	case FW_PORT_TYPE_FIBER_XFI:
-	case FW_PORT_TYPE_FIBER_XAUI:
-	case FW_PORT_TYPE_SFP:
-	case FW_PORT_TYPE_QSFP_10G:
-	case FW_PORT_TYPE_QSA:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseT_Full);
-		break;
-
-	case FW_PORT_TYPE_BP40_BA:
-                SET_LMM(Backplane);
-                FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-                FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-                FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
-                break;
-
-	case FW_PORT_TYPE_QSFP:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_40G, 40000baseSR4_Full);
-		break;
-
-	case FW_PORT_TYPE_CR_QSFP:
-	case FW_PORT_TYPE_SFP28:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
-		break;
-
-	case FW_PORT_TYPE_KR_SFP28:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-		break;
-
-	case FW_PORT_TYPE_KR_XLAUI:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G, 1000baseKX_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
-		break;
-
-	case FW_PORT_TYPE_CR2_QSFP:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
-		break;
-
-	case FW_PORT_TYPE_SFP56:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
-		break;
-
-	case FW_PORT_TYPE_QSFP56:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_200G, 200000baseSR2_Full);
-		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR4_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseSR2_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
-		break;
-
-	case FW_PORT_TYPE_KR4_100G:
-                SET_LMM(Backplane);
-                FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-                FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-                FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-                FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
-                FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
-                FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
-                break;
-
-	case FW_PORT_TYPE_CR4_QSFP:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_40G, 40000baseSR4_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseCR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseCR2_Full);
-		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR4_Full);
-		break;
-
-	case FW_PORT_TYPE_KR_50G:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
-		break;
-
-	case FW_PORT_TYPE_KR2_100G:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
-		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
-		break;
-
-	case FW_PORT_TYPE_KR4_200G:
-		SET_LMM(FIBRE);
-		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
-		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
-		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
-		FW_CAPS_TO_LMM(SPEED_200G, 200000baseKR4_Full);
-		break;
-
-	case FW_PORT_TYPE_KR8_400G:
-		SET_LMM(Backplane);
-		FW_CAPS_TO_LMM(SPEED_1G,  1000baseT_Full);
-		FW_CAPS_TO_LMM(SPEED_10G, 10000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_25G, 25000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_40G, 40000baseKR4_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR_Full);
-		FW_CAPS_TO_LMM(SPEED_50G, 50000baseKR2_Full);
+	case LINK_MEDIUM_KR:
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseKX4_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseR_FEC);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G,  25000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G,  40000baseKR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseKR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseKR2_Full);
 		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR2_Full);
 		FW_CAPS_TO_LMM(SPEED_100G, 100000baseKR4_Full);
 		FW_CAPS_TO_LMM(SPEED_200G, 200000baseKR4_Full);
 		FW_CAPS_TO_LMM(SPEED_400G, 400000baseKR8_Full);
 		break;
+
+	case LINK_MEDIUM_CR:
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseCR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G,  25000baseCR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G,  40000baseCR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseCR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseCR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseCR4_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseCR4_Full);
+		FW_CAPS_TO_LMM(SPEED_400G, 400000baseCR8_Full);
+		break;
+
+	case LINK_MEDIUM_SR:
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseSR_Full);
+		FW_CAPS_TO_LMM(SPEED_25G,  25000baseSR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G,  40000baseSR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseSR_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseSR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseSR4_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseSR4_Full);
+		FW_CAPS_TO_LMM(SPEED_400G, 400000baseSR8_Full);
+		break;
+
+	case LINK_MEDIUM_LR:
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G,  10000baseLR_Full);
+		FW_CAPS_TO_LMM(SPEED_40G,  40000baseLR4_Full);
+		FW_CAPS_TO_LMM(SPEED_50G,  50000baseLR_ER_FR_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseLR2_ER2_FR2_Full);
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseLR4_ER4_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseLR4_ER4_FR4_Full);
+		FW_CAPS_TO_LMM(SPEED_400G, 400000baseLR8_ER8_FR8_Full);
+		break;
+
+	case LINK_MEDIUM_DR:
+		FW_CAPS_TO_LMM(SPEED_100G, 100000baseDR2_Full);
+		FW_CAPS_TO_LMM(SPEED_200G, 200000baseDR4_Full);
+		FW_CAPS_TO_LMM(SPEED_400G, 400000baseDR8_Full);
+		break;
+
+	case LINK_MEDIUM_LRM:
+		FW_CAPS_TO_LMM(SPEED_1G,   1000baseT_Full);
+		FW_CAPS_TO_LMM(SPEED_10G, 10000baseLRM_Full);
+		break;
+
+	case LINK_MEDIUM_NONE:
 	default:
 		break;
 	}
-
 	if (fw_caps & FW_PORT_CAP32_FEC_V(FW_PORT_CAP32_FEC_M)) {
 		FW_CAPS_TO_LMM(FEC_RS, FEC_RS);
 		FW_CAPS_TO_LMM(FEC_BASER_RS, FEC_BASER);
 	} else {
-		SET_LMM(FEC_NONE);
+		__set_bit(ETHTOOL_LINK_MODE_FEC_NONE_BIT, link_mode_mask);
 	}
 
 	FW_CAPS_TO_LMM(ANEG, Autoneg);
@@ -707,7 +724,6 @@ static void fw_caps_to_lmm(enum fw_port_type port_type,
 	FW_CAPS_TO_LMM(802_3_ASM_DIR, Asym_Pause);
 
 	#undef FW_CAPS_TO_LMM
-	#undef SET_LMM
 }
 
 /**
@@ -732,10 +748,46 @@ static unsigned int lmm_to_fw_caps(const unsigned long *link_mode_mask)
 	LMM_TO_FW_CAPS(100baseT_Full, SPEED_100M);
 	LMM_TO_FW_CAPS(1000baseT_Full, SPEED_1G);
 	LMM_TO_FW_CAPS(10000baseT_Full, SPEED_10G);
-	LMM_TO_FW_CAPS(40000baseSR4_Full, SPEED_40G);
+	LMM_TO_FW_CAPS(10000baseKX4_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseR_FEC, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseKR_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseCR_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseSR_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseLR_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(10000baseLRM_Full, SPEED_10G);
+	LMM_TO_FW_CAPS(25000baseKR_Full, SPEED_25G);
 	LMM_TO_FW_CAPS(25000baseCR_Full, SPEED_25G);
+	LMM_TO_FW_CAPS(25000baseSR_Full, SPEED_25G);
+	LMM_TO_FW_CAPS(40000baseKR4_Full, SPEED_40G);
+	LMM_TO_FW_CAPS(40000baseCR4_Full, SPEED_40G);
+	LMM_TO_FW_CAPS(40000baseSR4_Full, SPEED_40G);
+	LMM_TO_FW_CAPS(40000baseLR4_Full, SPEED_40G);
+	LMM_TO_FW_CAPS(50000baseKR_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(50000baseKR2_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(50000baseCR_Full, SPEED_50G);
 	LMM_TO_FW_CAPS(50000baseCR2_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(50000baseSR_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(50000baseSR2_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(50000baseLR_ER_FR_Full, SPEED_50G);
+	LMM_TO_FW_CAPS(100000baseKR2_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseKR4_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseCR2_Full, SPEED_100G);
 	LMM_TO_FW_CAPS(100000baseCR4_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseSR2_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseSR4_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseLR2_ER2_FR2_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseLR4_ER4_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(100000baseDR2_Full, SPEED_100G);
+	LMM_TO_FW_CAPS(200000baseKR4_Full, SPEED_200G);
+	LMM_TO_FW_CAPS(200000baseCR4_Full, SPEED_200G);
+	LMM_TO_FW_CAPS(200000baseSR4_Full, SPEED_200G);
+	LMM_TO_FW_CAPS(200000baseLR4_ER4_FR4_Full, SPEED_200G);
+	LMM_TO_FW_CAPS(200000baseDR4_Full, SPEED_200G);
+	LMM_TO_FW_CAPS(400000baseKR8_Full, SPEED_400G);
+	LMM_TO_FW_CAPS(400000baseCR8_Full, SPEED_400G);
+	LMM_TO_FW_CAPS(400000baseSR8_Full, SPEED_400G);
+	LMM_TO_FW_CAPS(400000baseLR8_ER8_FR8_Full, SPEED_400G);
+	LMM_TO_FW_CAPS(400000baseDR8_Full, SPEED_400G);
 
 	#undef LMM_TO_FW_CAPS
 
@@ -771,14 +823,14 @@ static int get_link_ksettings(struct net_device *dev,
 		base->mdio_support = 0;
 	}
 
-	fw_caps_to_lmm(pi->port_type, pi->link_cfg.pcaps,
+	fw_caps_to_lmm(pi->port_type, pi->mod_type, pi->link_cfg.pcaps,
 		       link_ksettings->link_modes.supported);
-	fw_caps_to_lmm(pi->port_type,
+	fw_caps_to_lmm(pi->port_type, pi->mod_type,
 		       t4_link_acaps(pi->adapter,
 				     pi->lport,
 				     &pi->link_cfg),
 		       link_ksettings->link_modes.advertising);
-	fw_caps_to_lmm(pi->port_type, pi->link_cfg.lpacaps,
+	fw_caps_to_lmm(pi->port_type, pi->mod_type, pi->link_cfg.lpacaps,
 		       link_ksettings->link_modes.lp_advertising);
 
 	base->speed = (netif_carrier_ok(dev)
