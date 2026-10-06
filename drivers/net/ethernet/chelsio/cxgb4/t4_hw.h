@@ -80,6 +80,7 @@ enum ctxt_type {
 	CTXT_INGRESS,
 	CTXT_FLM,
 	CTXT_CNM,
+	CTXT_MAX,
 };
 
 enum {

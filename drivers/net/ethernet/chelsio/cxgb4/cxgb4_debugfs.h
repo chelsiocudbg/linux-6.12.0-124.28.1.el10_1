@@ -48,6 +48,7 @@ struct t4_linux_debugfs_entry {
 	const struct file_operations *ops;
 	umode_t mode;
 	unsigned char data;
+	unsigned int req;       /* adapter requirements to create this file */
 };
 
 struct seq_tab {
@@ -56,6 +57,10 @@ struct seq_tab {
 	unsigned char width;      /* size in bytes of each entry */
 	unsigned char skip_first; /* whether the first line is a header */
 	char data[];             /* the table data */
+};
+
+enum {
+	ADAP_NEED_L2T    = 1 << 0
 };
 
 #define DEFINE_SIMPLE_DEBUGFS_FILE(name) \

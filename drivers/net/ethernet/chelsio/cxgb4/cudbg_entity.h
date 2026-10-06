@@ -279,7 +279,7 @@ struct struct_sge_ctxt_rev1_data {
 struct struct_sge_ctxt_rev1 {
        struct cudbg_ver_hdr ver_hdr;
        u32 nentries;
-       struct struct_sge_ctxt_rev1_data data[]; /* Must be last */
+	u8 data[]; /* Must be last */
 };
 
 #define CUDBG_MAX_RPLC_SIZE 128

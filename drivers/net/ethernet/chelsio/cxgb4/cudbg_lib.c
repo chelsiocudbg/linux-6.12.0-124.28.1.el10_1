@@ -2850,30 +2850,28 @@ static int cudbg_get_ctxt_region_info(struct adapter *padap, u8 sge_ctxt_size,
 	return 0;
 }
 
+static u32 cudbg_sge_ctxt_entry_size(u8 sge_ctxt_size)
+{
+	return sizeof(struct struct_sge_ctxt_rev1_data) + sge_ctxt_size;
+}
+
 int cudbg_dump_context_size(struct adapter *padap, u8 sge_ctxt_size)
 {
-	struct cudbg_region_info region_info[CTXT_CNM + 1] = { {0} };
-	u8 mem_type[CTXT_INGRESS + 1] = { 0 };
-	u32 i, size = 0;
-	int rc;
+	struct cudbg_region_info region_info[CTXT_MAX] = { {0} };
+	u32 i, nr_entries = 0;
 
-	/* Get max valid qid for each type of queue */
-	rc = cudbg_get_ctxt_region_info(padap, sge_ctxt_size, region_info, mem_type);
-	if (rc)
-		return rc;
-
-	for (i = 0; i < CTXT_CNM; i++) {
+	for (i = 0; i < CTXT_MAX; i++) {
 		if (!region_info[i].exist) {
 			if (i == CTXT_EGRESS || i == CTXT_INGRESS)
-				size += CUDBG_LOWMEM_MAX_CTXT_QIDS *
-					sge_ctxt_size;
+				nr_entries += CUDBG_LOWMEM_MAX_CTXT_QIDS;
 			continue;
 		}
-
-		size += (region_info[i].end - region_info[i].start + 1) /
-			sge_ctxt_size;
+		
+		nr_entries += (region_info[i].end -
+			       region_info[i].start + 1) /
+			       sge_ctxt_size;
 	}
-	return size * sizeof(struct struct_sge_ctxt_rev1_data);
+	return nr_entries * cudbg_sge_ctxt_entry_size(sge_ctxt_size);
 }
 
 static void cudbg_read_sge_ctxt(struct cudbg_init *pdbg_init, u32 cid,
@@ -2900,11 +2898,16 @@ static u32 cudbg_get_sge_ctxt_fw(struct cudbg_init *pdbg_init, u8 sge_ctxt_size,
                                 struct struct_sge_ctxt_rev1 *ctxt_buff,
                                 struct struct_sge_ctxt_rev1_data **out_buff)
 {
-	struct struct_sge_ctxt_rev1_data *buff = *out_buff;
+	struct struct_sge_ctxt_rev1_data *buff;
+	u8 *out = (u8 *)*out_buff;
 	u32 j, total_size = 0;
+	u32 entry_size;
 	int rc;
 
+	entry_size = cudbg_sge_ctxt_entry_size(sge_ctxt_size);
+
 	for (j = 0; j < max_qid; j++) {
+		buff = (struct struct_sge_ctxt_rev1_data *)out;
 		cudbg_read_sge_ctxt(pdbg_init, j, ctxt_type, buff->data);
 		rc = cudbg_sge_ctxt_check_valid(buff->data, ctxt_type);
 		if (!rc)
@@ -2913,21 +2916,23 @@ static u32 cudbg_get_sge_ctxt_fw(struct cudbg_init *pdbg_init, u8 sge_ctxt_size,
 		buff->ctxt_type = ctxt_type;
 		buff->ctxt_id = j;
 		buff->size = sge_ctxt_size;
-		total_size += sizeof(*buff);
+		total_size += entry_size;
 		ctxt_buff->nentries++;
-		buff++;
+		out += entry_size;
+
 		if (ctxt_type == CTXT_FLM) {
+			buff = (struct struct_sge_ctxt_rev1_data *)out;
 			cudbg_read_sge_ctxt(pdbg_init, j, CTXT_CNM, buff->data);
 			buff->ctxt_type = CTXT_CNM;
 			buff->ctxt_id = j;
 			buff->size = sge_ctxt_size;
-			total_size += sizeof(*buff);
+			total_size += entry_size;
 			ctxt_buff->nentries++;
-			buff++;
+			out += entry_size;
 		}
 	}
 
-	*out_buff = buff;
+	*out_buff = (struct struct_sge_ctxt_rev1_data *)out;
 	return total_size;
 }
 
@@ -2984,7 +2989,7 @@ int cudbg_collect_dump_context(struct cudbg_init *pdbg_init,
 		return -ENOMEM;
 	}
 
-	buff = (void *)ctxt_buff->data;
+	buff = (struct struct_sge_ctxt_rev1_data *)ctxt_buff->data;
 
 	/* Collect EGRESS and INGRESS context data.
 	 * In case of failures, fallback to collecting via FW or
@@ -3039,7 +3044,9 @@ int cudbg_collect_dump_context(struct cudbg_init *pdbg_init,
 			buff->size = sge_ctxt_size;
 			total_size += sizeof(*buff);
 			ctxt_buff->nentries++;
-			buff++;
+			buff = (struct struct_sge_ctxt_rev1_data *)
+				((u8 *)buff +
+				 cudbg_sge_ctxt_entry_size(sge_ctxt_size));
 		}
 	}
 

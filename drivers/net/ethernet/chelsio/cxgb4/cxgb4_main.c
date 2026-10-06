@@ -2641,6 +2641,253 @@ static void cxgb_get_stats(struct net_device *dev,
 		ns->rx_length_errors + stats.rx_len_err + ns->rx_fifo_errors;
 }
 
+ /* Private ioctl interface for cudbg_app diagnostics.
+  * SIOCDEVPRIVATE is the standard Linux private ioctl slot.
+  * Command codes match cxgbtool.h values so cudbg_app userspace
+  * code works unchanged.
+  */
+enum {
+	CUDBG_SETREG        = 1024,
+	CUDBG_GETREG        = 1025,
+	CUDBG_GET_SGE_CTXT  = 1059,
+	CUDBG_GET_SGE_DESC2 = 1060,
+};
+
+/* Context types - match CNTXT_TYPE_* in cxgbtool.h */
+enum {
+	CUDBG_CNTXT_TYPE_EGRESS  = 0,
+	CUDBG_CNTXT_TYPE_FL      = 1,
+	CUDBG_CNTXT_TYPE_RSP     = 2,
+	CUDBG_CNTXT_TYPE_CQ      = 3,
+	CUDBG_CNTXT_TYPE_CONG    = 4,
+};
+
+/* SGE queue types - match SGE_QTYPE_* in cxgbtool.h */
+enum {
+	CUDBG_SGE_QTYPE_TX_ETH    = 1,
+	CUDBG_SGE_QTYPE_TX_OFLD   = 2,
+	CUDBG_SGE_QTYPE_TX_CTRL   = 3,
+	CUDBG_SGE_QTYPE_FL        = 4,
+	CUDBG_SGE_QTYPE_RSP       = 5,
+	CUDBG_SGE_QTYPE_TX_CRYPTO = 6,
+};
+
+struct cudbg_reg {
+	u32 cmd;
+	u32 addr;
+	u32 val;
+};
+
+struct cudbg_mem_range {
+	u32 cmd;
+	u32 mem_id;
+	u32 addr;
+	u32 len;
+	u32 version;
+	u8  buf[];
+};
+
+static int cudbg_get_qdesc(struct adapter *adap, int qtype,
+			   unsigned int qid, unsigned int idx,
+			   unsigned char *data)
+{
+	struct sge *p = &adap->sge;
+	int i, len = sizeof(struct tx_desc);
+
+	if (qtype == CUDBG_SGE_QTYPE_TX_ETH) {
+		const struct sge_eth_txq *q = p->ethtxq;
+
+		for (i = 0; i < ARRAY_SIZE(p->ethtxq); i++, q++)
+			if (q->q.cntxt_id == qid && q->q.desc &&
+			    idx < q->q.size) {
+				memcpy(data, &q->q.desc[idx], len);
+				return len;
+			}
+	}
+
+	if (qtype == CUDBG_SGE_QTYPE_TX_CTRL) {
+		const struct sge_ctrl_txq *q = p->ctrlq;
+
+		for (i = 0; i < ARRAY_SIZE(p->ctrlq); i++, q++)
+			if (q->q.cntxt_id == qid && q->q.desc &&
+			    idx < q->q.size) {
+				memcpy(data, &q->q.desc[idx], len);
+				return len;
+			}
+	}
+
+	if (qtype == CUDBG_SGE_QTYPE_TX_OFLD ||
+	    qtype == CUDBG_SGE_QTYPE_TX_CRYPTO) {
+		struct sge_uld_txq_info *utxq_info;
+		unsigned int uld_type;
+		int i;
+
+		uld_type = (qtype == CUDBG_SGE_QTYPE_TX_OFLD) ?
+			    CXGB4_TX_OFLD : CXGB4_TX_CRYPTO;
+
+		utxq_info = adap->sge.uld_txq_info[uld_type];
+		if (!utxq_info)
+			return -EINVAL;
+
+		for (i = 0; i < utxq_info->ntxq; i++) {
+			const struct sge_uld_txq *q = &utxq_info->uldtxq[i];
+
+			if (q->q.cntxt_id == qid && q->q.desc &&
+			    idx < q->q.size) {
+				memcpy(data, &q->q.desc[idx], len);
+				return len;
+			}
+		}
+	}
+
+	if (qtype == CUDBG_SGE_QTYPE_FL) {
+		const struct sge_fl *q = NULL;
+
+		if (qid >= p->egr_start &&
+		    qid < p->egr_start + p->egr_sz)
+			q = cxgb4_sge_egr_map_get(&p->egr_map, qid);
+		if (q && idx < q->size) {
+			*(__be64 *)data = q->desc[idx];
+			return sizeof(u64);
+		}
+	}
+
+	if (qtype == CUDBG_SGE_QTYPE_RSP) {
+		const struct sge_rspq *q = NULL;
+
+		if (qid >= p->ingr_start &&
+		    qid < p->ingr_start + p->ingr_sz)
+			q = p->ingr_map[qid - p->ingr_start];
+		if (q && idx < q->size) {
+			len = q->iqe_len;
+			idx *= len / sizeof(u64);
+			memcpy(data, &q->desc[idx], len);
+			return len;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static int cxgb_extension_ioctl(struct net_device *dev,
+				void __user *useraddr)
+{
+	struct adapter *adap = netdev2adap(dev);
+	u32 cmd;
+	int ret = 0;
+
+	if (copy_from_user(&cmd, useraddr, sizeof(cmd)))
+		return -EFAULT;
+
+	switch (cmd) {
+	case CUDBG_GETREG: {
+		struct cudbg_reg edata;
+
+		if (copy_from_user(&edata, useraddr, sizeof(edata)))
+			return -EFAULT;
+		if ((edata.addr & 3) != 0 ||
+		     edata.addr >= t4_get_regs_len(adap))
+			return -EINVAL;
+		edata.val = t4_read_reg(adap, edata.addr);
+		if (copy_to_user(useraddr, &edata, sizeof(edata)))
+			return -EFAULT;
+		break;
+	}
+	case CUDBG_SETREG: {
+		struct cudbg_reg edata;
+
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+		if (copy_from_user(&edata, useraddr, sizeof(edata)))
+			return -EFAULT;
+		if ((edata.addr & 3) != 0 ||
+		     edata.addr >= t4_get_regs_len(adap))
+			return -EINVAL;
+		t4_write_reg(adap, edata.addr, edata.val);
+		break;
+	}
+	case CUDBG_GET_SGE_CTXT: {
+		u32 buf[SGE_CTXT_SIZE_T7 / 4];
+		u8 size = SGE_CTXT_SIZE;
+		struct cudbg_mem_range t;
+		enum ctxt_type ctype;
+
+		if (copy_from_user(&t, useraddr, sizeof(t)))
+			return -EFAULT;
+		if (t.len < SGE_CTXT_SIZE || t.addr > CTXTQID_M)
+			return -EINVAL;
+		if (CHELSIO_CHIP_VERSION(adap->params.chip) >= CHELSIO_T7) {
+			if (t.len < SGE_CTXT_SIZE_T7)
+				return -EINVAL;
+			size = SGE_CTXT_SIZE_T7;
+		}
+
+		switch (t.mem_id) {
+		case CUDBG_CNTXT_TYPE_EGRESS:
+			ctype = CTXT_EGRESS;
+			break;
+		case CUDBG_CNTXT_TYPE_FL:
+			ctype = CTXT_FLM;
+			break;
+		case CUDBG_CNTXT_TYPE_RSP:
+		case CUDBG_CNTXT_TYPE_CQ:
+			ctype = CTXT_INGRESS;
+			break;
+		case CUDBG_CNTXT_TYPE_CONG:
+			ctype = CTXT_CNM;
+			break;
+		default:
+			return -EINVAL;
+		}
+
+		if ((adap->flags & CXGB4_FW_OK) && !adap->use_bd)
+			ret = t4_sge_ctxt_rd(adap, adap->mbox,
+					     t.addr, ctype, buf);
+		else
+			ret = t4_sge_ctxt_rd_bd(adap, t.addr, ctype, buf);
+		if (ret)
+			return ret;
+
+		t.version = mk_adap_vers(adap);
+		if (copy_to_user(useraddr + sizeof(t), buf, size) ||
+				 copy_to_user(useraddr, &t, sizeof(t)))
+			return -EFAULT;
+		break;
+	}
+	case CUDBG_GET_SGE_DESC2: {
+		unsigned char buf[128];
+		struct cudbg_mem_range edesc;
+
+		if (copy_from_user(&edesc, useraddr, sizeof(edesc)))
+			return -EFAULT;
+		/* upper 8 bits of mem_id = queue type, lower 24 = qid */
+		ret = cudbg_get_qdesc(adap,
+				      edesc.mem_id >> 24,
+				      edesc.mem_id & 0xffffff,
+				      edesc.addr, buf);
+		if (ret < 0)
+			return ret;
+		if (edesc.len < ret)
+			return -EINVAL;
+		edesc.len = ret;
+		edesc.version = mk_adap_vers(adap);
+		if (copy_to_user(useraddr + sizeof(edesc), buf, edesc.len) ||
+				 copy_to_user(useraddr, &edesc, sizeof(edesc)))
+			return -EFAULT;
+		break;
+	}
+	default:
+		return -EOPNOTSUPP;
+	}
+	return 0;
+}
+
+static int cxgb_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+			       void __user *data, int cmd)
+{
+	return cxgb_extension_ioctl(dev, data);
+}
+
 static int cxgb_ioctl(struct net_device *dev, struct ifreq *req, int cmd)
 {
 	unsigned int mbox;
@@ -3489,7 +3736,8 @@ static struct net_device_ops cxgb4_netdev_ops = {
 	.ndo_set_mac_address  = cxgb_set_mac_addr,
 	.ndo_set_features     = cxgb_set_features,
 	.ndo_validate_addr    = eth_validate_addr,
-	.ndo_eth_ioctl         = cxgb_ioctl,
+	.ndo_eth_ioctl        = cxgb_ioctl,
+	.ndo_siocdevprivate   = cxgb_siocdevprivate,
 	.ndo_change_mtu       = cxgb_change_mtu,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller  = cxgb_netpoll,

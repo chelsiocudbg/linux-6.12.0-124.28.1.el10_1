@@ -4616,6 +4616,10 @@ static void cxgb4_add_debugfs_files(struct adapter *adap,
 
         /* debugfs support is best effort */
         for (i = 0; i < nfiles; i++) {
+		unsigned int req = files[i].req;
+
+		if ((req & ADAP_NEED_L2T) && !adap->l2t)
+			continue;
                 add_debugfs_files(adap, adap->debugfs_root, 0, &files[i], 1);
         }
 }
@@ -4638,7 +4642,7 @@ int cxgb4_setup_debugfs(struct adapter *adap)
 		{ "trace1", &mps_trc_debugfs_fops, 0600, 1 },
 		{ "trace2", &mps_trc_debugfs_fops, 0600, 2 },
 		{ "trace3", &mps_trc_debugfs_fops, 0600, 3 },
-		{ "l2t", &t4_l2t_fops, 0400, 0 },
+		{ "l2t", &t4_l2t_fops, 0400, 0, ADAP_NEED_L2T },
 		{ "crypto", &chcr_stats_debugfs_fops, 0400, 0 },
 	};
 

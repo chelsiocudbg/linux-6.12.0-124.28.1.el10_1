@@ -9087,7 +9087,7 @@ int t4_slow_intr_handler(struct adapter *adap, bool verbose)
 		{ SGE_F, -1, sge_intr_handler },
 		{ CPL_SWITCH_F, -1, cplsw_intr_handler },
 		{ ULP_RX_F, -1, ulprx_intr_handler },
-		{ PM_RX_F, -1, pmtx_intr_handler },
+		{ PM_RX_F, -1, pmrx_intr_handler },
 		{ PM_TX_F, -1, pmtx_intr_handler },
 		{ MA_F, -1, ma_intr_handler },
 		{ TP_F, -1, tp_intr_handler },
