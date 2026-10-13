@@ -1037,6 +1037,8 @@ static void c4iw_rdev_close(struct c4iw_rdev *rdev)
 
 void c4iw_dealloc(struct uld_ctx *ctx)
 {
+	/* the fatal work uses the device; let it finish first */
+	cancel_work_sync(&ctx->dev->fatal_work);
 	if (!xa_empty(&ctx->dev->cqs))
 		pr_err("iw_cxgb4: CQs pending!!\n");
 	if (!xa_empty(&ctx->dev->qps))
@@ -1163,7 +1165,11 @@ static struct c4iw_dev *c4iw_alloc(const struct cxgb4_lld_info *infop)
 	INIT_LIST_HEAD(&devp->db_fc_list);
 	INIT_LIST_HEAD(&devp->rdev.ep_glist);
 	mutex_init(&devp->rdev.ep_glist_lock);
+	/* walked by wake_all_blockers() when the device dies */
+	INIT_LIST_HEAD(&devp->rdev.blocker_list);
+	mutex_init(&devp->rdev.blocker_lock);
 	init_waitqueue_head(&devp->wait);
+	INIT_WORK(&devp->fatal_work, c4iw_fatal_work);
 	devp->avail_ird = devp->rdev.lldi.max_ird_adapter;
 
 	if (c4iw_debugfs_root) {
@@ -1361,7 +1367,7 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 	case CXGB4_STATE_START_RECOVERY:
 		pr_info("%s: Fatal Error\n", pci_name(ctx->lldi.pdev));
 		if (ctx->dev)
-			ctx->dev->rdev.flags |= T4_FATAL_ERROR;
+			c4iw_disable_device(&ctx->dev->rdev, 0);
 		fallthrough;
 	case CXGB4_STATE_DETACH:
 		pr_info("%s: Detach\n", pci_name(ctx->lldi.pdev));

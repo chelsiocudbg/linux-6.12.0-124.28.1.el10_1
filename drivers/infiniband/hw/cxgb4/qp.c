@@ -3628,6 +3628,39 @@ static void flush_qp(struct c4iw_qp *qhp)
 	__flush_qp(qhp, rchp, schp);
 }
 
+/*
+ * Flush every QP of a device that has died.  Kernel QPs get their pending
+ * WRs completed with a flush status, so e.g. the ib_mad send completions of
+ * the CM messages are delivered and the cm_ids that wait for them can be
+ * destroyed; user QPs are marked in error and their CQs are kicked, the
+ * library then flushes them itself.  Nothing is sent to the device.
+ */
+void c4iw_flush_all_qps(struct c4iw_dev *dev)
+{
+	struct c4iw_qp *qhp;
+	unsigned long index;
+
+	xa_lock_irq(&dev->qps);
+	xa_for_each(&dev->qps, index, qhp) {
+		if (!refcount_inc_not_zero(&qhp->qp_refcnt))
+			continue;
+		xa_unlock_irq(&dev->qps);
+
+		if (qhp->ibqp.uobject) {
+			/* wq.flushed of a user QP is protected by qhp->mutex */
+			mutex_lock(&qhp->mutex);
+			flush_qp(qhp);
+			mutex_unlock(&qhp->mutex);
+		} else {
+			flush_qp(qhp);
+		}
+		c4iw_iw_qp_rem_ref(&qhp->ibqp);
+
+		xa_lock_irq(&dev->qps);
+	}
+	xa_unlock_irq(&dev->qps);
+}
+
 static int rdma_fini(struct c4iw_dev *rhp, struct c4iw_qp *qhp,
 		     struct c4iw_ep *ep)
 {

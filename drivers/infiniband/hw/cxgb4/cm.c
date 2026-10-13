@@ -5004,10 +5004,30 @@ static void wake_all_blockers(struct c4iw_dev *dev)
 	mutex_unlock(&dev->rdev.blocker_lock);
 }
 
+/*
+ * CM message sent on the GSI QP holds a reference on its cm_id until its send completion is
+ * reaped, and rdma_destroy_id() waits for that reference forever.
+ * Everything that was in flight on a QP when the device died can never
+ * complete: no CPL is processed any more and the firmware is not going to
+ * answer.
+ *
+ * flush mechanism takes the QP mutex, and the caller may be a modify_qp that already holds it.
+ */
+void c4iw_fatal_work(struct work_struct *work)
+{
+	struct c4iw_dev *dev = container_of(work, struct c4iw_dev, fatal_work);
+
+	/* Wake up anybody waiting for HW/FW messages */
+	wake_all_blockers(dev);
+
+	c4iw_flush_all_qps(dev);
+}
+
 void c4iw_disable_device(struct c4iw_rdev *rdev, int recover)
 {
+	bool first = !c4iw_fatal_error(rdev);
 
-	if (!c4iw_fatal_error(rdev))
+	if (first)
 		dev_err(rdev->lldi.dev, "Disabling device due to fatal error\n");
 
 	rdev->flags |= T4_FATAL_ERROR;
@@ -5033,6 +5053,10 @@ void c4iw_disable_device(struct c4iw_rdev *rdev, int recover)
 		/* Begin cleanup of all endpoints and queue pairs */
 		kill_all_eps(dev);
 	}
+
+	/* Complete what is outstanding on the QPs, once per device. */
+	if (first)
+		schedule_work(&rdev_to_c4iw_dev(rdev)->fatal_work);
 }
 
 int __init c4iw_cm_init(void)

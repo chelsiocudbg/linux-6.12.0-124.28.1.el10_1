@@ -2100,8 +2100,15 @@ static void destroy_id_handler_unlock(struct rdma_id_private *id_priv)
 	lockdep_assert_held(&id_priv->handler_mutex);
 	spin_lock_irqsave(&id_priv->lock, flags);
 	state = id_priv->state;
-	if (READ_ONCE(id_priv->state) == RDMA_CM_DESTROYING ||
-	    READ_ONCE(id_priv->state) == RDMA_CM_DEVICE_REMOVAL)
+	/*
+	 * Only a second destroy of the same ID is skipped.  An ID in
+	 * RDMA_CM_DEVICE_REMOVAL is one whose ULP got the DEVICE_REMOVAL
+	 * event, returned 0 and is now destroying it, as
+	 * cma_send_device_removal_put() expects: it must be destroyed here,
+	 * or its cma_device reference is never dropped and cma_remove_one()
+	 * waits for ever.
+	 */
+	if (state == RDMA_CM_DESTROYING)
 		goto out_unlock;
 	id_priv->state = RDMA_CM_DESTROYING;
 	spin_unlock_irqrestore(&id_priv->lock, flags);

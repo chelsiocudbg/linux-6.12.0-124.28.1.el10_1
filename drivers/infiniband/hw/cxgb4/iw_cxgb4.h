@@ -300,7 +300,7 @@ static inline int c4iw_wait_for_reply(struct c4iw_rdev *rdev,
 		dev_err(rdev->lldi.dev,
 			"%s - device not responding (disabling device) - tid %u qpid %u\n",
 			func, hwtid, qpid);
-		rdev->flags |= T4_FATAL_ERROR;
+		c4iw_disable_device(rdev, 0);
 		wr_waitp->ret = -EIO;
 		goto out;
 	}
@@ -359,6 +359,8 @@ struct c4iw_dev {
 	struct list_head db_fc_list;
 	u32 avail_ird;
 	wait_queue_head_t wait;
+	/* flushes every QP once the device is declared dead */
+	struct work_struct fatal_work;
 };
 
 struct uld_ctx {
@@ -1374,6 +1376,8 @@ int c4iw_iw_accept_cr(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_para
 int c4iw_iw_reject_cr(struct iw_cm_id *cm_id, const void *pdata, u8 pdata_len);
 void c4iw_iw_qp_add_ref(struct ib_qp *qp);
 void c4iw_iw_qp_rem_ref(struct ib_qp *qp);
+void c4iw_flush_all_qps(struct c4iw_dev *dev);
+void c4iw_fatal_work(struct work_struct *work);
 struct ib_mr *c4iw_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
                             u32 max_num_sg);
 int c4iw_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg, int sg_nents,
