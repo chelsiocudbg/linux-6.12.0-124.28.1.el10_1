@@ -1503,6 +1503,19 @@ int t4vf_set_rxmode(struct adapter *adapter, unsigned int viid,
 	return t4vf_wr_mbox_core(adapter, &cmd, sizeof(cmd), NULL, sleep_ok);
 }
 
+/*
+ * Firmware returns FW_VI_MAC_ADD_MAC/FW_VI_MAC_ADD_PERSIST_MAC unchanged in
+ * the 10-bit FW_VI_MAC_CMD IDX field when it could not allocate an MPS TCAM
+ * entry (e.g. the per-PF exact match limit is reached).  On T7 the TCAM has
+ * more entries than these values, so they must not be treated as valid
+ * indices; otherwise the address is neither in the TCAM nor in the hash.
+ */
+static inline unsigned int t4vf_mps_max_idx(unsigned int tcam_size)
+{
+	return tcam_size < FW_VI_MAC_ADD_PERSIST_MAC ?
+		tcam_size : FW_VI_MAC_ADD_PERSIST_MAC;
+}
+
 /**
  *	t4vf_alloc_mac_filt - allocates exact-match filters for MAC addresses
  *	@adapter: the adapter
@@ -1533,6 +1546,7 @@ int t4vf_alloc_mac_filt(struct adapter *adapter, unsigned int viid, bool free,
 	unsigned int rem = naddr;
 	struct fw_vi_mac_cmd cmd, rpl;
 	unsigned int max_naddr = adapter->params.arch.mps_tcam_size;
+	unsigned int max_idx = t4vf_mps_max_idx(max_naddr);
 
 	if (naddr > max_naddr)
 		return -EINVAL;
@@ -1575,10 +1589,10 @@ int t4vf_alloc_mac_filt(struct adapter *adapter, unsigned int viid, bool free,
 
 			if (idx)
 				idx[offset+i] =
-					(index >= max_naddr
+					(index >= max_idx
 					 ? 0xffff
 					 : index);
-			if (index < max_naddr)
+			if (index < max_idx)
 				nfilters++;
 			else if (hash)
 				*hash |= (1ULL << hash_mac_addr(addr[offset+i]));
@@ -1656,7 +1670,7 @@ int t4vf_free_mac_filt(struct adapter *adapter, unsigned int viid,
 			u16 index = FW_VI_MAC_CMD_IDX_G(
 						be16_to_cpu(p->valid_to_idx));
 
-			if (index < max_naddr)
+			if (index < t4vf_mps_max_idx(max_naddr))
 				nfilters++;
 		}
 
@@ -1718,7 +1732,7 @@ int t4vf_change_mac(struct adapter *adapter, unsigned int viid,
 	if (ret == 0) {
 		p = &rpl.u.exact[0];
 		ret = FW_VI_MAC_CMD_IDX_G(be16_to_cpu(p->valid_to_idx));
-		if (ret >= max_mac_addr)
+		if (ret >= t4vf_mps_max_idx(max_mac_addr))
 			ret = -ENOMEM;
 	}
 	return ret;

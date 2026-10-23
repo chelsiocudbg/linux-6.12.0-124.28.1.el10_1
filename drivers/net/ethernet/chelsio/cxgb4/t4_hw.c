@@ -12404,6 +12404,19 @@ int t4_alloc_raw_mac_filt(struct adapter *adap, unsigned int viid,
 	return ret;
 }
 
+/*
+ * Firmware returns FW_VI_MAC_ADD_MAC/FW_VI_MAC_ADD_PERSIST_MAC unchanged in
+ * the 10-bit FW_VI_MAC_CMD IDX field when it could not allocate an MPS TCAM
+ * entry (e.g. the per-PF exact match limit is reached).  On T7 the TCAM has
+ * more entries than these values, so they must not be treated as valid
+ * indices; otherwise the address is neither in the TCAM nor in the hash.
+ */
+static inline unsigned int t4_mps_max_idx(unsigned int tcam_size)
+{
+	return tcam_size < FW_VI_MAC_ADD_PERSIST_MAC ?
+		tcam_size : FW_VI_MAC_ADD_PERSIST_MAC;
+}
+
 /**
  *	t4_alloc_mac_filt - allocates exact-match filters for MAC addresses
  *	@adap: the adapter
@@ -12434,6 +12447,7 @@ int t4_alloc_mac_filt(struct adapter *adap, unsigned int mbox,
 	struct fw_vi_mac_cmd c;
 	unsigned int nfilters = 0;
 	unsigned int max_naddr = adap->params.arch.mps_tcam_size;
+	unsigned int max_idx = t4_mps_max_idx(max_naddr);
 	unsigned int rem = naddr;
 
 	if (naddr > max_naddr)
@@ -12479,9 +12493,9 @@ int t4_alloc_mac_filt(struct adapter *adap, unsigned int mbox,
 					be16_to_cpu(p->valid_to_idx));
 
 			if (idx)
-				idx[offset + i] = (index >= max_naddr ?
+				idx[offset + i] = (index >= max_idx ?
 						   0xffff : index);
-			if (index < max_naddr)
+			if (index < max_idx)
 				nfilters++;
 			else if (hash)
 				*hash |= (1ULL <<
@@ -12566,7 +12580,7 @@ int t4_free_mac_filt(struct adapter *adap, unsigned int mbox,
 			u16 index = FW_VI_MAC_CMD_IDX_G(
 						be16_to_cpu(p->valid_to_idx));
 
-			if (index < max_naddr)
+			if (index < t4_mps_max_idx(max_naddr))
 				nfilters++;
 		}
 
@@ -12623,7 +12637,7 @@ int t4_change_mac(struct adapter *adap, unsigned int mbox, unsigned int viid,
 	ret = t4_wr_mbox(adap, mbox, &c, sizeof(c), &c);
 	if (ret == 0) {
 		ret = FW_VI_MAC_CMD_IDX_G(be16_to_cpu(p->valid_to_idx));
-		if (ret >= max_mac_addr)
+		if (ret >= t4_mps_max_idx(max_mac_addr))
 			ret = -ENOMEM;
 		if (smt_idx) {
 			if (adap->params.viid_smt_extn_support) {
