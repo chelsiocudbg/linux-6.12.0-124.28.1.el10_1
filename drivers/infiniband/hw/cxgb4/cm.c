@@ -4052,7 +4052,11 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 	c4iw_get_ep(&ep->com);
 
 	rdev = &ep->com.dev->rdev;
-	if (c4iw_fatal_error(rdev)) {
+	/*
+	 * A DEAD endpoint has already been released, e.g. by kill_ep() from
+	 * the fatal work: releasing it again would drop a reference twice.
+	 */
+	if (c4iw_fatal_error(rdev) && ep->com.state != DEAD) {
 		fatal = 1;
 		close_complete_upcall(ep, -EIO);
 		ep->com.state = DEAD;
@@ -5010,6 +5014,9 @@ static void wake_all_blockers(struct c4iw_dev *dev)
  * Everything that was in flight on a QP when the device died can never
  * complete: no CPL is processed any more and the firmware is not going to
  * answer.
+ * An iWARP endpoint that sent an ABORT or a CLOSE waits for the reply with
+ * no timeout and keeps its reference on the QP, so the endpoints are killed
+ * here as the recovery path does, or destroying the QP never returns.
  *
  * flush mechanism takes the QP mutex, and the caller may be a modify_qp that already holds it.
  */
@@ -5019,6 +5026,13 @@ void c4iw_fatal_work(struct work_struct *work)
 
 	/* Wake up anybody waiting for HW/FW messages */
 	wake_all_blockers(dev);
+
+	/*
+	 * T4_FATAL_ERROR is set, so no more CPLs are queued; let
+	 * process_work() finish the ones it has before the endpoints go.
+	 */
+	flush_workqueue(workq);
+	kill_all_eps(dev);
 
 	c4iw_flush_all_qps(dev);
 }

@@ -4107,12 +4107,47 @@ irq_handler_t t4_intr_handler(struct adapter *adap)
 	return t4_sge_intr_msix;
 }
 
+/*
+ * Consecutive RX timer ticks (RX_QCHECK_PERIOD each) on which the adapter
+ * must read back as all-ones before it is declared dead: long enough to
+ * ride over a function reset, short enough that the ULDs stop waiting on
+ * an adapter that was powered down or dropped off the bus.
+ */
+#define ADAPTER_DEAD_TICKS 6
+
+/*
+ * An adapter that was put in D3, lost power or dropped off the bus answers
+ * every MMIO read with all-ones and never raises an interrupt, so nothing
+ * else notices that it is gone: the ULDs keep waiting for replies that
+ * never come (an iWARP endpoint waits for ABORT_RPL with no timeout).
+ * PL_WHOAMI never reads all-ones on a live adapter.  AER/EEH recovery
+ * (pci_channel_offline()) is left to the PCI error handlers.
+ */
+static bool cxgb4_adapter_dead(struct adapter *adap)
+{
+	struct sge *s = &adap->sge;
+
+	if (pci_channel_offline(cxgb4_pci_dev(adap)) ||
+	    t4_read_reg(adap, PL_WHOAMI_A) != 0xffffffff) {
+		s->dead_ticks = 0;
+		return false;
+	}
+	return ++s->dead_ticks >= ADAPTER_DEAD_TICKS;
+}
+
 static void cxgb4_sge_rx_timer_cb(struct timer_list *t)
 {
 	struct adapter *adap = from_timer(adap, t, sge.rx_timer);
 	struct sge *s = &adap->sge;
 	unsigned long m;
 	unsigned int i;
+
+	if (cxgb4_adapter_dead(adap)) {
+		dev_err(adap->pdev_dev,
+			"adapter registers read all-ones, declaring it dead\n");
+		t4_fatal_err(adap);
+		return;	/* nothing to maintain on a dead adapter */
+	}
 
 	for (i = 0; i < BITS_TO_LONGS(s->egr_sz); i++)
 		for (m = s->starving_fl[i]; m; m &= m - 1) {

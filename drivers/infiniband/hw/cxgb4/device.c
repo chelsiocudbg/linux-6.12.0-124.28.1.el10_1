@@ -1337,6 +1337,19 @@ nomem:
 	return -1;
 }
 
+static void c4iw_notify_fatal(struct c4iw_dev *dev)
+{
+	struct ib_event event = {};
+
+	if (dev->fatal_notified)
+		return;
+	dev->fatal_notified = true;
+
+	event.event  = IB_EVENT_DEVICE_FATAL;
+	event.device = &dev->ibdev;
+	ib_dispatch_event(&event);
+}
+
 static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 {
 	struct uld_ctx *ctx = handle;
@@ -1364,7 +1377,23 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 			c4iw_remove(ctx);
 		break;
 	case CXGB4_STATE_FATAL_ERROR:
+		/*
+		 * The adapter stays dead until it is removed from the PCI bus,
+		 * so complete what is outstanding and tell the consumers, but
+		 * keep the device registered.  Consumers release their PDs,
+		 * QPs and CQs on their own time after IB_EVENT_DEVICE_FATAL;
+		 * freeing the device under them leaks those objects (restrack
+		 * WARN in ib_dealloc_device) and leaves them a stale device.
+		 * The device goes away on CXGB4_STATE_DETACH.
+		 */
+		pr_info("%s: Fatal Error\n", pci_name(ctx->lldi.pdev));
+		if (ctx->dev) {
+			c4iw_disable_device(&ctx->dev->rdev, 0);
+			c4iw_notify_fatal(ctx->dev);
+		}
+		break;
 	case CXGB4_STATE_START_RECOVERY:
+		/* EEH recovery: the device is created again on CXGB4_STATE_UP */
 		pr_info("%s: Fatal Error\n", pci_name(ctx->lldi.pdev));
 		if (ctx->dev)
 			c4iw_disable_device(&ctx->dev->rdev, 0);
@@ -1372,11 +1401,7 @@ static int c4iw_uld_state_change(void *handle, enum cxgb4_state new_state)
 	case CXGB4_STATE_DETACH:
 		pr_info("%s: Detach\n", pci_name(ctx->lldi.pdev));
 		if (ctx->dev) {
-			struct ib_event event = {};
-
-			event.event  = IB_EVENT_DEVICE_FATAL;
-			event.device = &ctx->dev->ibdev;
-			ib_dispatch_event(&event);
+			c4iw_notify_fatal(ctx->dev);
 			c4iw_remove(ctx);
 		}
 		break;

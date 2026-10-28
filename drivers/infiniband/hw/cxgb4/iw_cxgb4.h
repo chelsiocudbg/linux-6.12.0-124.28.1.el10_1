@@ -361,6 +361,8 @@ struct c4iw_dev {
 	wait_queue_head_t wait;
 	/* flushes every QP once the device is declared dead */
 	struct work_struct fatal_work;
+	/* IB_EVENT_DEVICE_FATAL has been dispatched */
+	bool fatal_notified;
 };
 
 struct uld_ctx {

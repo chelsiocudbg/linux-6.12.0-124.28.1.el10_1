@@ -1091,6 +1091,7 @@ struct sge {
 	u32 fl_starve_thres;        /* Free List starvation threshold */
 
 	struct sge_idma_monitor_state idma_monitor;
+	unsigned int dead_ticks;     /* RX timer ticks the adapter read all-ones */
 	unsigned int egr_start;
 	unsigned int egr_sz;
 	unsigned int ingr_start;
