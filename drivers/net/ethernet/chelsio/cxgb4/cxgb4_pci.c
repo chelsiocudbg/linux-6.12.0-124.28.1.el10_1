@@ -16,6 +16,63 @@
 
 #include "cxgb4_pci.h"
 
+static unsigned int pcie_cor_err_mask = 0x1;
+module_param(pcie_cor_err_mask, uint, 0444);
+MODULE_PARM_DESC(pcie_cor_err_mask, "Mask PCIe AER correctable errors on all PFs (default=0x1(Receiver Error))");
+
+#define CXGB4_PCIE_COR_ERR_VALID (PCI_ERR_COR_RCVR | PCI_ERR_COR_BAD_TLP | \
+				  PCI_ERR_COR_BAD_DLLP | PCI_ERR_COR_REP_ROLL | \
+				  PCI_ERR_COR_REP_TIMER | PCI_ERR_COR_ADV_NFAT | \
+				  PCI_ERR_COR_INTERNAL | PCI_ERR_COR_LOG_OVER)
+
+static void cxgb4_pci_mask_cor_errs_one(struct pci_dev *pdev, u32 bits)
+{
+	int aer = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
+	u32 old;
+
+	if (!aer)
+		return;
+
+	pci_read_config_dword(pdev, aer + PCI_ERR_COR_MASK, &old);
+	if ((old & bits) == bits)
+		return;
+
+	pci_write_config_dword(pdev, aer + PCI_ERR_COR_MASK, old | bits);
+	dev_info(&pdev->dev, "AER correctable error mask %#010x -> %#010x\n",
+		 old, old | bits);
+}
+
+static void cxgb4_pci_mask_cor_errs(struct adapter *adap)
+{
+	struct pci_dev *pdev = cxgb4_pci_dev(adap);
+	u32 bits = pcie_cor_err_mask & CXGB4_PCIE_COR_ERR_VALID;
+	struct pci_dev *sib;
+	int fn;
+
+	if (pcie_cor_err_mask & ~CXGB4_PCIE_COR_ERR_VALID)
+		dev_warn(&pdev->dev, "pcie_cor_err_mask: ignoring reserved bits %#x\n",
+			 pcie_cor_err_mask & ~CXGB4_PCIE_COR_ERR_VALID);
+	if (!bits)
+		return;
+
+	cxgb4_pci_mask_cor_errs_one(pdev, bits);
+
+	if (!cxgb4_is_primary_pf(adap) || pdev->is_virtfn)
+		return;
+
+	for (fn = 0; fn < 8; fn++) {
+		if (fn == PCI_FUNC(pdev->devfn))
+			continue;
+		sib = pci_get_slot(pdev->bus,
+				   PCI_DEVFN(PCI_SLOT(pdev->devfn), fn));
+		if (!sib)
+			continue;
+		if (sib->vendor == PCI_VENDOR_ID_CHELSIO && !sib->is_virtfn)
+			cxgb4_pci_mask_cor_errs_one(sib, bits);
+		pci_dev_put(sib);
+	}
+}
+
 static void cxgb4_pci_set_primary_pf(struct adapter *adap)
 {
        adap->primary_pf = CXGB4_UNIFIED_PF;
@@ -121,6 +178,8 @@ int cxgb4_pci_chip_init(struct adapter *adap)
 
        adap->mbox = func;
        adap->pf = func;
+
+	cxgb4_pci_mask_cor_errs(adap);
 
        ret = cxgb4_mbox_log_init(adap);
        if (ret < 0)
