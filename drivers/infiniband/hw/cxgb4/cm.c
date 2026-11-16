@@ -4095,9 +4095,23 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 				ep->com.state = ABORTING;
 			} else
 				ep->com.state = MORIBUND;
+		} else if (abrupt && test_bit(TIMEOUT, &ep->com.flags)) {
+			/*
+			 * The close timed out: abort, or the ep never reaches
+			 * DEAD and keeps its QP reference.
+			 */
+			close = 1;
+			ep->com.state = ABORTING;
 		}
 		break;
 	case MORIBUND:
+		/* Only half of the close completed before the timeout. */
+		if (abrupt && test_bit(TIMEOUT, &ep->com.flags)) {
+			close = 1;
+			ep->com.state = ABORTING;
+			break;
+		}
+		fallthrough;
 	case ABORTING:
 	case DEAD:
 		pr_debug("ignoring disconnect ep %p state %u\n",
