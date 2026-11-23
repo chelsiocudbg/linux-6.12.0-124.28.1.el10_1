@@ -1734,9 +1734,13 @@ static int add_ipsec_header(struct c4iw_ah *ahp, u8 *ud_hdrp,
 
 		if (tunnel) {
 			ip_hdr->version = 6;
-			ip_hdr->priority = grh->traffic_class;
+			/* higher nibble is 'priority', lower nibble is
+			 * the top of flow_lbl[0], above the flow label.
+			 */
+			ip_hdr->priority = grh->traffic_class >> 4;
 			ip_hdr->hop_limit = grh->hop_limit;
-			ip_hdr->flow_lbl[0] = (grh->flow_label >> 16) & 0xFF;
+			ip_hdr->flow_lbl[0] = ((grh->traffic_class & 0xF) << 4) |
+					      ((grh->flow_label >> 16) & 0xF);
 			ip_hdr->flow_lbl[1] = (grh->flow_label >> 8) & 0xFF;
 			ip_hdr->flow_lbl[2] = grh->flow_label & 0xFF;
 			memcpy((u8 *)&ip_hdr->saddr, x->local_ip_addr, sizeof(struct in6_addr));
@@ -1753,7 +1757,7 @@ static int add_ipsec_header(struct c4iw_ah *ahp, u8 *ud_hdrp,
 			ip_hdr->frag_off = htons(IP_DF);
 			ip_hdr->saddr = x->local_ip_addr[3];
 			ip_hdr->daddr = x->dest_ip_addr[3];
-			ip_hdr->tos = htonl(grh->flow_label);
+			ip_hdr->tos = grh->traffic_class;
 			ip_hdr->ttl = grh->hop_limit;
 			hdr_len += sizeof(struct iphdr);
 		}
@@ -1859,7 +1863,7 @@ static int build_v2_ud_rdma_send(struct c4iw_qp *qhp, union t4_wr *wqe,
 		/* IP header */
 		ud_hdr.ip4.frag_off = htons(IP_DF);
 		ud_hdr.ip4.protocol = IPPROTO_UDP;
-		ud_hdr.ip4.tos = htonl(grh->flow_label);
+		ud_hdr.ip4.tos = grh->traffic_class;
 		ud_hdr.ip4.ttl = grh->hop_limit;
 		ud_hdr.ip4.tot_len = 0;
 		memcpy(&ud_hdr.ip4.daddr, &ahp->dest_ip_addr[3], sizeof(struct in_addr));
@@ -4536,7 +4540,7 @@ static int rdma_roce_init(struct c4iw_dev *rhp, struct c4iw_qp *qhp)
 			/* IP header */
 			ud_hdr.ip4.frag_off = htons(IP_DF);
 			ud_hdr.ip4.protocol = IPPROTO_UDP;
-			ud_hdr.ip4.tos = htonl(grh->flow_label);
+			ud_hdr.ip4.tos = grh->traffic_class;
 			ud_hdr.ip4.ttl = grh->hop_limit;
 			ud_hdr.ip4.tot_len = 0;
 			memcpy(&ud_hdr.ip4.daddr, &ahp->dest_ip_addr[3], 4);
